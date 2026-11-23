@@ -115,6 +115,7 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
     u64 base = 0, index = 0, disp = 0, segbase = 0;
     u8 sib = 0, scale = 0;
     int use_base = 1;
+    int use_index = 0;
     if (g_pre & PRE_SEGGS) segbase = c->msr_gs_base;
     else if (g_pre & PRE_SEGFS) segbase = c->msr_fs_base;
 
@@ -149,7 +150,11 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
         sib = fetch8(c);
         scale = sib >> 6;
         index = (u64)(((sib >> 3) & 7) + ((rex & 2) ? 8 : 0));
-        if (index == 4) index = 0;              /* no index */
+        if (((sib >> 3) & 7) == 4 && !(rex & 2)) {
+            index = 0;                          /* SIB index=100b 表示无索引 */
+        } else {
+            use_index = 1;
+        }
         base = (u64)(sib & 7);
         if (base == 5 && mod == 0) {
             base = 0;
@@ -170,7 +175,8 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
     } else if (mod == 2) {
         disp = sx(fetch_n(c, 4), 32);
     }
-    o.addr = (use_base ? c->r[base & 15] : 0) + (index << scale) + disp + segbase;
+    o.addr = (use_base ? c->r[base & 15] : 0) +
+             (use_index ? (c->r[index & 15] << scale) : 0) + disp + segbase;
     return o;
 }
 
