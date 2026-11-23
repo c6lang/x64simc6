@@ -1,0 +1,269 @@
+/* mem.c6 —— 客户机物理内存、MMIO 分派与 4 级分页 */
+#include "c6sim.h"
+
+#define TLB_BITS 13
+#define TLB_SIZE (1 << TLB_BITS)
+#define TLB_MASK (TLB_SIZE - 1)
+
+static u64 tlb_tag[TLB_SIZE];
+static u64 tlb_val[TLB_SIZE];
+
+/* tlb_val 位：bit0=P, bit1=W, bit2=U, bit3=X，高位是 4KiB 对齐的物理页基址 */
+#define TV_P ((u64)1 << 0)
+#define TV_W ((u64)1 << 1)
+#define TV_U ((u64)1 << 2)
+#define TV_X ((u64)1 << 3)
+
+void mem_tlb_flush(void)
+{
+    u32 i = 0;
+    for (i = 0; i < TLB_SIZE; i++) {
+        tlb_tag[i] = ~((u64)0);
+        tlb_val[i] = 0;
+    }
+}
+
+static u8 phys_r8(u64 a)
+{
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+        return (u8)mmio_r(a, 1);
+    if (a < RAM_SIZE)
+        return g_m.ram[(u32)a];
+    return 0xff;
+}
+
+static u16 phys_r16(u64 a)
+{
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+        return (u16)mmio_r(a, 2);
+    if (a < RAM_SIZE - 1)
+        return (u16)g_m.ram[(u32)a] | ((u16)g_m.ram[(u32)a + 1] << 8);
+    return 0xffff;
+}
+
+static u32 phys_r32(u64 a)
+{
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+        return (u32)mmio_r(a, 4);
+    if (a < RAM_SIZE - 3) {
+        u32 p = (u32)a;
+        return (u32)g_m.ram[p] | ((u32)g_m.ram[p + 1] << 8) |
+               ((u32)g_m.ram[p + 2] << 16) | ((u32)g_m.ram[p + 3] << 24);
+    }
+    return 0xffffffff;
+}
+
+static u64 phys_r64(u64 a)
+{
+    return (u64)phys_r32(a) | ((u64)phys_r32(a + 4) << 32);
+}
+
+static void phys_w8(u64 a, u8 v)
+{
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
+        mmio_w(a, 1, v);
+        return;
+    }
+    if (a < RAM_SIZE)
+        g_m.ram[(u32)a] = v;
+}
+
+static void phys_w16(u64 a, u16 v)
+{
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
+        mmio_w(a, 2, v);
+        return;
+    }
+    if (a < RAM_SIZE - 1) {
+        g_m.ram[(u32)a] = (u8)v;
+        g_m.ram[(u32)a + 1] = (u8)(v >> 8);
+    }
+}
+
+static void phys_w32(u64 a, u32 v)
+{
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
+        mmio_w(a, 4, v);
+        return;
+    }
+    if (a < RAM_SIZE - 3) {
+        u32 p = (u32)a;
+        g_m.ram[p] = (u8)v;
+        g_m.ram[p + 1] = (u8)(v >> 8);
+        g_m.ram[p + 2] = (u8)(v >> 16);
+        g_m.ram[p + 3] = (u8)(v >> 24);
+    }
+}
+
+static void phys_w64(u64 a, u64 v)
+{
+    phys_w32(a, (u32)v);
+    phys_w32(a + 4, (u32)(v >> 32));
+}
+
+static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
+{
+    u32 ec = (wr ? 2 : 0) | (us ? 4 : 0);
+    if (pf_ec)
+        *pf_ec = ec;
+    g_m.cpu.cr[2] = va;
+    cpu_raise(&g_m.cpu, EXC_PF, 1, ec);
+}
+
+/* user: 0=内核数据, 1=用户数据, 2=取指 */
+u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
+{
+    struct CPUState *c = &g_m.cpu;
+    u64 vpn = 0, idx = 0, e = 0, pa = 0, flags = 0;
+    /* user: 0=内核数据, 1=用户数据, 2=内核取指（需查 NX，但不要求 U/S=1） */
+    u32 level = 0, shift = 0, is_user = (user == 1);
+
+    if (!(c->cr[0] & CR0_PG))
+        return va;
+
+    vpn = va >> 12;
+    idx = vpn & TLB_MASK;
+    if (tlb_tag[idx] == vpn) {
+        flags = tlb_val[idx] & 15;
+        if ((flags & TV_P) && (!wr || (flags & TV_W)) &&
+            (!is_user || (flags & TV_U)) && (!user || 1) &&
+            (user != 2 || !(flags & TV_X)))
+            return (tlb_val[idx] & ~((u64)15)) | (va & 0xfff);
+    }
+
+    pa = c->cr[3] & ~((u64)0xfff);
+    for (level = 0; level < 4; level++) {
+        shift = 39 - level * 9;
+        e = phys_r64(pa + (((va >> shift) & 0x1ff) << 3));
+        if (!(e & 1)) {
+            pg_fault(va, wr, is_user, pf_ec);
+            return 0;
+        }
+        if (is_user && !(e & 4)) {
+            pg_fault(va, wr, 1, pf_ec);
+            return 0;
+        }
+        if (wr && !(e & 2)) {
+            pg_fault(va, wr, is_user, pf_ec);
+            return 0;
+        }
+        if (level == 3 && (e & 0x80)) {
+            /* 1 GiB 页 */
+            if ((c->efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
+                pg_fault(va, wr, is_user, pf_ec);
+                return 0;
+            }
+            flags = TV_P | TV_U;
+            if (e & 2) flags |= TV_W;
+            if (!(e & ((u64)1 << 63))) flags |= TV_X;
+            pa = (e & ~((u64)0x3fffffff)) | (va & 0x3fffffff);
+            tlb_tag[idx] = vpn;
+            tlb_val[idx] = (pa & ~((u64)0xfff)) | flags;
+            return pa;
+        }
+        if (level == 2 && (e & 0x80)) {
+            /* 2 MiB 页 */
+            if ((c->efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
+                pg_fault(va, wr, is_user, pf_ec);
+                return 0;
+            }
+            flags = TV_P | TV_U;
+            if (e & 2) flags |= TV_W;
+            if (!(e & ((u64)1 << 63))) flags |= TV_X;
+            pa = (e & ~((u64)0x1fffff)) | (va & 0x1fffff);
+            tlb_tag[idx] = vpn;
+            tlb_val[idx] = (pa & ~((u64)0xfff)) | flags;
+            return pa;
+        }
+        pa = e & ~((u64)0xfff);
+    }
+    if ((c->efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
+        pg_fault(va, wr, is_user, pf_ec);
+        return 0;
+    }
+    flags = TV_P | TV_U | TV_X;
+    if (e & 2) flags |= TV_W;
+    pa = (e & ~((u64)0xfff)) | (va & 0xfff);
+    tlb_tag[idx] = vpn;
+    tlb_val[idx] = (pa & ~((u64)0xfff)) | flags;
+    return pa;
+}
+
+u8 mem_fetch8(u64 a)
+{
+    u64 pa = mem_translate(a, 0, 2, 0);
+    return phys_r8(pa);
+}
+
+u8 mem_r8(u64 a)
+{
+    u64 pa = mem_translate(a, 0, 0, 0);
+    return phys_r8(pa);
+}
+
+u16 mem_r16(u64 a)
+{
+    u64 pa = mem_translate(a, 0, 0, 0);
+    if ((pa & 0xfff) > 0xffe)
+        return (u16)mem_r8(a) | ((u16)mem_r8(a + 1) << 8);
+    return phys_r16(pa);
+}
+
+u32 mem_r32(u64 a)
+{
+    u64 pa = mem_translate(a, 0, 0, 0);
+    if ((pa & 0xfff) > 0xffc) {
+        u32 v = 0;
+        u32 i = 0;
+        for (i = 0; i < 4; i++)
+            v |= (u32)mem_r8(a + i) << (i * 8);
+        return v;
+    }
+    return phys_r32(pa);
+}
+
+u64 mem_r64(u64 a)
+{
+    return (u64)mem_r32(a) | ((u64)mem_r32(a + 4) << 32);
+}
+
+void mem_w8(u64 a, u8 v)
+{
+    phys_w8(mem_translate(a, 1, 0, 0), v);
+}
+
+void mem_w16(u64 a, u16 v)
+{
+    u64 pa = mem_translate(a, 1, 0, 0);
+    if ((pa & 0xfff) > 0xffe) {
+        mem_w8(a, (u8)v);
+        mem_w8(a + 1, (u8)(v >> 8));
+        return;
+    }
+    phys_w16(pa, v);
+}
+
+void mem_w32(u64 a, u32 v)
+{
+    u64 pa = mem_translate(a, 1, 0, 0);
+    if ((pa & 0xfff) > 0xffc) {
+        u32 i = 0;
+        for (i = 0; i < 4; i++)
+            mem_w8(a + i, (u8)(v >> (i * 8)));
+        return;
+    }
+    phys_w32(pa, v);
+}
+
+void mem_w64(u64 a, u64 v)
+{
+    mem_w32(a, (u32)v);
+    mem_w32(a + 4, (u32)(v >> 32));
+}
+
+void mem_copy_from(u64 dst, const u8 *src, u64 n)
+{
+    u64 i = 0;
+    for (i = 0; i < n; i++)
+        mem_w8(dst + i, src[i]);
+}

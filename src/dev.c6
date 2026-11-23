@@ -1,0 +1,401 @@
+/* dev.c6 —— 最小设备模型：16550A / 8259A / 8254 / CMOS / PCI / LAPIC */
+#include "c6sim.h"
+
+/* ---------------- 串口环形缓冲 ---------------- */
+
+int serial_take_output(u8 *dst, int cap)
+{
+    int n = 0;
+    struct SerialState *s = &g_m.serial;
+    while (n < cap && s->out_tail != s->out_head) {
+        dst[n] = s->out[(u32)s->out_tail & 0xffff];
+        s->out_tail++;
+        n++;
+    }
+    return n;
+}
+
+void serial_feed(const u8 *src, int len)
+{
+    int i = 0;
+    struct SerialState *s = &g_m.serial;
+    for (i = 0; i < len; i++) {
+        s->in[(u32)s->in_head & 0xfff] = src[i];
+        s->in_head++;
+    }
+    if (len > 0) {
+        if (!(s->lsr & 1)) {
+            s->lsr |= 1;                 /* DR */
+            if (s->ier & 1)
+                pic_raise(&g_m, 4);
+        }
+    }
+}
+
+static u8 serial_read(u32 port)
+{
+    struct SerialState *s = &g_m.serial;
+    u32 off = port & 7;
+    if (s->lcr & 0x80) {
+        if (off == 0) return s->dll;
+        if (off == 1) return s->dlm;
+    }
+    if (off == 0) {
+        if (s->in_tail != s->in_head) {
+            s->rbr = s->in[(u32)s->in_tail & 0xfff];
+            s->in_tail++;
+            if (s->in_tail == s->in_head)
+                s->lsr &= ~((u8)1);
+        }
+        return s->rbr;
+    }
+    if (off == 1) return s->ier;
+    if (off == 2) {
+        if ((s->ier & 1) && (s->in_tail != s->in_head)) return 4;  /* RBR */
+        if (s->ier & 2) return 2;                                  /* THRE */
+        return 1;                                                  /* none */
+    }
+    if (off == 3) return s->lcr;
+    if (off == 4) return s->mcr;
+    if (off == 5) return s->lsr;
+    if (off == 6) return s->msr;
+    return s->fcr;
+}
+
+static void serial_write(u32 port, u8 v)
+{
+    struct SerialState *s = &g_m.serial;
+    u32 off = port & 7;
+    if (s->lcr & 0x80) {
+        if (off == 0) { s->dll = v; return; }
+        if (off == 1) { s->dlm = v; return; }
+    }
+    switch (off) {
+    case 0:
+        s->out[(u32)s->out_head & 0xffff] = v;
+        s->out_head++;
+        s->lsr |= 0x40;
+        if (s->ier & 2)
+            pic_raise(&g_m, 4);
+        break;
+    case 1: s->ier = v; break;
+    case 2: s->fcr = v; break;
+    case 3: s->lcr = v; break;
+    case 4: s->mcr = v; break;
+    default: break;
+    }
+}
+
+/* ---------------- 8259A PIC ---------------- */
+
+void pic_raise(struct Machine *m, u8 irq)
+{
+    struct PicState *p = &m->pic;
+    u8 bit = (u8)(1 << (irq & 7));
+    if (irq > 15) return;
+    if (irq < 8) {
+        if (!(p->imr[0] & bit)) p->irr[0] |= bit;
+    } else {
+        if (!(p->imr[1] & bit)) p->irr[1] |= bit;
+    }
+}
+
+static u8 pic_read(u32 port)
+{
+    struct PicState *p = &g_m.pic;
+    if (port == 0x20 || port == 0xa0) {
+        u32 i = (port == 0xa0) ? 1 : 0;
+        return p->read_isr ? p->isr[i] : p->irr[i];
+    }
+    if (port == 0x21) return p->imr[0];
+    if (port == 0xa1) return p->imr[1];
+    return 0xff;
+}
+
+static void pic_write(u32 port, u8 v)
+{
+    struct PicState *p = &g_m.pic;
+    u32 slave = (port >= 0xa0) ? 1 : 0;
+    if (port == 0x21) { p->imr[0] = v; return; }
+    if (port == 0xa1) { p->imr[1] = v; return; }
+    if (slave) {
+        if (v & 0x10) {           /* ICW1 */
+            p->init_state[1] = 1;
+            p->icw1 = v;
+            p->icw2 = 0x28;
+            p->imr[1] = 0xff;
+            p->irr[1] = 0;
+            p->isr[1] = 0;
+            return;
+        }
+        if (p->init_state[1] == 1) { p->icw2 = v; p->init_state[1] = 2; return; }
+        if (p->init_state[1] == 2) { p->icw3 = v; p->init_state[1] = 3; return; }
+        if (p->init_state[1] == 3) { p->icw4 = v; p->init_state[1] = 0; return; }
+    } else {
+        if (v & 0x10) {           /* ICW1 */
+            p->init_state[0] = 1;
+            p->icw1 = v;
+            p->icw2 = 0x20;
+            p->imr[0] = 0xff;
+            p->irr[0] = 0;
+            p->isr[0] = 0;
+            return;
+        }
+        if (p->init_state[0] == 1) { p->icw2 = v; p->init_state[0] = 2; return; }
+        if (p->init_state[0] == 2) { p->icw3 = v; p->init_state[0] = 3; return; }
+        if (p->init_state[0] == 3) { p->icw4 = v; p->init_state[0] = 0; return; }
+    }
+    if (v & 0x08) { p->read_isr = (v & 2) ? 1 : 0; return; }   /* OCW3 */
+    if (v & 0x20) {                                            /* EOI */
+        u8 b = 0;
+        u32 i = 0;
+        if (v & 0x40) { p->isr[0] = 0; p->isr[1] = 0; return; }
+        for (i = 0; i < 8; i++) {
+            b = (u8)(1 << i);
+            if (p->isr[1] & b) { p->isr[1] &= (u8)~b; return; }
+            if (p->isr[0] & b) { p->isr[0] &= (u8)~b; return; }
+        }
+    }
+}
+
+/* ---------------- 8254 PIT ---------------- */
+
+static u8 pit_read(u32 port)
+{
+    struct PitState *p = &g_m.pit;
+    u32 ch = port - 0x40;
+    if (ch > 2) return 0xff;
+    if (p->rw_phase[ch] == 2) {
+        p->rw_phase[ch] = 1;
+        return (u8)(p->count[ch] >> 8);
+    }
+    if (p->access[ch] == 3)
+        p->rw_phase[ch] = 2;
+    return (u8)p->count[ch];
+}
+
+static void pit_write(u32 port, u8 v)
+{
+    struct PitState *p = &g_m.pit;
+    if (port == 0x43) {
+        u32 ch = (u32)(v >> 6);
+        if (ch == 3) return;
+        p->access[ch] = (u8)((v >> 4) & 3);
+        p->mode[ch] = (u8)((v >> 1) & 7);
+        p->rw_phase[ch] = 0;
+        return;
+    }
+    {
+        u32 ch = port - 0x40;
+        u32 hi = 0;
+        if (ch > 2) return;
+        if (p->access[ch] == 1) { p->reload[ch] = v; return; }
+        if (p->access[ch] == 2) { p->reload[ch] = (u32)v << 8; return; }
+        hi = (p->rw_phase[ch] == 1) ? 1 : 0;
+        if (hi) {
+            p->reload[ch] = (p->reload[ch] & 0xff) | ((u32)v << 8);
+            p->count[ch] = p->reload[ch];
+            p->rw_phase[ch] = 0;
+        } else {
+            p->reload[ch] = v;
+            p->rw_phase[ch] = 1;
+        }
+    }
+}
+
+/* ---------------- I/O 端口分派 ---------------- */
+
+u8 io_r8(u32 port)
+{
+    if (port >= 0x3f8 && port <= 0x3ff) return serial_read(port);
+    if (port >= 0x3f0 && port <= 0x3f7) return 0xff;   /* COM2 未装 */
+    if (port == 0x20 || port == 0x21 || port == 0xa0 || port == 0xa1)
+        return pic_read(port);
+    if (port >= 0x40 && port <= 0x43) return pit_read(port);
+    if (port == 0x71) return 0;
+    if (port == 0xcfc) {
+        u32 a = g_m.pci.addr;
+        if (!(a & 0x80000000)) return 0xff;
+        if (((a >> 16) & 0xff) == 0 && ((a >> 11) & 0x1f) == 0 && ((a >> 8) & 7) == 0)
+            return g_m.pci.config[a & 0xfc];
+        return 0xff;
+    }
+    if (port == 0xcfd || port == 0xcfe || port == 0xcff)
+        return 0xff;
+    return 0xff;
+}
+
+u16 io_r16(u32 port)
+{
+    return (u16)io_r8(port) | ((u16)io_r8(port + 1) << 8);
+}
+
+u32 io_r32(u32 port)
+{
+    return (u32)io_r8(port) | ((u32)io_r8(port + 1) << 8) |
+           ((u32)io_r8(port + 2) << 16) | ((u32)io_r8(port + 3) << 24);
+}
+
+void io_w8(u32 port, u8 v)
+{
+    if (port >= 0x3f8 && port <= 0x3ff) { serial_write(port, v); return; }
+    if (port == 0x20 || port == 0x21 || port == 0xa0 || port == 0xa1) {
+        pic_write(port, v);
+        return;
+    }
+    if (port >= 0x40 && port <= 0x43) { pit_write(port, v); return; }
+    if (port == 0x70) return;
+    if (port == 0x71) return;
+    if (port == 0xcf8) {
+        g_m.pci.addr = ((u32)v) | (g_m.pci.addr & 0xffffff00);
+        return;
+    }
+    if (port == 0xcfc) {
+        u32 a = g_m.pci.addr;
+        if ((a & 0x80000000) && ((a >> 16) & 0xff) == 0 &&
+            ((a >> 11) & 0x1f) == 0 && ((a >> 8) & 7) == 0)
+            g_m.pci.config[a & 0xfc] = v;
+        return;
+    }
+    if (port == 0xf4 || port == 0xfe) {
+        g_m.halted = 1;
+        g_m.exit_code = (u32)v;
+        g_m.cpu.halted = 1;
+    }
+}
+
+void io_w16(u32 port, u16 v)
+{
+    if (port == 0xcf8) { g_m.pci.addr = v | (g_m.pci.addr & 0xffff0000); return; }
+    io_w8(port, (u8)v);
+    io_w8(port + 1, (u8)(v >> 8));
+}
+
+void io_w32(u32 port, u32 v)
+{
+    if (port == 0xcf8) { g_m.pci.addr = v; return; }
+    io_w8(port, (u8)v);
+    io_w8(port + 1, (u8)(v >> 8));
+    io_w8(port + 2, (u8)(v >> 16));
+    io_w8(port + 3, (u8)(v >> 24));
+}
+
+/* ---------------- LAPIC MMIO ---------------- */
+
+u64 mmio_r(u64 addr, u32 size)
+{
+    u64 off = addr - LAPIC_PA;
+    u64 v = 0;
+    if (off == 0x20) v = 0;                  /* ID */
+    else if (off == 0x30) v = 0x00050014;    /* LVR */
+    else if (off == 0x80) v = g_m.lapic_tpr;
+    else if (off == 0xd0) v = g_m.lapic_ldr;
+    else if (off == 0xe0) v = 0xffffffff;
+    else if (off == 0xf0) v = g_m.lapic_svr;
+    else if (off == 0x300) v = g_m.lapic_icr;
+    else if (off == 0x320) v = 0;
+    else if (off == 0x328) v = 0;
+    else if (off == 0x380) v = 0;
+    return v;
+}
+
+void mmio_w(u64 addr, u32 size, u64 val)
+{
+    u64 off = addr - LAPIC_PA;
+    if (off == 0x20) g_m.lapic_id = (u32)val & 0xff;
+    else if (off == 0x80) g_m.lapic_tpr = (u32)val & 0xff;
+    else if (off == 0xb0) g_m.lapic_eoi = (u32)val;
+    else if (off == 0xd0) g_m.lapic_ldr = (u32)val;
+    else if (off == 0xf0) g_m.lapic_svr = (u32)val;
+    else if (off == 0x300) g_m.lapic_icr = (u32)val;
+}
+
+/* ---------------- 初始化与时钟 ---------------- */
+
+void dev_init(void)
+{
+    struct Machine *m = &g_m;
+    struct SerialState *s = &m->serial;
+    u32 i = 0;
+    s->lcr = 0x03;
+    s->lsr = 0x60;
+    s->msr = 0xb0;
+    s->iir = 1;
+    m->pic.icw2 = 0x20;
+    m->pic.imr[0] = 0xff;
+    m->pic.imr[1] = 0xff;
+    m->lapic_svr = 0x000001ff;
+    m->lapic_lvr = 0x00050014;
+    for (i = 0; i < 3; i++) {
+        m->pit.access[i] = 3;
+        m->pit.mode[i] = 3;
+    }
+    m->pit.reload[0] = 11932;
+    m->pit.count[0] = 11932;
+    m->pci.config[0] = 0x86;             /* vendor 0x8086 */
+    m->pci.config[1] = 0x80;
+    m->pci.config[2] = 0x37;             /* device 0x1237 */
+    m->pci.config[3] = 0x12;
+    m->pci.config[4] = 0x07;             /* COMMAND */
+    m->pci.config[6] = 0x10;
+    m->pci.config[8] = 0x00;             /* class 0x060000 */
+    m->pci.config[9] = 0x00;
+    m->pci.config[10] = 0x00;
+    m->pci.config[12] = 0x00;            /* header type */
+    m->pci.config[15] = 0x00;
+}
+
+/* 每个 run slice 末尾调用：推进 PIT，投递最高优先级的未屏蔽中断 */
+void dev_tick(void)
+{
+    struct Machine *m = &g_m;
+    struct PicState *p = &m->pic;
+    u64 delta = m->tsc - m->last_pit_tsc;
+    u32 i = 0;
+    u8 irq = 0;
+    u8 found = 0;
+
+    if (delta > 0) {
+        if (m->pit.reload[0] > 0 && m->pit.mode[0] == 3) {
+            u64 sub = delta;
+            if (sub > 0xffffffffu) sub = 0xffffffffu;
+            if (m->pit.count[0] > sub)
+                m->pit.count[0] -= (u32)sub;
+            else {
+                m->pit.count[0] = m->pit.reload[0];
+                pic_raise(m, 0);
+            }
+        }
+        m->last_pit_tsc = m->tsc;
+    }
+
+    if (!(m->cpu.flags & RF_IF) || m->cpu.exc_pending)
+        return;
+
+    for (i = 0; i < 8; i++) {
+        u8 bit = (u8)(1 << i);
+        if ((p->irr[0] & bit) && !(p->isr[0] & bit)) {
+            p->irr[0] &= (u8)~bit;
+            p->isr[0] |= bit;
+            irq = (u8)i;
+            break;
+        }
+    }
+    if (irq == 0 && (p->irr[1] & ~p->isr[1])) {
+        for (i = 0; i < 8; i++) {
+            u8 bit = (u8)(1 << i);
+            if ((p->irr[1] & bit) && !(p->isr[1] & bit)) {
+                p->irr[1] &= (u8)~bit;
+                p->isr[1] |= bit;
+                irq = (u8)(8 + i);
+                break;
+            }
+        }
+    }
+    if (irq == 0 && !(p->irr[0] & 1) && !(p->irr[1] & 1))
+        return;
+    if (irq > 0)
+        cpu_raise(&m->cpu, p->icw2 + irq, 0, 0);
+    else
+        cpu_raise(&m->cpu, p->icw2, 0, 0);
+}

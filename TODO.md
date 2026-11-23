@@ -1,95 +1,72 @@
-# x64simc6 TODO（按阶段推进，完成一项勾一项）
+# x64simc6 TODO（与实际实现同步更新）
 
-> 详细方案见 [`docs/DESIGN.md`](docs/DESIGN.md)。原则：先让最小 payload 跑起来，再上真 Linux，最后上 web。
+> 详细方案见 [`docs/DESIGN.md`](docs/DESIGN.md)。本文件只记录**真正做过/正在做的事**：勾选项=已落地且可编译/可运行，未勾选项=尚未完成。阶段编号沿用设计文档。
 
 ## 阶段 1 —— 设计（已完成）
 
 - [x] 写详细设计文档 `docs/DESIGN.md`
 - [x] 写本 TODO 文档
-- [ ] 设计评审后按需修订（若实现中发现偏差，更新 DESIGN.md 的"实现偏差"小节）
+- [x] 补充 wasm 真实网络 + 页面存储当文件系统的硬性需求（DESIGN.md §10.1）
+- [x] 记录 c6 扩展在 wasm32 下的 ABI 限制与对策（DESIGN.md §13）
+- [x] 设计评审后按需修订（实现中发现 interface/f-string 不可用，已写入偏差）
 
 ## 阶段 2 —— 工程骨架与工具链验证
 
-- [ ] 建立目录结构：`src/ tools/ web/ tests/ docs/ build/`
-- [ ] `build.sh` 支持 `native` / `wasm` / `fw` / `test` / `clean`
-- [ ] c6c 编译最小 `.c6` 程序为 native 可执行文件并跑通
-- [ ] tcc-c6 `--target=wasm32-unknown-unknown` 编译同一份源码为 `.wasm`，node 里实例化并调用导出函数
-- [ ] 验证 128MiB 静态数组在 wasm 中可分配（初始内存 256MiB）
-- [ ] 验证导出函数签名用 `uint64_t` 参数/返回值在 wasm32 下的 ABI（避免 `long`）
-- [ ] `tests/test_cpu.c6`：`test "..."` 块的最小运行（c6c -test）
+- [x] 建立目录结构：`src/ tools/ web/ tests/ docs/ build/`
+- [x] `tests/toolchain_probe.c6`：native 编译通过、wasm 编译通过、256 MiB 静态数组可用、导出函数签名验证
+- [x] 确认 wasm32 下 64 位必须用 `unsigned long long`（`unsigned long` 是 32 位）
+- [x] `tests/c6_features_probe.c6`：native 接口/方法/切片/foreach/元组/defer/err/catch/f-string 全通过
+- [x] `tests/c6_features_wasm.c6`：wasm 下方法/切片/foreach/元组/defer 通过
+- [x] `tests/if_probe.c6`：定位 wasm 接口转换崩溃的根因（LP64 胖指针 vs 32 位 helper）
+- [ ] `build.sh`（native / wasm / fw / test / clean）——尚未编写
+- [ ] `tests/test_cpu.c6` 的 `-test` 单元测试骨架——尚未编写
 
-## 阶段 3 —— CPU 核心
+## 阶段 3 —— CPU / 内存核心（代码已落地，等待冒烟验证）
 
-- [ ] `src/types.c6`：类型、位宏、日志、 guest 内存读写辅助
-- [ ] `src/mem.c6`：RAM 数组、物理读写、MMIO 分派表、页表遍历（4KiB/2MiB）
-- [ ] `src/cpu.c6`：CPUState 结构、RFLAGS、寄存器访问
-- [ ] 取指/前缀/REX/ModRM/SIB/立即数解码
-- [ ] 数据传送组：mov / lea / movzx / movsx / push / pop / xchg / setcc / cmovcc
-- [ ] 算术逻辑组：add/adc/sub/sbb/cmp/test/and/or/xor/inc/dec/neg/not/mul/div/imul/idiv
-- [ ] 移位/位操作组：shl/shr/sar/rol/ror/bt/bts/btr/bsf/bsr/bswap/shld/shrd
-- [ ] 控制流组：jmp/jcc/call/ret/loop/iret/int
-- [ ] 字符串组：movs/stos/lods/scas/cmps + rep/repne
-- [ ] 系统组：cpuid / rdtsc / rdmsr / wrmsr / mov cr,dr / lgdt/lidt / swapgs / syscall / hlt / ud2 / pause / invlpg / xgetbv
-- [ ] FPU/SSE 最小组：fxsave/fxrstor / movaps/movups/movq/pxor/xorps / ldmxcsr/stmxcsr
-- [ ] I/O 组：in / out（8/16/32 位，含字符串形式）
-- [ ] 异常投递：#GP/#UD/#PF/#DF，IDT gate 读取、栈帧压入、错误码
-- [ ] 未知 opcode 诊断：打印 RIP/字节并停机，不静默继续
+- [x] `src/c6sim.h`：类型、常量、CPUState/Machine/Operand 结构、跨模块声明（原计划的 `types.c6` 合并进这里）
+- [x] `src/mem.c6`：128 MiB RAM、MMIO 分派、4 级分页（4K/2M/1G）、TLB、缺页异常
+- [x] `src/cpu.c6`：前缀/REX/ModRM/SIB 译码、GPR/标志、ALU/移位/位操作/乘除、控制流、字符串指令、I/O、系统调用、MSR/CPUID、FPU/SSE 最小集、异常投递
+- [x] `src/cpu.c6` 暴露 c6 方法 `c->step()` / `c->deliver()`，元组用于取指返回，枚举命名空间用于异常号
+- [x] native 全量链接通过：`c6c -I src src/mem.c6 ... src/main.c6 -o build/sim`
+- [x] `tools/hello64.py` 生成 47 字节 64 位手汇编 payload；`./build/sim --payload build/hello64.bin` 输出 `C6SIM64 OK`，26 条指令后正常停机（退出码 0）
+- [ ] `tests/test_cpu.c6` ALU / ModRM / 分页单元测试——尚未编写
 
-## 阶段 4 —— 设备与 Linux 直接引导
+## 阶段 4 —— 设备与 Linux 直接引导（代码已落地，等待真内核验证）
 
-- [ ] `src/dev.c6`：16550A 串口（THR/RBR/IER/IIR/LCR/LSR/MSR/DLL/DLM，环形缓冲，IRQ4）
-- [ ] `src/dev.c6`：8259A PIC（ICW/OCW/EOI，IRR/ISR）
-- [ ] `src/dev.c6`：8254 PIT（channel0 mode3，按指令数推进，IRQ0）
-- [ ] `src/dev.c6`：CMOS/RTC、PCI 配置空间（仅 host bridge）、LAPIC 最小 MMIO、debug exit 端口
-- [ ] `src/boot.c6`：C6FW 头校验与装入
-- [ ] `src/boot.c6`：bzImage setup_header 校验、内核搬到 1MiB、initrd 搬到 32MiB、cmdline 搬到 0x20000
-- [ ] `src/boot.c6`：boot_params + e820 表填充
-- [ ] `src/boot.c6`：长模式页表（PML4/PDPT/PD，2MiB 大页，覆盖 128MiB）
-- [ ] `src/boot.c6`：CPU 初态与 GDT/IDT 初始化，RIP=1MiB、RSI=boot_params
-- [ ] `src/machine.c6`：Machine 组装、run loop、指令/周期统计、halt 处理
+- [x] `src/dev.c6`：16550A、8259A、8254、CMOS、PCI 配置空间、LAPIC MMIO、debug exit 端口
+- [x] `src/boot.c6`：C6FW 头解析、e820、boot_params、页表/GDT/IDT、长模式 CPU 初态
+- [x] `src/machine.c6`：机器复位、方法 `m->run()`、指令/TSC 统计、中断节拍
+- [x] `src/host.c6`：宿主无关诊断输出
+- [x] `src/main.c6`：native CLI，使用 defer / errdefer / err / try / catch / f-string / 枚举命名空间
+- [ ] native 加载真实 bzImage+initrd 引导到串口日志——尚未验证
+- [ ] 按诊断补 Linux 启动期缺的 opcode / MSR / 设备——尚未开始
 
-## 阶段 5 —— 测试 payload 与真内核
+## 阶段 5 —— Alpine 固件
 
-- [ ] `tools/hello64.py`：生成手汇编 64 位 payload（写串口字符串 + out 0xf4 退出）
-- [ ] native 跑 payload，串口得到 `C6SIM64 OK`，退出码正确
-- [ ] 获取一个真实 x86-64 bzImage（Alpine ISO 的 vmlinuz 或自行编译的小内核）
-- [ ] native 直接引导真内核 + 极简 initramfs，串口出现 Linux 启动日志
-- [ ] 逐步补 Linux 启动期缺的 opcode / MSR / 设备（按诊断迭代）
+- [ ] `tools/mkfw.py`：C6FW 头 + bzImage 解压为 raw vmlinux + initrd 打包
+- [ ] 支持从 Alpine ISO 提取 `vmlinuz-lts` + `initramfs-lts`
+- [ ] 支持从 minirootfs 生成 cpio.gz（自定义 /init）
+- [ ] native + Alpine 固件引导到 `localhost login:` 并进入 shell
 
-## 阶段 6 —— Alpine 固件
-
-- [ ] `tools/mkfw.py`：C6FW 头写入/校验
-- [ ] 支持从 Alpine ISO 用 `7z` 提取 `vmlinuz-lts` + `initramfs-lts`
-- [ ] 支持从 Alpine minirootfs tarball 生成 cpio.gz（含自定义 /init：挂载 proc/sys/dev，启动 ttyS0 上的 sh）
-- [ ] 产物 `firmware.bin` 可被 native 模拟器直接加载
-- [ ] native + Alpine 固件引导到 `localhost login:`，输入 `root` 能进入 shell
-- [ ] `docs/ALPINE.md` 记录固件来源、版本与重建命令
-
-## 阶段 7 —— wasm 与浏览器
+## 阶段 6 —— wasm 与浏览器
 
 - [ ] `src/wasm.c6`：`sim_init / sim_reset / sim_run / sim_status / sim_serial_out / sim_serial_in / sim_stat_insns / sim_ram_base`
-- [ ] wasm-ld 参数：`--no-entry --export-all`，initial 256MiB / max 512MiB
-- [ ] node 冒烟：实例化 → 写固件 → 调 `sim_run` 若干次 → 读串口输出
-- [ ] `web/index.html` + `web/style.css`：终端样式、状态栏、按钮
-- [ ] `web/app.js`：fetch 固件、驱动 sim、串口终端、键盘输入、暂停/继续/重启、MIPS 显示
-- [ ] 浏览器手工验证：能看到 Alpine 登录提示并输入 root
-- [ ] 可选：终端渲染改用 xterm.js（若需要 ANSI 转义支持）
+- [ ] wasm-ld 参数：`--no-entry --export-all`，initial 256 MiB / max 512 MiB
+- [ ] node 冒烟：实例化 → 写固件 → 运行 → 读串口
+- [ ] `web/index.html` + `web/style.css` + `web/app.js`
+- [ ] 浏览器验证 Alpine 登录提示与 root 输入
 
-## 阶段 7.5 —— wasm 网络与页面存储（用户新增硬性需求，见 DESIGN.md §10.1）
+## 阶段 7 —— wasm 网络与页面存储（用户新增硬性需求，DESIGN.md §10.1）
 
-- [ ] `sim_host_bridge()` / `sim_host_event()`：64 KiB 共享内存邮箱与 JS→wasm 事件
-- [ ] `web/app.js` 用 `fetch()` 拉取固件（支持 URL 输入、进度、失败重试）
-- [ ] 固件与用户文件缓存进 Cache Storage / IndexedDB，支持离线与清除缓存
-- [ ] `sim_hostfs_*` 导出：文件表 + 8 MiB 数据区 + dirty 标记
-- [ ] JS 启动时从 IndexedDB 导入文件，每帧导出 dirty 文件并写回
-- [ ] 串口日志与机器快照持久化到 IndexedDB（页面刷新后可恢复）
-- [ ] 端到端验证：断网后用缓存固件仍能启动；网页写入的文件刷新后仍存在
+- [ ] `sim_host_bridge()` / `sim_host_event()` 共享内存邮箱
+- [ ] `fetch()` 拉固件（URL 输入、进度、重试）+ Cache Storage / IndexedDB 缓存
+- [ ] `sim_hostfs_*` 文件表（8 MiB 数据区 + dirty 标记）+ IndexedDB 双向同步
+- [ ] 串口日志 / 机器快照持久化，刷新页面后可恢复
 - [ ] 预留 virtio-net / c6blk 设备接口（v2，不阻塞 v1）
 
 ## 阶段 8 —— 收尾
 
-- [ ] `tests/smoke.sh`：native payload + wasm node 冒烟一条命令跑完
+- [ ] `tests/smoke.sh` 一条命令跑 native + wasm 冒烟
 - [ ] `./build.sh test` 全绿
-- [ ] `README.md`：快速开始、目录说明、已知限制、性能说明
-- [ ] DESIGN.md 补"实现偏差"小节（记录与设计的不同及原因）
-- [ ] 用 worktree finish 提交/合并（若当前目录不是 git 仓库则跳过）
+- [ ] `README.md`：快速开始、已知限制、性能说明
+- [ ] Git 提交：每完成一个任务即提交（已执行：docs ×2、probes ×1）
