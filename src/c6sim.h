@@ -205,6 +205,8 @@ void mem_tlb_flush(void);
 /* cpu.c6 */
 int cpu_step(struct CPUState *c);
 void raise_exception(struct CPUState *c, u32 vec, u8 has_ec, u64 ec);
+extern u64 g_rip_ring[256];
+extern u32 g_rip_i;
 void cpu_deliver(struct CPUState *c);
 void cpu_init(struct CPUState *c);
 /* c6 方法：c->step() / c->deliver()（run 用静态函数，避免 wasm 弱别名 ABI 问题） */
