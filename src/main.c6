@@ -136,6 +136,12 @@ int main(int argc, char **argv)
         if (n > 0)
             fwrite(out, 1, (size_t)n, stdout);
     }
+    if (g_m.fw_kernel_len != 0)
+        printf("[debug] rip=%016llx vec=%x ec=%016llx cr2=%016llx rax=%016llx rsp=%016llx code=%x halted=%d\n",
+               (unsigned long long)g_m.cpu.rip, g_m.cpu.exc_vec,
+               (unsigned long long)g_m.cpu.exc_ec, (unsigned long long)g_m.cpu.cr[2],
+               (unsigned long long)g_m.cpu.r[0], (unsigned long long)g_m.cpu.r[4], g_m.cpu.halt_code,
+               (int)g_m.cpu.halted);
     printf("\n[c6sim] halted, instructions=%llu, exit=%d\n",
            g_m.instructions, g_m.exit_code);
     return g_m.exit_code & 0xff;

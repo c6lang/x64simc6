@@ -17,8 +17,8 @@ typedef long long i64;
 #define BOOTPARAMS_PA   0x00009000u
 #define CMDLINE_PA      0x00020000u
 #define EARLY_STACK_PA  0x00030000u
-#define KERNEL_PA       0x00100000u
-#define INITRD_PA       0x02000000u
+#define KERNEL_PA       0x01000000u
+#define INITRD_PA       0x06000000u
 #define PDPT_PA         0x00004000u
 #define PD_PA           0x00005000u
 #define PML4_PA         0x00006000u

@@ -122,8 +122,10 @@ static void build_page_tables(void)
     }
     mem_w64(pml4, pdpt | 3);
     mem_w64(pml4 + 3 * 8, pdpt | 3);          /* 3GiB 区：APIC */
+    mem_w64(pml4 + 511 * 8, pdpt | 3);        /* 内核高半区 -2GiB */
     mem_w64(pdpt, pd | 3);
     mem_w64(pdpt + 3 * 8, pd3 | 3);
+    mem_w64(pdpt + 511 * 8, pd | 3);          /* 高半区映射到 0..1GiB */
     for (i = 0; i < 64; i++)                  /* 0..128MiB，2MiB 大页 */
         mem_w64(pd + i * 8, ((u64)i << 21) | 0x83);
     mem_w64(pd3 + 0xf6 * 8, 0xfec00000u | 0x83); /* IOAPIC */

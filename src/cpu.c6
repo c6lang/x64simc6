@@ -723,6 +723,16 @@ int step(struct CPUState *c)
             reg_write(c, rm.reg, s, v);
             break;
         }
+        case 0xba: { /* bts r/m, imm8 */
+            u8 m1 = fetch8(c);
+            rm = decode_modrm(c, m1, rex, addrsz);
+            u32 bit = (u32)fetch8(c) & ((s == 8) ? 63u : 31u);
+            v = op_read(c, &rm, s);
+            c->flags &= ~RF_CF;
+            if ((v & ((u64)1 << bit)) != 0) c->flags |= RF_CF;
+            op_write(c, &rm, s, v | ((u64)1 << bit));
+            break;
+        }
         case 0xbc: case 0xbd: { /* bsf/bsr */
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             v = op_read(c, &rm, s);
@@ -812,8 +822,11 @@ int step(struct CPUState *c)
             u32 dir = (op >> 1) & 1;
             s = (op & 1) ? opsz : 1;
             imm = 0;
-            if ((op & 7) == 4) { imm = fetch_n(c, 1); a = reg_read(c, 0, s == 1 ? 1 : 4); }
-            else if ((op & 7) == 5) { imm = fetch_n(c, opsz == 2 ? 2 : 4); a = reg_read(c, 0, opsz == 2 ? 2 : 4); }
+            if ((op & 7) == 4) { imm = sx(fetch_n(c, 1), 8); a = reg_read(c, 0, s); }
+            else if ((op & 7) == 5) {
+                imm = (opsz == 2) ? fetch_n(c, 2) : sx(fetch_n(c, 4), 32);
+                a = reg_read(c, 0, s);
+            }
             else {
                 rm = decode_modrm(c, fetch8(c), rex, addrsz);
                 a = dir ? reg_read(c, rm.reg, s) : op_read(c, &rm, s);
@@ -1062,6 +1075,12 @@ int step(struct CPUState *c)
         case 0xe9: {  /* jmp rel32 */
             i64 d = sx(fetch_n(c, 4), 32);
             c->rip = (u64)((i64)c->rip + d);
+            break;
+        }        case 0xea: {  /* jmp far ptr16:32 */
+            u32 off = (u32)fetch_n(c, 4);
+            u16 sel = (u16)fetch_n(c, 2);
+            c->rip = off;
+            c->sel[1] = sel;
             break;
         }
         case 0xeb: {  /* jmp rel8 */

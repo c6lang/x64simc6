@@ -38,15 +38,15 @@
 - [x] `src/machine.c6`：机器复位、方法 `m->run()`、指令/TSC 统计、中断节拍
 - [x] `src/host.c6`：宿主无关诊断输出
 - [x] `src/main.c6`：native CLI，使用 defer / errdefer / err / try / catch / f-string / 枚举命名空间
-- [ ] native 加载真实 bzImage+initrd 引导到串口日志——尚未验证
-- [ ] 按诊断补 Linux 启动期缺的 opcode / MSR / 设备——尚未开始
+- [ ] native 加载真实 bzImage+initrd 引导到串口日志——内核已能被解码执行到 0x1000079，随后触发 #PF（CR2=0x7fffffff, RSP=0x7ffffffb），栈/地址转换问题待修
+- [x] 按诊断补 Linux 启动期缺项：`bts r/m,imm`、far jmp `ea`、64 位 imm32 符号扩展、内核高半区映射；仍需继续修 #PF
 
 ## 阶段 5 —— Alpine 固件
 
-- [ ] `tools/mkfw.py`：C6FW 头 + bzImage 解压为 raw vmlinux + initrd 打包
-- [ ] 支持从 Alpine ISO 提取 `vmlinuz-lts` + `initramfs-lts`
-- [ ] 支持从 minirootfs 生成 cpio.gz（自定义 /init）
-- [ ] native + Alpine 固件引导到 `localhost login:` 并进入 shell
+- [x] `tools/mkfw.py`：C6FW 头 + bzImage gzip/xz 解压 + ELF PT_LOAD 抽取 + 内核/命令行/initrd 打包
+- [x] 从 Alpine 3.20 CDN 下载 `linux-lts-6.6.142-r0.apk`（含 `vmlinuz-lts`）与 `alpine-minirootfs-3.20.3-x86_64.tar.gz`
+- [x] minirootfs → cpio.gz，注入 `/init` 与 `ttyS0` 的 getty；固件 `build/firmware.bin` 已生成（kernel 19.8 MiB + initrd 3.3 MiB）
+- [ ] native + Alpine 固件引导到 `localhost login:` 并进入 shell——当前在早期 #PF 停机
 
 ## 阶段 6 —— wasm 与浏览器
 
