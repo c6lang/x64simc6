@@ -901,8 +901,18 @@ int step(struct CPUState *c)
                         a = 0;
                     }
                 }
-                op_write(c, &rm, s, a);
             }
+            if (cnt != 0) {
+                /* 硬件对 SHLD/SHRD 也按结果设置 SF/ZF/PF，OF=结果最高两位异或 */
+                u64 sb2 = sign_bit(s);
+                c->flags &= ~(RF_PF | RF_ZF | RF_SF);
+                c->flags |= parity(a & 0xff);
+                if ((a & sz_mask(s)) == 0) c->flags |= RF_ZF;
+                if (a & sb2) c->flags |= RF_SF;
+            }
+            /* count 为 0 时内存不写，但 32 位寄存器仍要零扩展 */
+            if (cnt != 0 || rm.is_reg)
+                op_write(c, &rm, s, a);
             break;
         }
         case 0xae: { /* group15 */
@@ -945,6 +955,14 @@ int step(struct CPUState *c)
                 reg_write(c, rm.reg, s, low);
                 c->flags = (c->flags & ~(RF_CF | RF_OF)) |
                            (((i64)sx(low, s * 8) != p) ? (RF_CF | RF_OF) : 0);
+            }
+            {
+                /* SF/ZF/PF 在 SDM 里是未定义，但硬件按结果设置 */
+                u64 r = reg_read(c, rm.reg, s);
+                c->flags &= ~(RF_PF | RF_ZF | RF_SF);
+                c->flags |= parity(r & 0xff);
+                if ((r & sz_mask(s)) == 0) c->flags |= RF_ZF;
+                if (r & sign_bit(s)) c->flags |= RF_SF;
             }
             break;
         }
