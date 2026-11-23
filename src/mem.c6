@@ -179,7 +179,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
             flags = TV_P | TV_U;
             if (e & 2) flags |= TV_W;
             if (!(e & ((u64)1 << 63))) flags |= TV_X;
-            pa = (e & ~((u64)0x3fffffff)) | (va & 0x3fffffff);
+            pa = (e & 0x000fffffc0000000ull) | (va & 0x3fffffff);
             tlb_tag[idx] = vpn;
             tlb_val[idx] = (pa & ~((u64)0xfff)) | flags;
             return pa;
@@ -193,12 +193,12 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
             flags = TV_P | TV_U;
             if (e & 2) flags |= TV_W;
             if (!(e & ((u64)1 << 63))) flags |= TV_X;
-            pa = (e & ~((u64)0x1fffff)) | (va & 0x1fffff);
+            pa = (e & 0x000fffffffe00000ull) | (va & 0x1fffff);
             tlb_tag[idx] = vpn;
             tlb_val[idx] = (pa & ~((u64)0xfff)) | flags;
             return pa;
         }
-        pa = e & ~((u64)0xfff);
+        pa = e & 0x000ffffffffff000ull;
     }
     if ((g_m.cpu.efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
         pg_fault(va, wr, is_user, pf_ec);
@@ -206,7 +206,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
     }
     flags = TV_P | TV_U | TV_X;
     if (e & 2) flags |= TV_W;
-    pa = (e & ~((u64)0xfff)) | (va & 0xfff);
+    pa = (e & 0x000ffffffffff000ull) | (va & 0xfff);
     tlb_tag[idx] = vpn;
     tlb_val[idx] = (pa & ~((u64)0xfff)) | flags;
     return pa;
