@@ -1,0 +1,37 @@
+/* native 单元测试：链接核心源文件后运行，退出码 0 表示全绿。 */
+#include "c6sim.h"
+
+static int failures = 0;
+
+static void check(int ok, const char *what)
+{
+    if (!ok) { printf("FAIL: %s\n", what); failures++; }
+}
+
+int main(void)
+{
+    u8 name[4] = {97,98,99,100};
+    u8 data[5] = {1,2,3,4,5};
+    u8 out[5] = {0};
+    u8 payload[3] = {0xf4, 0x90, 0xf4};
+
+    machine_reset();
+    check(g_m.instructions == 0, "reset instructions");
+    check(g_m.halted == 0, "reset halted");
+    check(g_m.serial.lsr == 0x60, "serial LSR");
+    check(g_m.serial.msr == 0xb0, "serial MSR");
+    check(g_m.ram[0] == 0 && g_m.ram[RAM_SIZE - 1] == 0, "RAM zeroed");
+
+    check(sim_hostfs_put(name, 4, data, 5) == 0, "hostfs put");
+    check(sim_hostfs_get(name, 4, out, 5) == 5, "hostfs get len");
+    check(out[0] == 1 && out[4] == 5, "hostfs get data");
+
+    check(machine_boot_payload(payload, 3, 0x10000) == 0, "boot payload");
+    check(g_m.cpu.rip == 0x10000, "boot rip");
+    check(g_m.cpu.cr[3] == PML4_PA, "boot cr3");
+    check(machine_run(10) == 0, "run payload");
+    check(g_m.cpu.halted == 1, "payload halted");
+
+    if (failures == 0) printf("all unit tests passed\n");
+    return failures == 0 ? 0 : 1;
+}

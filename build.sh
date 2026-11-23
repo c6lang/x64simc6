@@ -45,11 +45,11 @@ test_all() {
     grep -q 'C6SIM64 OK' build/payload.out
     echo "test: payload smoke OK"
     if [ -f tests/test_cpu.c6 ]; then
-        "$C6C" -I src -test tests/test_cpu.c6
+        "$C6C" -I src $CORE src/hostfs.c6 tests/test_cpu.c6 -o build/test_cpu >/dev/null
+        ./build/test_cpu
     fi
-    if [ -f web/sim.wasm ]; then
-        node tests/wasm_smoke.js web/sim.wasm build/hello64.bin
-    fi
+    wasm
+    node tests/wasm_smoke.js web/sim.wasm build/hello64.bin
 }
 
 case ${1:-all} in

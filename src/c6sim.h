@@ -229,7 +229,7 @@ u8 *sim_host_bridge(void);
 int sim_host_event(u32 code, u32 len);
 int sim_hostfs_import(u8 *buf, u32 len);
 int sim_hostfs_export(u8 *buf, u32 cap);
-int sim_hostfs_put(const char *name, u8 *data, u32 len);
-int sim_hostfs_get(const char *name, u8 *dst, u32 cap);
+int sim_hostfs_put(u8 *name, u32 name_len, u8 *data, u32 len);
+int sim_hostfs_get(u8 *name, u32 name_len, u8 *dst, u32 cap);
 
 #endif

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>c6simc6 · x86-64 in WebAssembly</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><h1>c6simc6</h1><span>x86-64 emulator compiled from C6, running in WebAssembly</span></header>
+<main>
+  <section class="panel">
+    <h2>固件与网络</h2>
+    <label>固件 URL <input id="fwurl" value="firmware.bin"></label>
+    <div class="row">
+      <button id="load">加载固件</button>
+      <button id="start">启动</button>
+      <button id="pause">暂停</button>
+      <button id="reset">复位</button>
+    </div>
+    <label>请求 URL（测试和 guest 网络桥）<input id="neturl" placeholder="https://example.com/"></label>
+    <button id="netfetch">fetch 并注入 __net/last</button>
+    <p id="status">空闲</p>
+  </section>
+  <section class="panel grow">
+    <h2>串口</h2>
+    <pre id="console"></pre>
+    <div class="row">
+      <input id="input" placeholder="输入并回车发送到 guest 串口">
+      <button id="send">发送</button>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>页面存储文件表</h2>
+    <div class="row">
+      <input id="filename" placeholder="文件名">
+      <input id="filedata" placeholder="内容">
+      <button id="put">写入</button>
+      <button id="get">读取</button>
+    </div>
+    <pre id="fileresult"></pre>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

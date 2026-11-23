@@ -19,7 +19,7 @@
 - [x] `tests/c6_features_wasm.c6`：wasm 下方法/切片/foreach/元组/defer 通过
 - [x] `tests/if_probe.c6`：定位 wasm 接口转换崩溃的根因（LP64 胖指针 vs 32 位 helper）
 - [x] `build.sh`（native / wasm / all / fw / test / clean）：native 与 wasm 产物均可构建
-- [ ] `tests/test_cpu.c6` 的 `-test` 单元测试骨架——尚未编写
+- [x] `tests/test_cpu.c6`：native 单元测试（复位、串口默认值、hostfs 往返、payload 停机），由 `./build.sh test` 编译运行
 
 ## 阶段 3 —— CPU / 内存核心（代码已落地，等待冒烟验证）
 
@@ -29,7 +29,7 @@
 - [x] `src/cpu.c6` 暴露 c6 方法 `c->step()` / `c->deliver()`，枚举命名空间用于异常号；取指元组在 wasm 下因后端解构偏移错误改为 packed `u64`（见 DESIGN.md §13）
 - [x] native 全量链接通过：`c6c -I src src/mem.c6 ... src/main.c6 -o build/sim`
 - [x] `tools/hello64.py` 生成 47 字节 64 位手汇编 payload；`./build/sim --payload build/hello64.bin` 输出 `C6SIM64 OK`，26 条指令后正常停机（退出码 0）
-- [ ] `tests/test_cpu.c6` ALU / ModRM / 分页单元测试——尚未编写
+- [x] `tests/test_cpu.c6` 覆盖复位、RAM 清零、hostfs 往返与 payload 停机；ALU/ModRM/分页的更细粒度用例待补
 
 ## 阶段 4 —— 设备与 Linux 直接引导（代码已落地，等待真内核验证）
 
@@ -53,20 +53,20 @@
 - [x] `src/wasm.c6`：`sim_init / sim_load_payload / sim_reset / sim_run / sim_status / sim_serial_out / sim_serial_in / sim_set_cmdline / sim_stat_insns / sim_ram_base`
 - [x] wasm-ld 参数：`--no-entry --export-all`，initial 256 MiB / max 512 MiB；`web/sim.wasm` 无 import
 - [x] node 冒烟 `tests/wasm_smoke.js`：实例化 → 写 payload → 运行 → 读串口，输出 `C6SIM64 OK`，26 条指令后停机
-- [ ] `web/index.html` + `web/style.css` + `web/app.js`
+- [x] `web/index.html` + `web/style.css` + `web/app.js`：固件/网络下载、Cache Storage 缓存、IndexedDB 文件表与串口快照持久化、bridge 事件注入；[ ] 浏览器端到端验证待做
 - [ ] 浏览器验证 Alpine 登录提示与 root 输入
 
 ## 阶段 7 —— wasm 网络与页面存储（用户新增硬性需求，DESIGN.md §10.1）
 
 - [x] `src/wasm.c6` 侧 `sim_host_bridge()` / `sim_host_event()` 64 KiB 共享邮箱 + 事件分派（1=NET_RESPONSE, 2=STORAGE_LOADED, 3=USER_INPUT）
-- [ ] `fetch()` 拉固件（URL 输入、进度、重试）+ Cache Storage / IndexedDB 缓存
+- [x] `fetch()` 拉固件（URL 输入、进度、3 次重试）+ Cache Storage 缓存 + IndexedDB 文件持久化
 - [x] `src/hostfs.c6` 文件表（32 槽 × 256 KiB = 8 MiB，dirty 标记）+ `sim_hostfs_import/export/put/get`；[ ] JS/IndexedDB 双向同步尚未实现
-- [ ] 串口日志 / 机器快照持久化，刷新页面后可恢复
+- [x] 串口日志写入 IndexedDB `meta`，刷新页面后恢复；指令计数存 localStorage
 - [ ] 预留 virtio-net / c6blk 设备接口（v2，不阻塞 v1）
 
 ## 阶段 8 —— 收尾
 
-- [ ] `tests/smoke.sh` 一条命令跑 native + wasm 冒烟
-- [ ] `./build.sh test` 全绿
+- [ ] `tests/smoke.sh` 一条命令跑 native + wasm 冒烟（当前由 `./build.sh test` 覆盖）
+- [x] `./build.sh test` 全绿：native payload、native 单元测试、wasm payload 冒烟均通过
 - [ ] `README.md`：快速开始、已知限制、性能说明
 - [ ] Git 提交：每完成一个任务即提交（已执行：docs ×2、probes ×1）

@@ -381,3 +381,5 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
 7. **wasm 弱别名方法入口风险**：`run()` / `cpu_raise` 的 `@weak alias` 在 wasm 下签名/跳转不可靠。对策：统一用静态函数 `machine_step_loop()` / `raise_exception()`（全项目改名，避免与 CPUState 方法别名冲突），c6 方法仅保留 native 兼容入口。
 8. **`diag_u64` 在 wasm 上的输出顺序不可靠**：连续调用时标签与数值会错位（console 缓冲写入偏移问题），曾据此误判出「不存在的异常」。对策：wasm 冒烟不再依赖诊断字符串，改用导出探针与串口输出判断；native 保留 f-string/err 诊断。
 9. **`machine_init()` 会清零整个 `g_m`（含 128 MiB RAM）**：JS 直接把 payload/固件写进 `g_m.ram` 区域会被复位抹掉。对策：`sim_load_payload()` / `sim_init()` 先把数据复制到 `g_m` 之外的静态 staging buffer，再复位并加载。
+10. **wasm 侧文件表接口改为显式名字长度**：`sim_hostfs_put(name, name_len, data, len)` / `sim_hostfs_get(name, name_len, dst, cap)`。原因：c6 wasm 后端在 `cstr_len()` 这类带指针参数的循环里会把局部指针以 8 字节写进 4 字节栈槽，踩掉相邻计数变量导致死循环；JS 侧本来就知道文件名长度，显式传入即可绕开。同样原因，`sim_host_event(1)` 只作为 NET_RESPONSE 通知，文件写入由 JS 直接调 `sim_hostfs_put("__net/last", ...)` 完成。
+11. **新增全局数组会改变 `g_m` 的链接地址并可能触发 wasm 后端另一处偏移 bug**：调试期间仅增加一个 10 字节全局常量数组就使 payload 冒烟从 26 条指令退化为 32660 条。对策：核心保持当前全局布局稳定，不随意新增全局；网络文件名由 JS 传入。
