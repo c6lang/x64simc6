@@ -168,6 +168,7 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
         if (rm == 5) {
             disp = sx(fetch_n(c, 4), 32);
             o.addr = c->rip + disp + segbase;   /* RIP 相对 */
+            o.rip_rel = 1;                      /* 立即数在其后，需要补正 */
             return o;
         }
         if (rm == 4 && (sib & 7) == 5)
@@ -202,6 +203,13 @@ static void op_write(struct CPUState *c, struct Operand *o, int s, u64 v)
     else if (s == 2) mem_w16(o->addr, (u16)v);
     else if (s == 4) mem_w32(o->addr, (u32)v);
     else mem_w64(o->addr, v);
+}
+
+/* RIP 相对寻址的位移以“整条指令之后”为基准；若指令尾部还有立即数，
+ * 在取完立即数后把地址补上这些字节。 */
+static void op_fix_rip(struct Operand *o, u64 n)
+{
+    if (o->rip_rel) o->addr += n;
 }
 
 /* ---------------- 标志位 ---------------- */
@@ -319,8 +327,10 @@ void cpu_deliver(struct CPUState *c)
     gate = mem_r64(c->idtr_base + vec * 16);
     sel = (u16)((gate >> 16) & 0xffff);
     type = (u8)((gate >> 40) & 0xf);
-    off = (gate & 0xffffu) | ((gate >> 32) & 0xffff0000u);
-    off |= (gate >> 32) & 0xffffffff00000000u;
+    /* 64 位中断门：offset_low 在 bit0..15，offset_high 在 bit48..63 */
+    off = (gate & 0xffffu) | ((gate >> 48) << 16);
+    /* 64 位门的高 32 位 handler 偏移在描述符后 8 字节 */
+    off |= (mem_r64(c->idtr_base + vec * 16 + 8) & 0xffffffffu) << 32;
     if ((gate >> 48) == 0) {
         c->halted = 1;
         return;
@@ -642,21 +652,22 @@ int step(struct CPUState *c)
         case 0x18: case 0x1e:  /* 0f 18 /r 与 endbr64：NOP */
             (void)fetch8(c);
             break;
-        case 0x30:  /* wrmsr */
-            msr_write(c, (u32)c->r[2], c->r[0] | (c->r[3] << 32));
+        case 0x30:  /* wrmsr：ECX=MSR 号，EDX:EAX=值 */
+            msr_write(c, (u32)c->r[1],
+                      (c->r[0] & 0xffffffffu) | ((c->r[2] & 0xffffffffu) << 32));
             break;
         case 0x31:  /* rdtsc */
             c->r[0] = (u32)g_m.tsc;
-            c->r[3] = (u32)(g_m.tsc >> 32);
+            c->r[2] = (u32)(g_m.tsc >> 32);
             break;
         case 0x32: {  /* rdmsr */
-            u64 v2 = msr_read(c, (u32)c->r[2]);
+            u64 v2 = msr_read(c, (u32)c->r[1]);
             c->r[0] = (u32)v2;
-            c->r[3] = (u32)(v2 >> 32);
+            c->r[2] = (u32)(v2 >> 32);
             break;
         }
         case 0x33:  /* rdpmc */
-            c->r[0] = 0; c->r[3] = 0;
+            c->r[0] = 0; c->r[2] = 0;
             break;
         case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45:
         case 0x46: case 0x47: case 0x48: case 0x49: case 0x4a: case 0x4b:
@@ -727,6 +738,14 @@ int step(struct CPUState *c)
             }
             break;
         }
+        case 0xaf: { /* imul r, r/m */
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            v = op_read(c, &rm, s);
+            a = (u64)((i64)sx(v, s * 8) * (i64)sx(reg_read(c, rm.reg, s), s * 8));
+            reg_write(c, rm.reg, s, a);
+            c->flags &= ~(RF_CF | RF_OF);
+            break;
+        }
         case 0xb0: case 0xb1: { /* cmpxchg */
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             a = op_read(c, &rm, s);
@@ -750,6 +769,7 @@ int step(struct CPUState *c)
             u8 m1 = fetch8(c);
             rm = decode_modrm(c, m1, rex, addrsz);
             u32 bit = (u32)fetch8(c) & ((s == 8) ? 63u : 31u);
+            op_fix_rip(&rm, 1);
             v = op_read(c, &rm, s);
             c->flags &= ~RF_CF;
             if ((v & ((u64)1 << bit)) != 0) c->flags |= RF_CF;
@@ -906,6 +926,7 @@ int step(struct CPUState *c)
             s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             imm = (op == 0x6b) ? sx(fetch_n(c, 1), 8) : sx(fetch_n(c, 4), 32);
+            op_fix_rip(&rm, (op == 0x6b) ? 1 : 4);
             a = op_read(c, &rm, s) * imm;
             reg_write(c, rm.reg, s, a);
             break;
@@ -925,6 +946,7 @@ int step(struct CPUState *c)
                   (op == 0x83) ? sx(fetch_n(c, 1), 8) :
                   (s == 8) ? sx(fetch_n(c, 4), 32) :
                   fetch_n(c, (s == 2) ? 2 : 4);
+            op_fix_rip(&rm, (op == 0x80 || op == 0x83) ? 1 : ((s == 2) ? 2 : 4));
             a = op_read(c, &rm, s);
             if (idx == 7) { flags_sub(c, a, imm, (a - imm) & sz_mask(s), s); break; }
             if (idx == 0 || idx == 2) {
@@ -974,10 +996,22 @@ int step(struct CPUState *c)
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             reg_write(c, rm.reg, s, rm.addr);
             break;
-        case 0x8e:  /* mov sreg, r/m16 */
+        case 0x8c: {  /* mov r/m, sreg */
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            c->sel[rm.reg & 5] = (u16)op_read(c, &rm, 2);
+            u32 sg = rm.reg & 7;
+            if (sg > 5) sg = 0;
+            v = (u64)c->sel[sg];
+            if (rm.is_reg) reg_write(c, rm.rm, s, v);
+            else op_write(c, &rm, 2, v);
             break;
+        }
+        case 0x8e: {  /* mov sreg, r/m16 */
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            u32 sg = rm.reg & 7;
+            if (sg > 5) sg = 0;
+            c->sel[sg] = (u16)op_read(c, &rm, 2);
+            break;
+        }
         case 0x8f:  /* pop r/m */
             s = (rex & 8) ? 8 : 4;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
@@ -1001,6 +1035,14 @@ int step(struct CPUState *c)
             break;
         case 0x9c: push64(c, c->flags); break;
         case 0x9d: c->flags = pop64(c) | 2; break;
+        case 0xa8: case 0xa9: {  /* test al/eax/rax, imm */
+            s = (op == 0xa8) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
+            imm = (s == 1) ? fetch_n(c, 1) :
+                  ((s == 2) ? fetch_n(c, 2) :
+                   ((s == 8) ? sx(fetch_n(c, 4), 32) : fetch_n(c, 4)));
+            flags_logic(c, reg_read(c, 0, s) & imm, s);
+            break;
+        }
         case 0x9e:  /* sahf */
             c->flags = (c->flags & ~((u64)0xff)) | ((c->r[0] >> 8) & 0xff) | 2;
             break;
@@ -1046,6 +1088,7 @@ int step(struct CPUState *c)
             s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             u64 cnt = (op <= 0xc1) ? fetch_n(c, 1) : ((op == 0xd0 || op == 0xd1) ? 1 : reg_read(c, 1, 1));
+            op_fix_rip(&rm, (op <= 0xc1) ? 1 : 0);
             v = op_read(c, &rm, s);
             shift_op(c, (int)(rm.reg & 7), &v, cnt, s);
             op_write(c, &rm, s, v);
@@ -1073,6 +1116,7 @@ int step(struct CPUState *c)
             imm = (s == 1) ? fetch_n(c, 1) :
                   ((s == 2) ? fetch_n(c, 2) :
                    ((s == 8) ? sx(fetch_n(c, 4), 32) : fetch_n(c, 4)));
+            op_fix_rip(&rm, (s == 1) ? 1 : ((s == 2) ? 2 : 4));
             op_write(c, &rm, s, imm);
             break;
         }
@@ -1147,9 +1191,12 @@ int step(struct CPUState *c)
             idx = rm.reg & 7;
             /* 长模式下 near call/jmp/push 的操作数固定 64 位，不带 REX.W 也一样 */
             if ((c->efer & EFER_LMA) && idx >= 2 && idx <= 6) s = 8;
-            a = op_read(c, &rm, s);
+            a = (idx == 0 || idx == 1) ? 0 : op_read(c, &rm, s);
             if (idx == 0 || idx == 1) {  /* test imm */
-                imm = fetch_n(c, s == 1 ? 1 : (s == 2 ? 2 : 4));
+                u64 nb = (s == 1) ? 1 : ((s == 2) ? 2 : 4);
+                imm = fetch_n(c, nb);
+                op_fix_rip(&rm, nb);
+                a = op_read(c, &rm, s);
                 flags_logic(c, a & imm, s);
             } else if (idx == 2) {       /* not */
                 op_write(c, &rm, s, ~a);

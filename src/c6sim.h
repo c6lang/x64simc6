@@ -95,6 +95,7 @@ struct Operand {
     u32 rm;
     u32 is_reg;
     u32 seg;
+    u32 rip_rel;   /* RIP 相对寻址：地址还需加上尾部立即数字节数 */
 };
 
 struct CPUState {
