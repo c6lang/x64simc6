@@ -96,6 +96,8 @@ static u64 reg_read(struct CPUState *c, u32 i, int s)
 static void reg_write(struct CPUState *c, u32 i, int s, u64 v)
 {
     u64 m = sz_mask(s);
+    /* x86-64：32 位寄存器写入会把高 32 位清零 */
+    if (s == 4) { c->r[i & 15] = v & 0xffffffffu; return; }
     if (s == 1 && i >= 4 && i <= 7 && !c->rex_present) {
         c->r[i - 4] = (c->r[i - 4] & ~((u64)0xff00)) | ((v & 0xff) << 8);
         return;
@@ -249,12 +251,12 @@ static int cond(struct CPUState *c, u32 n)
     switch (n & 15) {
     case 0: return (f & RF_OF) != 0;
     case 1: return !((f & RF_OF) != 0);
-    case 2: return cf || zf;
-    case 3: return !cf && !zf;
-    case 4: return cf;
-    case 5: return !cf;
-    case 6: return zf;
-    case 7: return !zf;
+    case 2: return cf;
+    case 3: return !cf;
+    case 4: return zf;
+    case 5: return !zf;
+    case 6: return cf || zf;
+    case 7: return !cf && !zf;
     case 8: return sf;
     case 9: return !sf;
     case 10: return pf;
@@ -1046,6 +1048,10 @@ int step(struct CPUState *c)
             c->rip = ret;
             break;
         }
+        case 0xc9:  /* leave: mov rsp,rbp; pop rbp */
+            c->r[4] = c->r[5];
+            c->r[5] = pop64(c);
+            break;
         case 0xc6: case 0xc7: {
             s = (op == 0xc6) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
