@@ -53,26 +53,6 @@ void machine_reset_noram(void)
     mem_tlb_flush();
 }
 
-/* 差分测试用：不复位 128MiB RAM（新进程本来全是 0），只清 CPU/设备状态 */
-void machine_reset_noram(void)
-{
-    struct Machine *m = &g_m;
-    u32 i = 0;
-    for (i = 0; i < (u32)sizeof(m->cpu); i++)
-        ((u8 *)&m->cpu)[i] = 0;
-    m->instructions = 0;
-    m->tsc = 0;
-    m->pit_ticks = 0;
-    m->last_pit_tsc = 0;
-    m->halted = 0;
-    m->exit_code = 0;
-    m->serial.lsr = 0x60;
-    m->serial.msr = 0xb0;
-    cpu_init(&m->cpu);
-    dev_init();
-    mem_tlb_flush();
-}
-
 void machine_init(void)
 {
     machine_reset();
@@ -83,18 +63,31 @@ static int machine_step_loop(u64 count)
     u32 n = (u32)count;
     while (n > 0) {
         n--;
-        if (g_m.halted || g_m.cpu.halted)
+        if (g_m.halted)
             break;
+        if (g_m.cpu.halted) {
+            /* HLT 状态：IF=1 时等待设备中断唤醒，IF=0 则永久停机 */
+            if (!(g_m.cpu.flags & RF_IF)) {
+                g_m.halted = 1;
+                break;
+            }
+            g_m.tsc += 0x2000;
+            g_m.instructions += 0x2000;
+            dev_tick();
+            if (g_m.cpu.exc_pending) {
+                g_m.cpu.halted = 0;
+                cpu_deliver(&g_m.cpu);
+            }
+            continue;
+        }
         g_m.instructions++;
         g_m.tsc++;
         cpu_step(&g_m.cpu);
         if (g_m.cpu.exc_pending)
             cpu_deliver(&g_m.cpu);
-        if (g_m.cpu.halted || g_m.halted) {
-            g_m.halted = 1;
+        if (g_m.halted)
             break;
-        }
-        if ((g_m.instructions & 0x1fffu) == 0)
+        if ((g_m.instructions & 0x3ffffu) == 0)
             dev_tick();
     }
     return g_m.halted ? 0 : 1;

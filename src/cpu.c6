@@ -331,14 +331,6 @@ void cpu_deliver(struct CPUState *c)
     u8 has_ec = 0, type = 0;
 
     if (!c->exc_pending) return;
-    {
-        static u32 dv = 0;
-        if (g_m.instructions > 15000000ULL && dv < 12) {
-            dv++;
-            printf("[dv] vec=%x cs=%x rip=%llx rsp=%llx\n", (u32)c->exc_vec,
-                   (u32)c->sel[1], (unsigned long long)c->rip, (unsigned long long)c->r[4]);
-        }
-    }
     vec = c->exc_vec;
     has_ec = c->exc_has_ec;
     ec = c->exc_ec;
@@ -572,13 +564,12 @@ static void do_divide(struct CPUState *c, u64 a, u64 b, int s, int sign)
 
 /* ---------------- 字符串指令 ---------------- */
 
-static void do_string(struct CPUState *c, u8 op, u32 pre, int s)
+static int do_string(struct CPUState *c, u8 op, u32 pre, int s)
 {
-    u64 n = 1, k = 0;
     int dir = (c->flags & RF_DF) ? -1 : 1;
     int rep = (pre & (PRE_REP | PRE_REPNE)) ? 1 : 0;
-    if (rep) n = c->r[1];
-    for (k = 0; k < n; k++) {
+    if (rep && c->r[1] == 0) return 0;
+    {
         u64 a = 0, b = 0, v = 0;
         switch (op) {
         case 0xa4: case 0xa5:  /* movs */
@@ -619,15 +610,17 @@ static void do_string(struct CPUState *c, u8 op, u32 pre, int s)
             c->r[7] += dir * s;
             break;
         default:
-            return;
-        }
-        if (rep) c->r[1]--;
-        if (!rep) break;
-        if ((op == 0xa6 || op == 0xa7 || op == 0xae || op == 0xaf)) {
-            if ((pre & PRE_REP) && (c->flags & RF_ZF)) break;
-            if ((pre & PRE_REPNE) && !(c->flags & RF_ZF)) break;
+            return 0;
         }
     }
+    if (!rep) return 0;
+    c->r[1]--;
+    if (c->r[1] == 0) return 0;
+    if (op == 0xa6 || op == 0xa7 || op == 0xae || op == 0xaf) {
+        if ((pre & PRE_REP) && (c->flags & RF_ZF)) return 0;
+        if ((pre & PRE_REPNE) && !(c->flags & RF_ZF)) return 0;
+    }
+    return 1;
 }
 
 /* ---------------- 单步执行 ---------------- */
@@ -724,6 +717,7 @@ int step(struct CPUState *c)
     u32 pre = (u32)(oc >> 16);
     g_pre = pre;
     int addrsz = (pre & PRE_67) ? 4 : 8;
+    u32 trap_exc = 0;   /* INT3/INT n/INTO 是陷阱：返回地址指向下一条指令 */
     int opsz = (pre & PRE_66) ? 2 : 4;
 
     if (c->efer & EFER_LMA) {
@@ -857,9 +851,17 @@ int step(struct CPUState *c)
             do_cpuid(c);
             break;
         case 0xa3: case 0xab: case 0xb3: case 0xbb: { /* bt/bts/btr/btc */
+            u64 bitoff = 0;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            bitoff = reg_read(c, rm.reg, s);
+            /* 内存操作数：位偏移是带符号值，要参与有效地址计算 */
+            if (!rm.is_reg) {
+                if (s == 8) rm.addr += (bitoff >> 6) * 8;
+                else if (s == 4) rm.addr += (u64)(((i64)bitoff << 32 >> 32) >> 5) * 4;
+                else rm.addr += (u64)(((i64)bitoff << 48 >> 48) >> 4) * 2;
+            }
+            a = (u32)(bitoff & (u64)(s * 8 - 1));
             v = op_read(c, &rm, s);
-            a = reg_read(c, rm.reg, s) & ((s == 8) ? 63 : 31);
             b = (v >> a) & 1;
             c->flags = (c->flags & ~RF_CF) | b;
             if (op2 == 0xab) op_write(c, &rm, s, v | ((u64)1 << a));
@@ -979,8 +981,10 @@ int step(struct CPUState *c)
             u32 sub = 0, bit = 0;
             rm = decode_modrm(c, m1, rex, addrsz);
             sub = (m1 >> 3) & 7;
-            bit = (u32)fetch8(c) & ((s == 8) ? 63u : ((s == 4) ? 31u : 15u));
+            bit = (u32)fetch8(c);
             op_fix_rip(&rm, 1);
+            if (!rm.is_reg) rm.addr += (u64)(bit / (u32)(s * 8)) * (u64)s;
+            bit = bit & ((s == 8) ? 63u : ((s == 4) ? 31u : 15u));
             v = op_read(c, &rm, s);
             c->flags &= ~RF_CF;
             if ((v & ((u64)1 << bit)) != 0) c->flags |= RF_CF;
@@ -1285,13 +1289,38 @@ int step(struct CPUState *c)
             }
             break;
         }
+        case 0xd8: case 0xd9: case 0xda: case 0xdb:
+        case 0xdc: case 0xdd: case 0xde: case 0xdf: {
+            /* x87：引导期只用到状态管理，寄存器运算按 NOP 处理 */
+            u8 m1 = fetch8(c);
+            u32 mod1 = (u32)m1 >> 6;
+            u32 regf = (u32)(m1 >> 3) & 7;
+            if (mod1 != 3) {
+                rm = decode_modrm(c, m1, rex, addrsz);
+                if (op == 0xd9 && regf == 5) {
+                    (void)mem_r16(rm.addr);          /* fldcw */
+                } else if (op == 0xd9 && regf == 7) {
+                    mem_w16(rm.addr, 0x037f);        /* fnstcw */
+                } else if (op == 0xdd && regf == 7) {
+                    mem_w16(rm.addr, 0);             /* fnstsw */
+                }
+            } else {
+                if (op == 0xdd && m1 == 0xe0)
+                    c->r[0] = (c->r[0] & ~(u64)0xffff) | 0;   /* fnstsw ax */
+                if (op == 0xdf && m1 == 0xe0)
+                    c->r[0] = (c->r[0] & ~(u64)0xffff) | 0;
+            }
+            break;
+        }
+        case 0x9b: break;   /* fwait */
         case 0xa4: case 0xa5: case 0xa6: case 0xa7:
         case 0xaa: case 0xab: case 0xac: case 0xad:
         case 0xae: case 0xaf:
             s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
             if (op == 0xa5 || op == 0xa7 || op == 0xab || op == 0xad || op == 0xaf)
                 s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
-            do_string(c, (u8)op, pre, s);
+            if (do_string(c, (u8)op, pre, s))
+                c->rip = start;
             break;
         case 0xb0: case 0xb1: case 0xb2: case 0xb3:
         case 0xb4: case 0xb5: case 0xb6: case 0xb7:
@@ -1345,9 +1374,21 @@ int step(struct CPUState *c)
         }
         case 0xcc:  /* int3 */
             raise_exception(c, 3, 0, 0);
+            trap_exc = 1;
             break;
         case 0xcd:  /* int imm8 */
             raise_exception(c, (u32)fetch_n(c, 1), 0, 0);
+            trap_exc = 1;
+            break;
+        case 0xce:  /* into */
+            if (c->flags & RF_OF) {
+                raise_exception(c, 4, 0, 0);
+                trap_exc = 1;
+            }
+            break;
+        case 0xf1:  /* icebp */
+            raise_exception(c, 1, 0, 0);
+            trap_exc = 1;
             break;
         case 0xcf: {  /* iretq：64 位模式总是弹出 5 槽栈帧 */
             u64 sp = c->r[4];
@@ -1356,18 +1397,6 @@ int step(struct CPUState *c)
             u64 nf = mem_r64(sp + 16);
             u64 nrsp = mem_r64(sp + 24);
             u64 nss = mem_r64(sp + 32);
-            if ((ncs & 0xffff) != 0x10 && (ncs & 0xffff) != 0x23 &&
-                (ncs & 0xffff) != 0x2b && (ncs & 0xffff) != 0x33) {
-                static u32 iv2 = 0;
-                if (iv2 < 6) {
-                    iv2++;
-                    printf("[iv2] sp=%llx nr=%llx ncs=%llx nf=%llx nrsp=%llx nss=%llx\n",
-                           (unsigned long long)sp, (unsigned long long)nr,
-                           (unsigned long long)ncs, (unsigned long long)nf,
-                           (unsigned long long)mem_r64(sp + 24),
-                           (unsigned long long)mem_r64(sp + 32));
-                }
-            }
             c->rip = nr;
             c->flags = nf | 2;
             c->sel[1] = (u16)ncs;
@@ -1571,7 +1600,7 @@ int step(struct CPUState *c)
             break;
         }
     }
-    if (c->exc_pending)
+    if (c->exc_pending && !trap_exc)
         c->rip = start;
     return 0;
 }

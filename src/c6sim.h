@@ -137,7 +137,7 @@ struct PicState {
     u8 imr[2];
     u8 isr[2];
     u8 irr[2];
-    u8 icw1, icw2, icw3, icw4, init_state[2], cascade;
+    u8 icw1, icw2[2], icw3[2], icw4[2], init_state[2], cascade;
     u8 read_isr;
 };
 
