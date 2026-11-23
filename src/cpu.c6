@@ -54,6 +54,9 @@ static u64 fetch_n(struct CPUState *c, int n)
 #define PRE_67    ((u32)1 << 3)
 #define PRE_LOCK  ((u32)1 << 4)
 #define PRE_SEG   ((u32)1 << 5)
+#define PRE_SEGFS ((u32)1 << 6)
+#define PRE_SEGGS ((u32)1 << 7)
+static u32 g_pre = 0;
 
 static u64 fetch_opcode(struct CPUState *c)
 {
@@ -67,8 +70,11 @@ static u64 fetch_opcode(struct CPUState *c)
         if (op == 0x66) { pre |= PRE_66; continue; }
         if (op == 0x67) { pre |= PRE_67; continue; }
         if (op == 0xf0) { pre |= PRE_LOCK; continue; }
-        if (op == 0x2e || op == 0x36 || op == 0x3e || op == 0x26 ||
-            op == 0x64 || op == 0x65) { pre |= PRE_SEG; continue; }
+        if (op == 0x64) { pre |= PRE_SEGFS; continue; }
+        if (op == 0x65) { pre |= PRE_SEGGS; continue; }
+        if (op == 0x2e || op == 0x36 || op == 0x3e || op == 0x26) {
+            pre |= PRE_SEG; continue;
+        }
         break;
     }
     if ((op & 0xf0) == 0x40) {
@@ -104,8 +110,11 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
     struct Operand o = {0};
     u32 mod = (u32)modrm >> 6;
     u32 rm = (u32)modrm & 7;
-    u64 base = 0, index = 0, disp = 0;
+    u64 base = 0, index = 0, disp = 0, segbase = 0;
     u8 sib = 0, scale = 0;
+    int use_base = 1;
+    if (g_pre & PRE_SEGGS) segbase = c->msr_gs_base;
+    else if (g_pre & PRE_SEGFS) segbase = c->msr_fs_base;
 
     o.reg = ((modrm >> 3) & 7) + ((rex & 4) ? 8 : 0);
     if (mod == 3) {
@@ -140,9 +149,10 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
         index = (u64)(((sib >> 3) & 7) + ((rex & 2) ? 8 : 0));
         if (index == 4) index = 0;              /* no index */
         base = (u64)(sib & 7);
-        if (base == 5 && mod == 0)
+        if (base == 5 && mod == 0) {
             base = 0;
-        else
+            use_base = 0;          /* SIB base=5/mod=0 表示无基址 */
+        } else
             base += (rex & 1) ? 8 : 0;
     } else {
         base = (u64)rm + ((rex & 1) ? 8 : 0);
@@ -150,7 +160,7 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
     if (mod == 0) {
         if (rm == 5) {
             disp = sx(fetch_n(c, 4), 32);
-            o.addr = c->rip + disp;             /* RIP 相对 */
+            o.addr = c->rip + disp + segbase;   /* RIP 相对 */
             return o;
         }
     } else if (mod == 1) {
@@ -158,7 +168,7 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
     } else if (mod == 2) {
         disp = sx(fetch_n(c, 4), 32);
     }
-    o.addr = c->r[base & 15] + (index << scale) + disp;
+    o.addr = (use_base ? c->r[base & 15] : 0) + (index << scale) + disp + segbase;
     return o;
 }
 
@@ -552,6 +562,7 @@ int step(struct CPUState *c)
     u8 op = (u8)oc;
     u8 rex = (u8)(oc >> 8);
     u32 pre = (u32)(oc >> 16);
+    g_pre = pre;
     int addrsz = (pre & PRE_67) ? 4 : 8;
     int opsz = (pre & PRE_66) ? 2 : 4;
 
@@ -584,17 +595,16 @@ int step(struct CPUState *c)
         case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x26:
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             if (op2 == 0x20) {
-                reg_write(c, rm.reg, opsz, c->cr[rm.rm & 15]);
+                /* ModRM.reg = 控制寄存器号，ModRM.rm = 通用寄存器号 */
+                reg_write(c, rm.rm, opsz, c->cr[rm.reg & 15]);
             } else if (op2 == 0x22) {
-                v = reg_read(c, rm.reg, opsz);
-                if (c->cr[rm.rm & 15] != v) {
-                    c->cr[rm.rm & 15] = v;
+                v = reg_read(c, rm.rm, opsz);
+                if (c->cr[rm.reg & 15] != v) {
+                    c->cr[rm.reg & 15] = v;
                     mem_tlb_flush();
-                    if (rm.rm == 0 && !(c->efer & EFER_LMA) && (v & CR0_PG))
-                        c->efer |= 0; /* PAE 由 CR4 控制 */
                 }
             } else if (op2 == 0x21) {
-                reg_write(c, rm.reg, opsz, 0);
+                reg_write(c, rm.rm, opsz, 0);
             }
             break;
         case 0x01: {  /* 系统组 */
@@ -619,6 +629,9 @@ int step(struct CPUState *c)
             }
             break;
         }
+        case 0x18: case 0x1e:  /* 0f 18 /r 与 endbr64：NOP */
+            (void)fetch8(c);
+            break;
         case 0x30:  /* wrmsr */
             msr_write(c, (u32)c->r[2], c->r[0] | (c->r[3] << 32));
             break;
@@ -939,9 +952,10 @@ int step(struct CPUState *c)
         case 0x88: case 0x89: case 0x8a: case 0x8b: {
             s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            a = (op & 2) ? reg_read(c, rm.reg, s) : op_read(c, &rm, s);
-            if (op & 2) op_write(c, &rm, s, a);
-            else reg_write(c, rm.reg, s, a);
+            /* 0x88/0x89: MOV r/m,reg；0x8a/0x8b: MOV reg,r/m */
+            a = (op & 2) ? op_read(c, &rm, s) : reg_read(c, rm.reg, s);
+            if (op & 2) reg_write(c, rm.reg, s, a);
+            else op_write(c, &rm, s, a);
             break;
         }
         case 0x8d:  /* lea */
@@ -1011,8 +1025,11 @@ int step(struct CPUState *c)
         case 0xb8: case 0xb9: case 0xba: case 0xbb:
         case 0xbc: case 0xbd: case 0xbe: case 0xbf:
             s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
-            reg_write(c, (op - 0xb8) + ((rex & 1) ? 8 : 0), s,
-                      fetch_n(c, s == 2 ? 2 : 4));
+            {
+                u64 immv = (s == 8) ? fetch_n(c, 8) :
+                           ((s == 2) ? fetch_n(c, 2) : fetch_n(c, 4));
+                reg_write(c, (op - 0xb8) + ((rex & 1) ? 8 : 0), s, immv);
+            }
             break;
         case 0xc0: case 0xc1: case 0xd0: case 0xd1: case 0xd2: case 0xd3: {
             s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
@@ -1032,7 +1049,9 @@ int step(struct CPUState *c)
         case 0xc6: case 0xc7: {
             s = (op == 0xc6) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            imm = fetch_n(c, s == 1 ? 1 : (s == 2 ? 2 : 4));
+            imm = (s == 1) ? fetch_n(c, 1) :
+                  ((s == 2) ? fetch_n(c, 2) :
+                   ((s == 8) ? sx(fetch_n(c, 4), 32) : fetch_n(c, 4)));
             op_write(c, &rm, s, imm);
             break;
         }
@@ -1105,6 +1124,8 @@ int step(struct CPUState *c)
             s = (op == 0xf6) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             idx = rm.reg & 7;
+            /* 长模式下 near call/jmp/push 的操作数固定 64 位，不带 REX.W 也一样 */
+            if ((c->efer & EFER_LMA) && idx >= 2 && idx <= 6) s = 8;
             a = op_read(c, &rm, s);
             if (idx == 0 || idx == 1) {  /* test imm */
                 imm = fetch_n(c, s == 1 ? 1 : (s == 2 ? 2 : 4));
@@ -1156,6 +1177,8 @@ int step(struct CPUState *c)
             if (op == 0xfe) s = 1;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             idx = rm.reg & 7;
+            /* 长模式下 near call/jmp/push 的操作数固定 64 位，不带 REX.W 也一样 */
+            if ((c->efer & EFER_LMA) && idx >= 2 && idx <= 6) s = 8;
             a = op_read(c, &rm, s);
             if (idx == 0) {  /* inc */
                 res = (a + 1) & sz_mask(s);

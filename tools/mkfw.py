@@ -19,10 +19,10 @@ def extract_vmlinux(bz):
             try:
                 out = dec(data[i:])
                 if out[:4] == b'\x7fELF':
-                    # 取第一个 PT_LOAD（内核代码段），按其 p_paddr 载入
                     phoff = int.from_bytes(out[32:40], 'little')
                     phentsize = int.from_bytes(out[54:56], 'little')
                     phnum = int.from_bytes(out[56:58], 'little')
+                    segs = []
                     for n in range(phnum):
                         ph = out[phoff + n * phentsize: phoff + (n + 1) * phentsize]
                         if len(ph) < 56 or int.from_bytes(ph[:4], 'little') != 1:
@@ -30,8 +30,15 @@ def extract_vmlinux(bz):
                         off = int.from_bytes(ph[8:16], 'little')
                         paddr = int.from_bytes(ph[24:32], 'little')
                         filesz = int.from_bytes(ph[32:40], 'little')
-                        if filesz > 0x100000:
-                            return (out[off:off+filesz], paddr)
+                        segs.append((paddr, filesz, off))
+                    if not segs:
+                        break
+                    base = min(p for p, _, _ in segs)
+                    size = max(p + n for p, n, _ in segs) - base
+                    img = bytearray(size)
+                    for paddr, filesz, off in segs:
+                        img[paddr - base:paddr - base + filesz] = out[off:off + filesz]
+                    return (bytes(img), base)
                 elif len(out) > 0x100000:
                     return (out, 0x100000)
             except Exception:
