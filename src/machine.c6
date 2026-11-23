@@ -1,5 +1,4 @@
 /* machine.c6 —— 整机组装与运行循环（c6 方法：m->run()） */
-#include <string.h>
 #include "c6sim.h"
 
 struct Machine g_m = {0};
@@ -12,13 +11,10 @@ void machine_reset(void)
 {
     struct Machine *m = &g_m;
     u32 i = 0;
-    for (i = 0; i < sizeof(m->ram); i++)
-        m->ram[i] = 0;
-    memset(&m->cpu, 0, sizeof(m->cpu));
-    memset(&m->serial, 0, sizeof(m->serial));
-    memset(&m->pic, 0, sizeof(m->pic));
-    memset(&m->pit, 0, sizeof(m->pit));
-    memset(&m->pci, 0, sizeof(m->pci));
+    /* tcc-c6 的 wasm 后端在用局部指针取大偏移成员地址时会算错偏移，
+       这里直接整块清零全局结构，绕开该问题 */
+    for (i = 0; i < sizeof(g_m); i++)
+        ((u8 *)&g_m)[i] = 0;
     m->serial.lsr = 0x60;
     m->serial.msr = 0xb0;
     m->instructions = 0;
@@ -42,29 +38,29 @@ void machine_init(void)
     machine_reset();
 }
 
-int run(struct Machine *self, u64 count)
+static int machine_step_loop(u64 count)
 {
-    u64 i = 0;
-    struct CPUState *c = &self->cpu;
-    for (i = 0; i < count; i++) {
-        if (self->halted || c->halted)
+    u32 n = (u32)count;
+    while (n > 0) {
+        n--;
+        if (g_m.halted || g_m.cpu.halted)
             break;
-        self->instructions++;
-        self->tsc++;
-        c->step();
-        if (c->exc_pending)
-            c->deliver();
-        if (c->halted || self->halted) {
-            self->halted = 1;
+        g_m.instructions++;
+        g_m.tsc++;
+        cpu_step(&g_m.cpu);
+        if (g_m.cpu.exc_pending)
+            cpu_deliver(&g_m.cpu);
+        if (g_m.cpu.halted || g_m.halted) {
+            g_m.halted = 1;
             break;
         }
-        if ((self->instructions & 0x1fffu) == 0)
+        if ((g_m.instructions & 0x1fffu) == 0)
             dev_tick();
     }
-    return self->halted ? 0 : 1;
+    return g_m.halted ? 0 : 1;
 }
 
 int machine_run(u64 count)
 {
-    return run(&g_m, count);
+    return machine_step_loop(count);
 }

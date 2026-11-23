@@ -6,10 +6,9 @@
 int serial_take_output(u8 *dst, int cap)
 {
     int n = 0;
-    struct SerialState *s = &g_m.serial;
-    while (n < cap && s->out_tail != s->out_head) {
-        dst[n] = s->out[(u32)s->out_tail & 0xffff];
-        s->out_tail++;
+    while (n < cap && g_m.serial.out_tail != g_m.serial.out_head) {
+        dst[n] = g_m.serial.out[(u32)g_m.serial.out_tail & 0xffff];
+        g_m.serial.out_tail++;
         n++;
     }
     return n;
@@ -18,15 +17,14 @@ int serial_take_output(u8 *dst, int cap)
 void serial_feed(const u8 *src, int len)
 {
     int i = 0;
-    struct SerialState *s = &g_m.serial;
     for (i = 0; i < len; i++) {
-        s->in[(u32)s->in_head & 0xfff] = src[i];
-        s->in_head++;
+        g_m.serial.in[(u32)g_m.serial.in_head & 0xfff] = src[i];
+        g_m.serial.in_head++;
     }
     if (len > 0) {
-        if (!(s->lsr & 1)) {
-            s->lsr |= 1;                 /* DR */
-            if (s->ier & 1)
+        if (!(g_m.serial.lsr & 1)) {
+            g_m.serial.lsr |= 1;                 /* DR */
+            if (g_m.serial.ier & 1)
                 pic_raise(&g_m, 4);
         }
     }
@@ -34,54 +32,52 @@ void serial_feed(const u8 *src, int len)
 
 static u8 serial_read(u32 port)
 {
-    struct SerialState *s = &g_m.serial;
     u32 off = port & 7;
-    if (s->lcr & 0x80) {
-        if (off == 0) return s->dll;
-        if (off == 1) return s->dlm;
+    if (g_m.serial.lcr & 0x80) {
+        if (off == 0) return g_m.serial.dll;
+        if (off == 1) return g_m.serial.dlm;
     }
     if (off == 0) {
-        if (s->in_tail != s->in_head) {
-            s->rbr = s->in[(u32)s->in_tail & 0xfff];
-            s->in_tail++;
-            if (s->in_tail == s->in_head)
-                s->lsr &= ~((u8)1);
+        if (g_m.serial.in_tail != g_m.serial.in_head) {
+            g_m.serial.rbr = g_m.serial.in[(u32)g_m.serial.in_tail & 0xfff];
+            g_m.serial.in_tail++;
+            if (g_m.serial.in_tail == g_m.serial.in_head)
+                g_m.serial.lsr &= ~((u8)1);
         }
-        return s->rbr;
+        return g_m.serial.rbr;
     }
-    if (off == 1) return s->ier;
+    if (off == 1) return g_m.serial.ier;
     if (off == 2) {
-        if ((s->ier & 1) && (s->in_tail != s->in_head)) return 4;  /* RBR */
-        if (s->ier & 2) return 2;                                  /* THRE */
+        if ((g_m.serial.ier & 1) && (g_m.serial.in_tail != g_m.serial.in_head)) return 4;  /* RBR */
+        if (g_m.serial.ier & 2) return 2;                                  /* THRE */
         return 1;                                                  /* none */
     }
-    if (off == 3) return s->lcr;
-    if (off == 4) return s->mcr;
-    if (off == 5) return s->lsr;
-    if (off == 6) return s->msr;
-    return s->fcr;
+    if (off == 3) return g_m.serial.lcr;
+    if (off == 4) return g_m.serial.mcr;
+    if (off == 5) return g_m.serial.lsr;
+    if (off == 6) return g_m.serial.msr;
+    return g_m.serial.fcr;
 }
 
 static void serial_write(u32 port, u8 v)
 {
-    struct SerialState *s = &g_m.serial;
     u32 off = port & 7;
-    if (s->lcr & 0x80) {
-        if (off == 0) { s->dll = v; return; }
-        if (off == 1) { s->dlm = v; return; }
+    if (g_m.serial.lcr & 0x80) {
+        if (off == 0) { g_m.serial.dll = v; return; }
+        if (off == 1) { g_m.serial.dlm = v; return; }
     }
     switch (off) {
     case 0:
-        s->out[(u32)s->out_head & 0xffff] = v;
-        s->out_head++;
-        s->lsr |= 0x40;
-        if (s->ier & 2)
+        g_m.serial.out[(u32)g_m.serial.out_head & 0xffff] = v;
+        g_m.serial.out_head++;
+        g_m.serial.lsr |= 0x40;
+        if (g_m.serial.ier & 2)
             pic_raise(&g_m, 4);
         break;
-    case 1: s->ier = v; break;
-    case 2: s->fcr = v; break;
-    case 3: s->lcr = v; break;
-    case 4: s->mcr = v; break;
+    case 1: g_m.serial.ier = v; break;
+    case 2: g_m.serial.fcr = v; break;
+    case 3: g_m.serial.lcr = v; break;
+    case 4: g_m.serial.mcr = v; break;
     default: break;
     }
 }
@@ -394,8 +390,9 @@ void dev_tick(void)
     }
     if (irq == 0 && !(p->irr[0] & 1) && !(p->irr[1] & 1))
         return;
-    if (irq > 0)
-        cpu_raise(&m->cpu, p->icw2 + irq, 0, 0);
-    else
-        cpu_raise(&m->cpu, p->icw2, 0, 0);
+    if (irq > 0) {
+        raise_exception(&m->cpu, p->icw2 + irq, 0, 0);
+    } else {
+        raise_exception(&m->cpu, p->icw2, 0, 0);
+    }
 }

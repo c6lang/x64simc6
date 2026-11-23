@@ -18,7 +18,7 @@
 - [x] `tests/c6_features_probe.c6`：native 接口/方法/切片/foreach/元组/defer/err/catch/f-string 全通过
 - [x] `tests/c6_features_wasm.c6`：wasm 下方法/切片/foreach/元组/defer 通过
 - [x] `tests/if_probe.c6`：定位 wasm 接口转换崩溃的根因（LP64 胖指针 vs 32 位 helper）
-- [ ] `build.sh`（native / wasm / fw / test / clean）——尚未编写
+- [x] `build.sh`（native / wasm / all / fw / test / clean）：native 与 wasm 产物均可构建
 - [ ] `tests/test_cpu.c6` 的 `-test` 单元测试骨架——尚未编写
 
 ## 阶段 3 —— CPU / 内存核心（代码已落地，等待冒烟验证）
@@ -26,7 +26,7 @@
 - [x] `src/c6sim.h`：类型、常量、CPUState/Machine/Operand 结构、跨模块声明（原计划的 `types.c6` 合并进这里）
 - [x] `src/mem.c6`：128 MiB RAM、MMIO 分派、4 级分页（4K/2M/1G）、TLB、缺页异常
 - [x] `src/cpu.c6`：前缀/REX/ModRM/SIB 译码、GPR/标志、ALU/移位/位操作/乘除、控制流、字符串指令、I/O、系统调用、MSR/CPUID、FPU/SSE 最小集、异常投递
-- [x] `src/cpu.c6` 暴露 c6 方法 `c->step()` / `c->deliver()`，元组用于取指返回，枚举命名空间用于异常号
+- [x] `src/cpu.c6` 暴露 c6 方法 `c->step()` / `c->deliver()`，枚举命名空间用于异常号；取指元组在 wasm 下因后端解构偏移错误改为 packed `u64`（见 DESIGN.md §13）
 - [x] native 全量链接通过：`c6c -I src src/mem.c6 ... src/main.c6 -o build/sim`
 - [x] `tools/hello64.py` 生成 47 字节 64 位手汇编 payload；`./build/sim --payload build/hello64.bin` 输出 `C6SIM64 OK`，26 条指令后正常停机（退出码 0）
 - [ ] `tests/test_cpu.c6` ALU / ModRM / 分页单元测试——尚未编写
@@ -50,17 +50,17 @@
 
 ## 阶段 6 —— wasm 与浏览器
 
-- [ ] `src/wasm.c6`：`sim_init / sim_reset / sim_run / sim_status / sim_serial_out / sim_serial_in / sim_stat_insns / sim_ram_base`
-- [ ] wasm-ld 参数：`--no-entry --export-all`，initial 256 MiB / max 512 MiB
-- [ ] node 冒烟：实例化 → 写固件 → 运行 → 读串口
+- [x] `src/wasm.c6`：`sim_init / sim_load_payload / sim_reset / sim_run / sim_status / sim_serial_out / sim_serial_in / sim_set_cmdline / sim_stat_insns / sim_ram_base`
+- [x] wasm-ld 参数：`--no-entry --export-all`，initial 256 MiB / max 512 MiB；`web/sim.wasm` 无 import
+- [x] node 冒烟 `tests/wasm_smoke.js`：实例化 → 写 payload → 运行 → 读串口，输出 `C6SIM64 OK`，26 条指令后停机
 - [ ] `web/index.html` + `web/style.css` + `web/app.js`
 - [ ] 浏览器验证 Alpine 登录提示与 root 输入
 
 ## 阶段 7 —— wasm 网络与页面存储（用户新增硬性需求，DESIGN.md §10.1）
 
-- [ ] `sim_host_bridge()` / `sim_host_event()` 共享内存邮箱
+- [x] `src/wasm.c6` 侧 `sim_host_bridge()` / `sim_host_event()` 64 KiB 共享邮箱 + 事件分派（1=NET_RESPONSE, 2=STORAGE_LOADED, 3=USER_INPUT）
 - [ ] `fetch()` 拉固件（URL 输入、进度、重试）+ Cache Storage / IndexedDB 缓存
-- [ ] `sim_hostfs_*` 文件表（8 MiB 数据区 + dirty 标记）+ IndexedDB 双向同步
+- [x] `src/hostfs.c6` 文件表（32 槽 × 256 KiB = 8 MiB，dirty 标记）+ `sim_hostfs_import/export/put/get`；[ ] JS/IndexedDB 双向同步尚未实现
 - [ ] 串口日志 / 机器快照持久化，刷新页面后可恢复
 - [ ] 预留 virtio-net / c6blk 设备接口（v2，不阻塞 v1）
 

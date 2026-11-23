@@ -1,0 +1,193 @@
+/* hostfs.c6 —— wasm 侧的"页面存储文件系统"
+ * 用 c6 切片 + foreach + 元组：文件表固定 32 槽，每槽 256 KiB，共 8 MiB。
+ * JS 在启动时 import IndexedDB 的内容，每帧 export dirty 槽写回。 */
+#include "c6sim.h"
+
+#define FS_SLOTS     32
+#define FS_SLOT_SIZE (256u << 10)
+#define FS_NAME_LEN  40
+
+struct FsEntry {
+    u8 name[FS_NAME_LEN];
+    u32 len;
+    u32 dirty;
+    u32 used;
+};
+
+static struct FsEntry fs_tab[FS_SLOTS];
+static u8 fs_data[FS_SLOTS * FS_SLOT_SIZE];
+static u32 fs_bridge_len = 0;
+
+static u32 ld16(u8[:] v, u32 i)
+{
+    return (u32)v[i] | ((u32)v[i + 1] << 8);
+}
+
+static u32 ld32(u8[:] v, u32 i)
+{
+    return (u32)v[i] | ((u32)v[i + 1] << 8) |
+           ((u32)v[i + 2] << 16) | ((u32)v[i + 3] << 24);
+}
+
+static void st16(u8[:] v, u32 i, u32 x)
+{
+    v[i] = (u8)x;
+    v[i + 1] = (u8)(x >> 8);
+}
+
+static void st32(u8[:] v, u32 i, u32 x)
+{
+    v[i] = (u8)x;
+    v[i + 1] = (u8)(x >> 8);
+    v[i + 2] = (u8)(x >> 16);
+    v[i + 3] = (u8)(x >> 24);
+}
+
+static u32 cstr_len(const char *s)
+{
+    u32 n = 0;
+    while (s[n] != 0 && n < FS_NAME_LEN - 1) n++;
+    return n;
+}
+
+static int name_eq(const u8 *a, const char *b)
+{
+    u32 i = 0;
+    for (i = 0; i < FS_NAME_LEN; i++) {
+        if (a[i] != (u8)b[i]) return 0;
+        if (b[i] == 0) return 1;
+    }
+    return 1;
+}
+
+static int find_file(const char *name)
+{
+    int i = 0;
+    for (i = 0; i < FS_SLOTS; i++) {
+        if (fs_tab[i].used && name_eq(fs_tab[i].name, name))
+            return i;
+    }
+    return -1;
+}
+
+int sim_hostfs_put(const char *name, u8 *data, u32 len)
+{
+    int slot = find_file(name);
+    u32 n = cstr_len(name);
+    u32 i = 0;
+    if (n == 0) return -1;
+    if (len > FS_SLOT_SIZE) return -2;
+    if (slot < 0) {
+        for (i = 0; i < FS_SLOTS; i++) {
+            if (!fs_tab[i].used) { slot = (int)i; break; }
+        }
+    }
+    if (slot < 0) return -3;
+    for (i = 0; i < FS_NAME_LEN; i++)
+        fs_tab[slot].name[i] = (i < n) ? (u8)name[i] : 0;
+    for (i = 0; i < len; i++)
+        fs_data[slot * FS_SLOT_SIZE + i] = data[i];
+    fs_tab[slot].len = len;
+    fs_tab[slot].used = 1;
+    fs_tab[slot].dirty = 1;
+    return 0;
+}
+
+int sim_hostfs_get(const char *name, u8 *dst, u32 cap)
+{
+    int slot = find_file(name);
+    u32 n = 0, i = 0;
+    if (slot < 0) return -1;
+    n = fs_tab[slot].len;
+    if (n > cap) n = cap;
+    for (i = 0; i < n; i++)
+        dst[i] = fs_data[slot * FS_SLOT_SIZE + i];
+    return (int)n;
+}
+
+/* 记录格式：u16 name_len, u16 pad, u32 data_len, name[name_len], data[data_len]
+ * name_len==0 表示结束。切片的边界检查由 c6 运行库负责。 */
+int sim_hostfs_import(u8 *buf, u32 len)
+{
+    u8[:] v = (u8[:]){buf, len};
+    u32 off = 0;
+    int count = 0;
+    u8 name[FS_NAME_LEN] = {0};
+    u32 nl = 0, dl = 0, i = 0;
+
+    while (off + 8 <= len) {
+        nl = ld16(v, off);
+        dl = ld32(v, off + 4);
+        off += 8;
+        if (nl == 0) break;
+        if (nl >= FS_NAME_LEN || off + nl + dl > len) return -1;
+        for (i = 0; i < nl; i++) name[i] = v[off + i];
+        name[nl] = 0;
+        off += nl;
+        if (sim_hostfs_put((const char *)name, buf + off, dl) != 0) return -2;
+        off += dl;
+        count++;
+    }
+    return count;
+}
+
+int sim_hostfs_export(u8 *buf, u32 cap)
+{
+    u8[:] v = (u8[:]){buf, cap};
+    u32 off = 0;
+    int count = 0;
+    u32 i = 0, j = 0, nl = 0;
+
+    foreach (u32 k = 0:FS_SLOTS) {
+        if (!fs_tab[k].used || !fs_tab[k].dirty) continue;
+        nl = cstr_len((const char *)fs_tab[k].name);
+        if (off + 8 + nl + fs_tab[k].len > cap) break;
+        st16(v, off, nl);
+        st16(v, off + 2, 0);
+        st32(v, off + 4, fs_tab[k].len);
+        off += 8;
+        for (j = 0; j < nl; j++) v[off + j] = fs_tab[k].name[j];
+        off += nl;
+        for (j = 0; j < fs_tab[k].len; j++)
+            v[off + j] = fs_data[k * FS_SLOT_SIZE + j];
+        off += fs_tab[k].len;
+        fs_tab[k].dirty = 0;
+        count++;
+        (void)i;
+    }
+    st16(v, off, 0);
+    st16(v, off + 2, 0);
+    st32(v, off + 4, 0);
+    return (int)(off + 8);
+}
+
+/* 共享内存邮箱：JS 写入网络响应，再调用 sim_host_event(1, len) */
+static u8 g_bridge[65536];
+static u32 g_bridge_used = 0;
+
+u8 *sim_host_bridge(void)
+{
+    return g_bridge;
+}
+
+int sim_host_event(u32 code, u32 len)
+{
+    if (len > sizeof(g_bridge)) return -1;
+    g_bridge_used = len;
+    if (code == 1) {                 /* NET_RESPONSE：存成一个文件 */
+        return sim_hostfs_put("__net/last", g_bridge, len);
+    }
+    if (code == 2) {                 /* STORAGE_LOADED */
+        return 0;
+    }
+    if (code == 3) {                 /* USER_INPUT */
+        serial_feed(g_bridge, (int)len);
+        return 0;
+    }
+    return -2;
+}
+
+u32 sim_bridge_len(void)
+{
+    return g_bridge_used;
+}

@@ -65,7 +65,6 @@ x64simc6/
 │   └── ALPINE.md              # 固件制作细节（实现后补）
 ├── src/
 │   ├── c6sim.h                # 公共类型、常量、extern 声明（.h 用普通 C 语法）
-│   ├── types.c6               # 固定宽度类型、位操作、日志宏
 │   ├── mem.c6                 # 客户机物理内存、MMIO 分派、页表遍历
 │   ├── cpu.c6                 # CPUState、取指/译码/执行、标志位、异常
 │   ├── dev.c6                 # 16550A、8259A、8254、CMOS、PCI 配置空间、debug 端口
@@ -73,7 +72,8 @@ x64simc6/
 │   ├── machine.c6             # Machine：组装 RAM/CPU/设备，run loop，统计
 │   ├── host.c6                # 宿主抽象：控制台环形缓冲、固件内存视图
 │   ├── main.c6                # native CLI
-│   └── wasm.c6                # wasm 导出入口（导出全部函数由 wasm-ld 完成）
+│   ├── wasm.c6                # wasm 导出入口（导出全部函数由 wasm-ld 完成）
+│   └── hostfs.c6              # 页面存储支持：文件表 + 共享内存邮箱（wasm 侧）
 ├── tools/
 │   ├── mkfw.py                # 从 Alpine ISO / minirootfs 生成 firmware.bin
 │   └── hello64.py             # 生成手汇编的 64 位测试 payload（无内核冒烟）
@@ -375,3 +375,9 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
 1. **c6 `interface` 在 wasm32 路径不可用**：tcc-c6 为 wasm32 生成的接口胖指针是 LP64 布局（两个 8 字节字段），但 `libtcc1-wasm32.a` 里的 `__tcc_iface_init_lp64` 按 32 位指针写 4 字节偏移，导致 vtable 指针错位、调用即 `memory access out of bounds`（已用最小用例复现）。对策：MMIO 设备接口在 native 侧用 c6 `interface` + 方法实现，wasm 侧编译同一份逻辑时退化为显式分派（宏切换）；核心其余 c6 特性（方法、切片、foreach、元组、枚举命名空间）两条路径均可用。
 2. **c6 `f"..."` 与 `err`/`catch` 在 wasm32 路径触发 ABI 警告**：`__c6_fmt_l` / `__tcc_err_set_copy` 的签名在 wasm32 目标下 mismatch。对策：把 `err`/`errdefer`/`f-string` 用在只编 native 的 `main.c6`（固件加载的错误处理与诊断），核心诊断用手工十六进制格式化的 `diagnostics` 输出。
 3. **固件内核形态**：直接引导要求 1MiB 处是**未压缩**的内核镜像，`tools/mkfw.py` 在打包时先把 Alpine 的 bzImage 解压成 raw vmlinux（或用 Alpine 包里的 vmlinux），再写入 C6FW。
+4. **wasm 后端局部指针变量会踩相邻栈槽**：tcc-c6 wasm 后端把 `struct CPUState *c = &g_m.cpu;` 之类的局部指针以 8 字节写进只分配 4 字节的栈槽，覆盖相邻局部（例如循环计数器 `n`），表现为「循环只跑一次」「字段读到垃圾」「串口只输出第一个字符」。对策：核心热路径（`machine_step_loop`、`mem_translate`、`fetch8/fetch_opcode`、serial 读写）全部改用 `g_m.cpu` / `g_m.serial` 全局直接访问，不保留局部指针；`machine_reset()` 整块清零 `g_m` 以绕开大结构偏移计算问题。
+5. **wasm 下 c6 元组解构偏移错误**：`(u8 op, u8 rex, u32 pre) = fetch_opcode(c)` 生成的代码把 `rex` 读成 `op` 前一个字节，`op` 读成 0，导致译码全错。对策：`fetch_opcode()` 返回手工打包的 `u64`（`op | rex<<8 | pre<<16`），调用方用移位解包；native 仍保留元组 probe 作为特性验证。
+6. **wasm 下 `memset` 不可用**：freestanding 链接会导入未定义的 `memset`。对策：`machine_reset()` 用手写 `for` 循环清零；核心不引入 `<string.h>`。
+7. **wasm 弱别名方法入口风险**：`run()` / `cpu_raise` 的 `@weak alias` 在 wasm 下签名/跳转不可靠。对策：统一用静态函数 `machine_step_loop()` / `raise_exception()`（全项目改名，避免与 CPUState 方法别名冲突），c6 方法仅保留 native 兼容入口。
+8. **`diag_u64` 在 wasm 上的输出顺序不可靠**：连续调用时标签与数值会错位（console 缓冲写入偏移问题），曾据此误判出「不存在的异常」。对策：wasm 冒烟不再依赖诊断字符串，改用导出探针与串口输出判断；native 保留 f-string/err 诊断。
+9. **`machine_init()` 会清零整个 `g_m`（含 128 MiB RAM）**：JS 直接把 payload/固件写进 `g_m.ram` 区域会被复位抹掉。对策：`sim_load_payload()` / `sim_init()` 先把数据复制到 `g_m` 之外的静态 staging buffer，再复位并加载。

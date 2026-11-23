@@ -96,6 +96,13 @@ struct Operand {
 };
 
 struct CPUState {
+    u8 exc_pending;
+    u32 exc_vec;
+    u64 exc_ec;
+    u8 exc_has_ec;
+    u8 halted;
+    u8 rex_present;
+    u32 halt_code;
     u64 r[16];
     u64 rip;
     u64 flags;
@@ -111,13 +118,6 @@ struct CPUState {
     u64 xmm[16][2];
     u32 mxcsr;
     u8 fxdata[512];
-    u8 exc_pending;
-    u32 exc_vec;
-    u64 exc_ec;
-    u8 exc_has_ec;
-    u8 halted;
-    u8 rex_present;
-    u32 halt_code;
 };
 
 struct SerialState {
@@ -152,7 +152,6 @@ struct PciState {
 
 struct Machine {
     struct CPUState cpu;
-    u8 ram[RAM_SIZE];
     u64 instructions;
     u64 tsc;
     u64 pit_ticks;
@@ -169,6 +168,7 @@ struct Machine {
     u8 *fw_kernel;
     u8 *fw_initrd;
     u32 fw_kernel_len, fw_initrd_len;
+    u8 ram[RAM_SIZE];
 };
 
 extern struct Machine g_m;
@@ -198,13 +198,12 @@ void mem_tlb_flush(void);
 
 /* cpu.c6 */
 int cpu_step(struct CPUState *c);
-void cpu_raise(struct CPUState *c, u32 vec, u8 has_ec, u64 ec);
+void raise_exception(struct CPUState *c, u32 vec, u8 has_ec, u64 ec);
 void cpu_deliver(struct CPUState *c);
 void cpu_init(struct CPUState *c);
-/* c6 方法：c->step() / c->deliver() / m->run() */
+/* c6 方法：c->step() / c->deliver()（run 用静态函数，避免 wasm 弱别名 ABI 问题） */
 int step(struct CPUState *self);
 void deliver(struct CPUState *self);
-int run(struct Machine *self, u64 count);
 
 /* dev.c6 */
 u8 io_r8(u32 port);
@@ -224,5 +223,13 @@ int serial_take_output(u8 *dst, int cap);
 void serial_feed(const u8 *src, int len);
 void host_diag(const char *msg);
 void diag_u64(const char *tag, u64 value);
+
+/* wasm 宿主桥：共享内存邮箱 + IndexedDB 文件表 */
+u8 *sim_host_bridge(void);
+int sim_host_event(u32 code, u32 len);
+int sim_hostfs_import(u8 *buf, u32 len);
+int sim_hostfs_export(u8 *buf, u32 cap);
+int sim_hostfs_put(const char *name, u8 *data, u32 len);
+int sim_hostfs_get(const char *name, u8 *dst, u32 cap);
 
 #endif

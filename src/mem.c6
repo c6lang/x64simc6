@@ -107,18 +107,17 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
     if (pf_ec)
         *pf_ec = ec;
     g_m.cpu.cr[2] = va;
-    cpu_raise(&g_m.cpu, EXC_PF, 1, ec);
+    raise_exception(&g_m.cpu, EXC_PF, 1, ec);
 }
 
 /* user: 0=内核数据, 1=用户数据, 2=取指 */
 u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
 {
-    struct CPUState *c = &g_m.cpu;
     u64 vpn = 0, idx = 0, e = 0, pa = 0, flags = 0;
     /* user: 0=内核数据, 1=用户数据, 2=内核取指（需查 NX，但不要求 U/S=1） */
     u32 level = 0, shift = 0, is_user = (user == 1);
 
-    if (!(c->cr[0] & CR0_PG))
+    if (!(g_m.cpu.cr[0] & CR0_PG))
         return va;
 
     vpn = va >> 12;
@@ -131,7 +130,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
             return (tlb_val[idx] & ~((u64)15)) | (va & 0xfff);
     }
 
-    pa = c->cr[3] & ~((u64)0xfff);
+    pa = g_m.cpu.cr[3] & ~((u64)0xfff);
     for (level = 0; level < 4; level++) {
         shift = 39 - level * 9;
         e = phys_r64(pa + (((va >> shift) & 0x1ff) << 3));
@@ -149,7 +148,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         }
         if (level == 3 && (e & 0x80)) {
             /* 1 GiB 页 */
-            if ((c->efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
+            if ((g_m.cpu.efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
                 pg_fault(va, wr, is_user, pf_ec);
                 return 0;
             }
@@ -163,7 +162,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         }
         if (level == 2 && (e & 0x80)) {
             /* 2 MiB 页 */
-            if ((c->efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
+            if ((g_m.cpu.efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
                 pg_fault(va, wr, is_user, pf_ec);
                 return 0;
             }
@@ -177,7 +176,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         }
         pa = e & ~((u64)0xfff);
     }
-    if ((c->efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
+    if ((g_m.cpu.efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
         pg_fault(va, wr, is_user, pf_ec);
         return 0;
     }
