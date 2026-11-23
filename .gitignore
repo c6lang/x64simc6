@@ -1,0 +1,8 @@
+build/
+*.o
+*.wasm
+*.ll
+firmware.bin
+__pycache__/
+*.pyc
+errbase.def
