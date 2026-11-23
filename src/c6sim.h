@@ -117,6 +117,8 @@ struct CPUState {
     u64 gdtr_base, idtr_base;
     u16 gdtr_limit, idtr_limit;
     u16 sel[6];
+    u16 tr_sel;
+    u16 ldtr_sel;
     u64 seg_base[6];
     u64 xmm[16][2];
     u32 mxcsr;
@@ -179,6 +181,7 @@ extern struct Machine g_m;
 /* machine.c6 */
 void machine_init(void);
 void machine_reset(void);
+void machine_reset_noram(void);
 int machine_load_firmware(u8 *fw, u32 len);
 int machine_boot(void);
 int machine_boot_payload(u8 *code, u32 len, u64 addr);

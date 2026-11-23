@@ -33,6 +33,26 @@ void machine_reset(void)
     machine_set_cmdline(default_cmdline);
 }
 
+/* 差分测试用：不复位 128MiB RAM（新进程本来全是 0），只清 CPU/设备状态 */
+void machine_reset_noram(void)
+{
+    struct Machine *m = &g_m;
+    u32 i = 0;
+    for (i = 0; i < (u32)sizeof(m->cpu); i++)
+        ((u8 *)&m->cpu)[i] = 0;
+    m->instructions = 0;
+    m->tsc = 0;
+    m->pit_ticks = 0;
+    m->last_pit_tsc = 0;
+    m->halted = 0;
+    m->exit_code = 0;
+    m->serial.lsr = 0x60;
+    m->serial.msr = 0xb0;
+    cpu_init(&m->cpu);
+    dev_init();
+    mem_tlb_flush();
+}
+
 void machine_init(void)
 {
     machine_reset();

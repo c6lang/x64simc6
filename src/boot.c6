@@ -92,17 +92,17 @@ static void build_e820(struct Machine *m)
         u64 sz = tab[i].size;
         u32 t = tab[i].type;
         for (o = 0; o < 8; o++) {
-            mem_w8(E820_OFF + i * 20 + o, (u8)(v & 0xff));
+            mem_w8(BOOTPARAMS_PA + E820_OFF + i * 20 + o, (u8)(v & 0xff));
             v >>= 8;
         }
         for (o = 0; o < 8; o++) {
-            mem_w8(E820_OFF + i * 20 + 8 + o, (u8)(sz & 0xff));
+            mem_w8(BOOTPARAMS_PA + E820_OFF + i * 20 + 8 + o, (u8)(sz & 0xff));
             sz >>= 8;
         }
-        mem_w32(E820_OFF + i * 20 + 16, t);
+        mem_w32(BOOTPARAMS_PA + E820_OFF + i * 20 + 16, t);
     }
-    mem_w8(E820_COUNT, 4);
-    mem_w32(0x1e0, (u32)(0x9fc00u >> 10));  /* alt_mem_k */
+    mem_w8(BOOTPARAMS_PA + E820_COUNT, 4);
+    mem_w16(BOOTPARAMS_PA + 0x1e0, (u16)(0x9fc00u >> 10));  /* alt_mem_k */
     (void)m;
 }
 
@@ -224,9 +224,9 @@ int machine_boot(void)
 
     cpu_init(c);
     c->r[4] = 0x38000;                 /* 早期栈 */
-    c->r[3] = PVH_START_PA;            /* EBX：PVH start_info 物理地址 */
+    c->r[3] = 0;                       /* 非 PVH：EBX 不使用 */
     c->r[6] = BOOTPARAMS_PA;           /* RSI：boot_params */
-    c->rip = KERNEL_PA;
+    c->rip = KERNEL_PA + 0x90;         /* startup_64（跳过 pvh_start_xen） */
     c->cr[3] = PML4_PA;
     c->cr[4] = CR4_PAE | CR4_PSE | CR4_OSFXSR;
     c->efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
