@@ -170,6 +170,8 @@ static struct Operand decode_modrm(struct CPUState *c, u8 modrm, u8 rex, int add
             o.addr = c->rip + disp + segbase;   /* RIP 相对 */
             return o;
         }
+        if (rm == 4 && (sib & 7) == 5)
+            disp = sx(fetch_n(c, 4), 32);       /* SIB base=5/mod=0：disp32 */
     } else if (mod == 1) {
         disp = sx(fetch_n(c, 1), 8);
     } else if (mod == 2) {
@@ -1058,6 +1060,12 @@ int step(struct CPUState *c)
             c->r[4] = c->r[5];
             c->r[5] = pop64(c);
             break;
+        case 0xca: case 0xcb: {  /* retf imm16 / retf */
+            c->rip = pop64(c);
+            c->sel[1] = (u16)pop64(c);
+            if (op == 0xca) c->r[4] += (u16)fetch_n(c, 2);
+            break;
+        }
         case 0xc6: case 0xc7: {
             s = (op == 0xc6) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
