@@ -25,6 +25,8 @@ typedef long long i64;
 #define GDT_PA          0x00007000u
 #define IDT_PA          0x00008000u
 #define LAPIC_PA        0xfee00000u
+#define VIRTIO_NET_PA  0xfeb00000u
+#define C6BLK_PA       0xfeb01000u
 
 /* RFLAGS */
 #define RF_CF   ((u64)1 << 0)

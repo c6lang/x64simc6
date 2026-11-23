@@ -278,10 +278,17 @@ void io_w32(u32 port, u32 v)
 
 /* ---------------- LAPIC MMIO ---------------- */
 
+static u32 g_virtio_net_regs[64];
+static u32 g_c6blk_regs[64];
+
 u64 mmio_r(u64 addr, u32 size)
 {
     u64 off = addr - LAPIC_PA;
     u64 v = 0;
+    if (addr >= VIRTIO_NET_PA && addr < VIRTIO_NET_PA + 0x1000)
+        return g_virtio_net_regs[(addr - VIRTIO_NET_PA) >> 2];
+    if (addr >= C6BLK_PA && addr < C6BLK_PA + 0x1000)
+        return g_c6blk_regs[(addr - C6BLK_PA) >> 2];
     if (off == 0x20) v = 0;                  /* ID */
     else if (off == 0x30) v = 0x00050014;    /* LVR */
     else if (off == 0x80) v = g_m.lapic_tpr;
@@ -298,6 +305,14 @@ u64 mmio_r(u64 addr, u32 size)
 void mmio_w(u64 addr, u32 size, u64 val)
 {
     u64 off = addr - LAPIC_PA;
+    if (addr >= VIRTIO_NET_PA && addr < VIRTIO_NET_PA + 0x1000) {
+        g_virtio_net_regs[(addr - VIRTIO_NET_PA) >> 2] = (u32)val;
+        return;
+    }
+    if (addr >= C6BLK_PA && addr < C6BLK_PA + 0x1000) {
+        g_c6blk_regs[(addr - C6BLK_PA) >> 2] = (u32)val;
+        return;
+    }
     if (off == 0x20) g_m.lapic_id = (u32)val & 0xff;
     else if (off == 0x80) g_m.lapic_tpr = (u32)val & 0xff;
     else if (off == 0xb0) g_m.lapic_eoi = (u32)val;
@@ -339,6 +354,8 @@ void dev_init(void)
     m->pci.config[10] = 0x00;
     m->pci.config[12] = 0x00;            /* header type */
     m->pci.config[15] = 0x00;
+    g_virtio_net_regs[0] = 0x74726976;  /* 'virt' */
+    g_c6blk_regs[0] = 0x74726976;
 }
 
 /* 每个 run slice 末尾调用：推进 PIT，投递最高优先级的未屏蔽中断 */

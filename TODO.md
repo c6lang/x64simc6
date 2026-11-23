@@ -53,20 +53,20 @@
 - [x] `src/wasm.c6`：`sim_init / sim_load_payload / sim_reset / sim_run / sim_status / sim_serial_out / sim_serial_in / sim_set_cmdline / sim_stat_insns / sim_ram_base`
 - [x] wasm-ld 参数：`--no-entry --export-all`，initial 256 MiB / max 512 MiB；`web/sim.wasm` 无 import
 - [x] node 冒烟 `tests/wasm_smoke.js`：实例化 → 写 payload → 运行 → 读串口，输出 `C6SIM64 OK`，26 条指令后停机
-- [x] `web/index.html` + `web/style.css` + `web/app.js`：固件/网络下载、Cache Storage 缓存、IndexedDB 文件表与串口快照持久化、bridge 事件注入；[ ] 浏览器端到端验证待做
+- [x] `web/index.html` + `web/style.css` + `web/app.js`：固件/网络下载、Cache Storage 缓存、IndexedDB 文件表与串口快照持久化、bridge 事件注入；headless Chromium 端到端验证通过
 - [ ] 浏览器验证 Alpine 登录提示与 root 输入
 
 ## 阶段 7 —— wasm 网络与页面存储（用户新增硬性需求，DESIGN.md §10.1）
 
 - [x] `src/wasm.c6` 侧 `sim_host_bridge()` / `sim_host_event()` 64 KiB 共享邮箱 + 事件分派（1=NET_RESPONSE, 2=STORAGE_LOADED, 3=USER_INPUT）
 - [x] `fetch()` 拉固件（URL 输入、进度、3 次重试）+ Cache Storage 缓存 + IndexedDB 文件持久化
-- [x] `src/hostfs.c6` 文件表（32 槽 × 256 KiB = 8 MiB，dirty 标记）+ `sim_hostfs_import/export/put/get`；[ ] JS/IndexedDB 双向同步尚未实现
+- [x] `src/hostfs.c6` 文件表（32 槽 × 256 KiB = 8 MiB，dirty 标记）+ `sim_hostfs_import/export/put/get`；JS 启动时导入 IndexedDB、运行期导出回写，端到端验证通过
 - [x] 串口日志写入 IndexedDB `meta`，刷新页面后恢复；指令计数存 localStorage
-- [ ] 预留 virtio-net / c6blk 设备接口（v2，不阻塞 v1）
+- [x] 预留 virtio-net / c6blk 设备接口：MMIO 寄存器桩（0xfeb00000 / 0xfeb01000）
 
 ## 阶段 8 —— 收尾
 
-- [ ] `tests/smoke.sh` 一条命令跑 native + wasm 冒烟（当前由 `./build.sh test` 覆盖）
+- [x] `tests/smoke.sh` 一条命令跑 native + wasm 冒烟 + headless Chromium 端到端，已全绿
 - [x] `./build.sh test` 全绿：native payload、native 单元测试、wasm payload 冒烟均通过
-- [ ] `README.md`：快速开始、已知限制、性能说明
+- [x] `README.md`：快速开始、已知限制、性能说明
 - [ ] Git 提交：每完成一个任务即提交（已执行：docs ×2、probes ×1）

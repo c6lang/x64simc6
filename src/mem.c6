@@ -25,7 +25,9 @@ void mem_tlb_flush(void)
 
 static u8 phys_r8(u64 a)
 {
-    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
+        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
+        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000))
         return (u8)mmio_r(a, 1);
     if (a < RAM_SIZE)
         return g_m.ram[(u32)a];
@@ -34,7 +36,9 @@ static u8 phys_r8(u64 a)
 
 static u16 phys_r16(u64 a)
 {
-    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
+        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
+        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000))
         return (u16)mmio_r(a, 2);
     if (a < RAM_SIZE - 1)
         return (u16)g_m.ram[(u32)a] | ((u16)g_m.ram[(u32)a + 1] << 8);
@@ -43,7 +47,9 @@ static u16 phys_r16(u64 a)
 
 static u32 phys_r32(u64 a)
 {
-    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
+        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
+        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000))
         return (u32)mmio_r(a, 4);
     if (a < RAM_SIZE - 3) {
         u32 p = (u32)a;
@@ -60,7 +66,9 @@ static u64 phys_r64(u64 a)
 
 static void phys_w8(u64 a, u8 v)
 {
-    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
+    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
+        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
+        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)) {
         mmio_w(a, 1, v);
         return;
     }
@@ -70,7 +78,9 @@ static void phys_w8(u64 a, u8 v)
 
 static void phys_w16(u64 a, u16 v)
 {
-    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
+    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
+        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
+        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)) {
         mmio_w(a, 2, v);
         return;
     }
@@ -82,7 +92,9 @@ static void phys_w16(u64 a, u16 v)
 
 static void phys_w32(u64 a, u32 v)
 {
-    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
+    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
+        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
+        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)) {
         mmio_w(a, 4, v);
         return;
     }
