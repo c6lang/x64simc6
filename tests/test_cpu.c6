@@ -8,6 +8,16 @@ static void check(int ok, const char *what)
     if (!ok) { printf("FAIL: %s\n", what); failures++; }
 }
 
+static void exec_bytes(u8 *code, u32 len)
+{
+    u32 i = 0;
+    machine_reset();
+    g_m.cpu.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+    for (i = 0; i < len; i++) g_m.ram[0x10000 + i] = code[i];
+    g_m.cpu.rip = 0x10000;
+    cpu_step(&g_m.cpu);
+}
+
 int main(void)
 {
     u8 name[4] = {97,98,99,100};
@@ -31,6 +41,27 @@ int main(void)
     check(g_m.cpu.cr[3] == PML4_PA, "boot cr3");
     check(machine_run(10) == 0, "run payload");
     check(g_m.cpu.halted == 1, "payload halted");
+
+    {
+        u8 jne[4] = {0x75, 0x02, 0x90, 0x90};
+        exec_bytes(jne, 4);
+        g_m.cpu.flags |= RF_ZF;
+        g_m.cpu.rip = 0x10000;
+        cpu_step(&g_m.cpu);   /* 重新执行 jne：ZF=1 时不跳转 */
+        check(g_m.cpu.rip == 0x10002, "JNE with ZF=1 falls through");
+        g_m.cpu.flags &= ~RF_ZF;
+        g_m.cpu.rip = 0x10000;
+        cpu_step(&g_m.cpu);
+        check(g_m.cpu.rip == 0x10004, "JNE with ZF=0 jumps");
+    }
+    {
+        u8 lea[8] = {0x48, 0x8d, 0x04, 0x85, 0x78, 0x56, 0x34, 0x12};
+        exec_bytes(lea, 8);
+        g_m.cpu.r[0] = 2;
+        g_m.cpu.rip = 0x10000;
+        cpu_step(&g_m.cpu);
+        check(g_m.cpu.r[0] == 0x12345680u, "SIB lea rax*4+disp32");
+    }
 
     if (failures == 0) printf("all unit tests passed\n");
     return failures == 0 ? 0 : 1;
