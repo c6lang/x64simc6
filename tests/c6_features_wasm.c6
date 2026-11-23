@@ -1,0 +1,16 @@
+/* wasm 安全子集：接口/方法/切片/foreach/元组/defer，不含 err/fstring */
+typedef unsigned char u8;
+typedef unsigned long long u64;
+
+interface Device { int read(unsigned long long addr); void write(unsigned long long addr, int v); }
+struct D { u8 val; };
+int read(struct D *self, u64 addr) { return self->val; }
+void write(struct D *self, u64 addr, int v) { self->val = (u8)v; }
+(int, int) divmod(int a, int b) { return {a / b, a % b}; }
+int sum(u8[:] s) { int t = 0; foreach ((int i, u8 v) = s) { t += v; } return t; }
+int main(void) {
+    struct D d = {7}; Device dev = d; u8 a[4] = {1,2,3,4}; int q=0,r=0;
+    dev.write(0, 9); (q, r) = divmod(17, 5);
+    defer { }
+    return (dev.read(0) == 9 && sum(a) == 10 && q == 3 && r == 2) ? 0 : 1;
+}

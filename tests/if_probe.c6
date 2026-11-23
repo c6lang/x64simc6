@@ -1,0 +1,5 @@
+interface Device { int read(int a); void write(int a, int v); }
+struct D { int val; };
+int read(struct D *self, int a) { return self->val; }
+void write(struct D *self, int a, int v) { self->val = v; }
+int main(void) { struct D d = {7}; Device dev = d; dev.write(0, 9); return dev.read(0) == 9 ? 0 : 1; }

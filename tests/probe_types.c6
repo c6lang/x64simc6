@@ -1,0 +1,6 @@
+typedef unsigned long long u64a;
+int f_int(int x) { return x + 1; }
+long long f_ll(long long x) { return x * 3 + 7; }
+unsigned long f_ul(unsigned long x) { return x + 9; }
+u64a f_alias(u64a x) { return x + 11; }
+void *f_ptr(void *p) { return p; }

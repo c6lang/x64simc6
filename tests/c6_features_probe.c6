@@ -1,0 +1,51 @@
+/* c6 扩展特性组合探针：native 与 wasm 都必须通过 */
+#include <stdio.h>
+typedef unsigned char u8;
+typedef unsigned long long u64;
+
+interface Device {
+    int read(unsigned long long addr);
+    void write(unsigned long long addr, int v);
+}
+
+struct SerialDev { u8 val; };
+
+int read(struct SerialDev *self, u64 addr) { return self->val; }
+void write(struct SerialDev *self, u64 addr, int v) { self->val = (u8)v; }
+
+(int, int) divmod(int a, int b) { return {a / b, a % b}; }
+
+int!error check(u8 x)
+{
+    if (x == 0)
+        return err(1, "zero");
+    return (int)x;
+}
+
+int main(void)
+{
+    struct SerialDev d = {7};
+    Device dev = d;
+    int sum = 0;
+    u8 bytes[4] = {1, 2, 3, 4};
+    u8[:] s = bytes;
+    int q = 0, r = 0;
+
+    dev.write(0, 9);
+    sum = (int)dev.read(0);
+    foreach ((int i, u8 v) = s) {
+        sum += v;
+        if (i == 2) break;
+    }
+    (q, r) = divmod(17, 5);
+    defer printf("defer ok\n");
+    printf("sum=%d q=%d r=%d %s\n", sum, q, r, f"msg={sum}");
+    {
+        int v = check(0) catch e {
+            printf("caught %d %s\n", e.id, e.msg);
+            return 0;
+        };
+        if (v != 0) return 2;
+    }
+    return 0;
+}
