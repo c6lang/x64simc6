@@ -923,6 +923,7 @@ int step(struct CPUState *c)
             idx = (rm.reg) & 7;
             imm = (op == 0x80) ? fetch_n(c, 1) :
                   (op == 0x83) ? sx(fetch_n(c, 1), 8) :
+                  (s == 8) ? sx(fetch_n(c, 4), 32) :
                   fetch_n(c, (s == 2) ? 2 : 4);
             a = op_read(c, &rm, s);
             if (idx == 7) { flags_sub(c, a, imm, (a - imm) & sz_mask(s), s); break; }
