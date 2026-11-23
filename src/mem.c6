@@ -132,6 +132,10 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
     if (!(g_m.cpu.cr[0] & CR0_PG))
         return va;
 
+    /* 内核早期 direct map（page_offset_base=0xffff888000000000）按物理地址直映 */
+    if (va >= 0xffff888000000000ull && va < 0xffff888000000000ull + RAM_SIZE)
+        return va - 0xffff888000000000ull;
+
     /* 内核早期有两个高半区窗口；页表遍历失败时按物理地址直接回退。 */
     if (va >= 0xffffffff00000000ull) {
         u64 p = va - 0xffffffff00000000ull;

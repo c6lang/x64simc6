@@ -237,8 +237,12 @@ static void flags_add(struct CPUState *c, u64 a, u64 b, u64 res, int s, u64 carr
 {
     u64 m = sz_mask(s), sb = sign_bit(s);
     u64 f = c->flags & ~(RF_CF | RF_PF | RF_ZF | RF_SF | RF_OF | RF_AF);
-    u64 sum = (a & m) + (b & m) + carry;
-    f |= (sum > m) ? RF_CF : 0;
+    u64 aa = a & m, bb = b & m;
+    u64 sum = aa + bb + carry;
+    u64 cf = 0;
+    if (s == 8) cf = (sum < aa || (carry != 0 && sum == aa)) ? 1 : 0;
+    else cf = (sum > m) ? 1 : 0;
+    f |= cf ? RF_CF : 0;
     f |= ((~(a ^ b) & (a ^ res)) & sb) ? RF_OF : 0;
     f |= parity(res);
     if ((res & m) == 0) f |= RF_ZF;
@@ -616,9 +620,9 @@ int step(struct CPUState *c)
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             if (op2 == 0x20) {
                 /* ModRM.reg = 控制寄存器号，ModRM.rm = 通用寄存器号 */
-                reg_write(c, rm.rm, opsz, c->cr[rm.reg & 15]);
+                reg_write(c, rm.rm, 8, c->cr[rm.reg & 15]);
             } else if (op2 == 0x22) {
-                v = reg_read(c, rm.rm, opsz);
+                v = reg_read(c, rm.rm, 8);
                 if (c->cr[rm.reg & 15] != v) {
                     c->cr[rm.reg & 15] = v;
                     mem_tlb_flush();
@@ -755,6 +759,15 @@ int step(struct CPUState *c)
                 op_write(c, &rm, s, reg_read(c, rm.reg, s));
             else
                 reg_write(c, 0, s, a);
+            break;
+        }
+        case 0xc0: case 0xc1: { /* xadd r/m, r */
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            a = op_read(c, &rm, s);
+            b = reg_read(c, rm.reg, s);
+            op_write(c, &rm, s, a + b);
+            flags_add(c, a, b, (a + b) & sz_mask(s), s, 0);
+            reg_write(c, rm.reg, s, a);
             break;
         }
         case 0xb6: case 0xb7: case 0xbe: case 0xbf: { /* movzx/movsx */
@@ -1126,12 +1139,18 @@ int step(struct CPUState *c)
         case 0xcd:  /* int imm8 */
             raise_exception(c, (u32)fetch_n(c, 1), 0, 0);
             break;
-        case 0xcf: {  /* iret */
-            c->rip = pop64(c);
-            c->sel[1] = (u16)pop64(c);
-            c->flags = pop64(c) | 2;
-            c->r[4] = pop64(c);
-            (void)pop64(c);
+        case 0xcf: {  /* iretq：长模式下完整弹出 5 槽栈帧 */
+            u64 sp = c->r[4];
+            u64 nr = mem_r64(sp);
+            u64 ncs = mem_r64(sp + 8);
+            u64 nf = mem_r64(sp + 16);
+            u64 nrsp = mem_r64(sp + 24);
+            u64 nss = mem_r64(sp + 32);
+            c->rip = nr;
+            c->sel[1] = (u16)ncs;
+            c->flags = nf | 2;
+            c->r[4] = nrsp;
+            c->sel[2] = (u16)nss;
             break;
         }
         case 0xe4: case 0xe5: case 0xec: case 0xed: {
