@@ -38,7 +38,7 @@
 - [x] `src/machine.c6`：机器复位、方法 `m->run()`、指令/TSC 统计、中断节拍
 - [x] `src/host.c6`：宿主无关诊断输出
 - [x] `src/main.c6`：native CLI，使用 defer / errdefer / err / try / catch / f-string / 枚举命名空间
-- [ ] native 加载真实 bzImage+initrd 引导到串口日志——修复了大量真实内核解码问题后可跑 3674 条指令，进入内核早期初始化；当前在 `0xffffffff81bcca7e` 的 ticket lock 自旋，尚未输出串口日志
+- [ ] native 加载真实 bzImage+initrd 引导到串口日志——修复 Jcc 条件、32 位零扩展、LEAVE、PVH start info 后可跑数万条指令，进入 xen_prepare_pvh 内存映射阶段，尚未输出串口日志
 - [x] 按诊断补 Linux 启动期缺项：MOV CR ModRM 操作数顺序、MOV r/m,reg 方向、MOV imm64/imm32 符号扩展、长模式 near call 64 位、SIB 无基址、FS/GS 段前缀、ENDBR64、0F 18 NOP、全部 PT_LOAD 装载、内核高半区页表；仍需继续排查自旋
 
 ## 阶段 5 —— Alpine 固件
@@ -46,7 +46,7 @@
 - [x] `tools/mkfw.py`：C6FW 头 + bzImage gzip/xz 解压 + ELF PT_LOAD 抽取 + 内核/命令行/initrd 打包
 - [x] 从 Alpine 3.20 CDN 下载 `linux-lts-6.6.142-r0.apk`（含 `vmlinuz-lts`）与 `alpine-minirootfs-3.20.3-x86_64.tar.gz`
 - [x] minirootfs → cpio.gz，注入 `/init` 与 `ttyS0` 的 getty；固件 `build/firmware.bin` 已生成（kernel 19.8 MiB + initrd 3.3 MiB）
-- [ ] native + Alpine 固件引导到 `localhost login:` 并进入 shell——当前在内核 ticket lock 自旋，未到登录提示
+- [ ] native + Alpine 固件引导到 `localhost login:` 并进入 shell——仍在内核早期映射阶段，未到登录提示
 
 ## 阶段 6 —— wasm 与浏览器
 
