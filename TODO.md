@@ -75,6 +75,17 @@
 - [ ] 浏览器手工验证：能看到 Alpine 登录提示并输入 root
 - [ ] 可选：终端渲染改用 xterm.js（若需要 ANSI 转义支持）
 
+## 阶段 7.5 —— wasm 网络与页面存储（用户新增硬性需求，见 DESIGN.md §10.1）
+
+- [ ] `sim_host_bridge()` / `sim_host_event()`：64 KiB 共享内存邮箱与 JS→wasm 事件
+- [ ] `web/app.js` 用 `fetch()` 拉取固件（支持 URL 输入、进度、失败重试）
+- [ ] 固件与用户文件缓存进 Cache Storage / IndexedDB，支持离线与清除缓存
+- [ ] `sim_hostfs_*` 导出：文件表 + 8 MiB 数据区 + dirty 标记
+- [ ] JS 启动时从 IndexedDB 导入文件，每帧导出 dirty 文件并写回
+- [ ] 串口日志与机器快照持久化到 IndexedDB（页面刷新后可恢复）
+- [ ] 端到端验证：断网后用缓存固件仍能启动；网页写入的文件刷新后仍存在
+- [ ] 预留 virtio-net / c6blk 设备接口（v2，不阻塞 v1）
+
 ## 阶段 8 —— 收尾
 
 - [ ] `tests/smoke.sh`：native payload + wasm node 冒烟一条命令跑完

@@ -307,6 +307,40 @@ wasm 侧没有真正的文件和 stdout：`printf` 走 c6 运行库的 64KiB 控
 
 ---
 
+## 10.1 wasm 的真实网络与页面存储（新增硬性需求）
+
+浏览器里的 wasm 模块**不能**直接用 POSIX socket/open，因此需要在宿主（JS）与模拟器核心之间搭一座桥。目标是两条能力都"真实可用"，不是 mock：
+
+### 网络
+
+1. **固件/文件下载**：`web/app.js` 用 `fetch()` 从任意 URL 拉取 `firmware.bin`、内核、initrd，支持进度条、断点续传（`Range`）和失败重试；
+2. **持久化缓存**：下载结果写进 Cache Storage / IndexedDB，离线时可重用；界面提供"重新下载/清除缓存"；
+3. **共享内存邮箱**：wasm 导出 `u8 *sim_host_bridge(void)` 指向 64 KiB 共享区，JS 把网络响应写进共享区并调用 `sim_host_event(code, len)` 通知核心；核心侧用 `u8[:]` 切片解析响应。这样**不需要 wasm import**，与 `--no-entry --export-all` 的 c6 wasm 链接方式完全兼容；
+4. **访客网络（v2）**：在上述桥上实现一个简化的 virtio-net 设备，JS 侧把以太网帧通过 WebSocket 代理到本地 TCP/UDP 栈；受浏览器 CORS/WebSocket 约束，v1 先不做，但设备接口在设计上预留。
+
+### 页面存储当作文件系统
+
+1. **持久化层**：浏览器 IndexedDB（大容量、事务）作为后端，localStorage 只存小配置；
+2. **wasm 侧文件系统**：核心里实现一张固定大小的文件表（`sim_hostfs_*` 导出），每个条目 `{name[40], offset, len, dirty}`，数据区放在线性内存的一段静态数组里（v1 为 8 MiB，可配置）；
+3. **同步协议**：启动时 JS 从 IndexedDB 读出所有文件，通过 `sim_hostfs_import(ptr, len)` 灌入 wasm；运行中核心写文件时置 `dirty` 位，JS 在每帧末尾调用 `sim_hostfs_export(ptr, cap)` 取回变化并写回 IndexedDB。全程同步、无重入；
+4. **访客可见性（v1）**：initramfs 自带根文件系统，页面存储用于固件、串口日志、快照、用户上传的文件——即"模拟器的文件系统"由页面存储承担；
+5. **访客可见的持久盘（v2）**：把 wasm 侧文件表的一个文件暴露成简单块设备（I/O 端口 0x500 的 c6blk 协议），Linux 侧配一个小驱动或 initramfs 脚本访问；列为后续里程碑，不阻塞 v1 的"能跑 Alpine"。
+
+### 导出 API 增补
+
+```c
+u8   *sim_host_bridge(void);            /* 64 KiB 共享内存邮箱 */
+int   sim_host_event(u32 code, u32 len);/* JS → wasm 事件通知 */
+int   sim_hostfs_import(u8 *buf, u32 len); /* IndexedDB → wasm */
+int   sim_hostfs_export(u8 *buf, u32 cap); /* wasm → IndexedDB，返回序列化长度 */
+int   sim_hostfs_put(const char *name, u8 *data, u32 len);
+int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
+```
+
+邮箱 code：`1=NET_RESPONSE`、`2=STORAGE_LOADED`、`3=USER_INPUT`。所有跨边界数据都按显式小端字节序读写，避免 LP64/wasm32 布局差异。
+
+---
+
 ## 11. 分阶段实施与验收
 
 见 `TODO.md`。总体顺序：
@@ -333,3 +367,11 @@ wasm 侧没有真正的文件和 stdout：`printf` 走 c6 运行库的 64KiB 控
 | Alpine initramfs 的 init 依赖块设备/网络 | 用 minirootfs 自建 cpio.gz + 自定义 /init，根在 initramfs 内，不挂载外部设备 |
 | PCI/APIC 复杂导致内核卡死 | 内核命令行加 `acpi=off noapic nolapic pci=off`，把复杂设备从启动关键路径上摘掉 |
 | 4MiB malloc 静态池限制（c6 wasm 运行库） | 大内存用静态数组，不走 malloc；只在 native 侧用 FILE*/malloc |
+
+---
+
+## 13. 实现偏差（随实现更新）
+
+1. **c6 `interface` 在 wasm32 路径不可用**：tcc-c6 为 wasm32 生成的接口胖指针是 LP64 布局（两个 8 字节字段），但 `libtcc1-wasm32.a` 里的 `__tcc_iface_init_lp64` 按 32 位指针写 4 字节偏移，导致 vtable 指针错位、调用即 `memory access out of bounds`（已用最小用例复现）。对策：MMIO 设备接口在 native 侧用 c6 `interface` + 方法实现，wasm 侧编译同一份逻辑时退化为显式分派（宏切换）；核心其余 c6 特性（方法、切片、foreach、元组、枚举命名空间）两条路径均可用。
+2. **c6 `f"..."` 与 `err`/`catch` 在 wasm32 路径触发 ABI 警告**：`__c6_fmt_l` / `__tcc_err_set_copy` 的签名在 wasm32 目标下 mismatch。对策：把 `err`/`errdefer`/`f-string` 用在只编 native 的 `main.c6`（固件加载的错误处理与诊断），核心诊断用手工十六进制格式化的 `diagnostics` 输出。
+3. **固件内核形态**：直接引导要求 1MiB 处是**未压缩**的内核镜像，`tools/mkfw.py` 在打包时先把 Alpine 的 bzImage 解压成 raw vmlinux（或用 Alpine 包里的 vmlinux），再写入 C6FW。
