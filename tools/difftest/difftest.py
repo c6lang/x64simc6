@@ -274,6 +274,20 @@ def gen_sse():
             over.update(extra)
         tests.append((name, code, 0x8D5, over))
 
+    def ldq(x, disp):                  # movq xmm[x], [rax+disp]（f3 0f 7e）
+        return [0xf3, rex(0, x, 0, 0), 0x0f, 0x7e, modrm(1, x, 0), disp & 0xff]
+    def stq(x, disp):                  # movq [rax+disp], xmm[x]（66 0f d6）
+        return [0x66, rex(0, x, 0, 0), 0x0f, 0xd6, modrm(1, x, 0), disp & 0xff]
+    def ldd(x, disp):                  # movd xmm[x], [rax+disp]（0f 6e）
+        return [0x66, rex(0, x, 0, 0), 0x0f, 0x6e, modrm(1, x, 0), disp & 0xff]
+    def std_(x, disp):                 # movd [rax+disp], xmm[x]（66 0f 7e）
+        return [0x66, rex(0, x, 0, 0), 0x0f, 0x7e, modrm(1, x, 0), disp & 0xff]
+    # musl 里高频：movq/movd 的内存形式（注意 0f d6 是 store、f3 0f 7e 是 load）
+    seq("sse movq ld+st", ldq(2, 0x00) + stq(2, 0x30))
+    seq("sse movd ld+st", ldd(3, 0x08) + std_(3, 0x38))
+    seq("sse movq st of x", stq(0, 0x28))
+    seq("sse movd st of x", std_(0, 0x2c))
+
     seq("sse pxor", rr([0x66], 0xef, 0, 1))
     seq("sse pand", rr([0x66], 0xdb, 0, 1))
     seq("sse por", rr([0x66], 0xeb, 0, 1))

@@ -1309,11 +1309,20 @@ int step(struct CPUState *c)
             c->xmm[x][1] = 0;
             break;
         }
-        case 0x7e: {  /* movd/movq：xmm → GPR/内存 */
+        case 0x7e: {
             u32 x = 0;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             x = rm.reg & 15;
-            op_write(c, &rm, (rex & 8) ? 8 : 4, c->xmm[x][0]);
+            /* F3 前缀把方向反过来：f3 0f 7e /r = MOVQ xmm, xmm/m64（读！），
+             * 66 0f 7e /r = MOVD/MOVQ r/m, xmm（写）。musl 里两种都常见，
+             * 把 F3 形式当成写会直接踩坏内存（Alpine 的 grep 就是这样崩的）。 */
+            if (pre & PRE_REP) {
+                if (rm.is_reg) c->xmm[x][0] = c->xmm[rm.rm & 15][0];
+                else c->xmm[x][0] = mem_r64(rm.addr);
+                c->xmm[x][1] = 0;
+            } else {
+                op_write(c, &rm, (rex & 8) ? 8 : 4, c->xmm[x][0]);
+            }
             break;
         }
         case 0x54: case 0x55: case 0x56:

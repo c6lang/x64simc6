@@ -533,3 +533,19 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     - `cr3=0x2434000` 是 initramfs 阶段 PID 1 的 mm。
     结论：**系统没崩，但所有任务都在等事件**（idle），initramfs 的某个环节卡住了。
     下一步用 `loglevel=7` 抓内核消息，看 `/init` 脚本停在 mount/mdev/modprobe 哪一步。
+
+42. **`f3 0f 7e`（MOVQ xmm, m64）方向搞反（本轮差分测试抓到）**：`0x7e` 的处理器
+    对所有前缀一视同仁地当成 `MOVD/MOVQ r/m, xmm`（**写**）：
+    ```
+    case 0x7e: op_write(c, &rm, (rex&8)?8:4, c->xmm[x][0]);
+    ```
+    但 SDM 里 `f3 0f 7e /r` 是 `MOVQ xmm, xmm/m64`（**读**），只有 `66 0f 7e /r`
+    才是写。musl 的动态链接器里两种形式都出现，把它当成写就会**直接踩坏内存**
+    （往代码/常量区写 xmm 的低 64 位），Alpine 的 `grep` 就是因此报
+    `segfault at ... error 6`（写、用户、页不存在）。
+    修法：`0x7e` 里判 `pre & PRE_REP`（F3），是则改成读（`xmm[x][0] = mem_r64` /
+    xmm→xmm 复制，高半区清零）。
+    差分测试补了 4 条内存形式用例（`f3 0f 7e` 读、`66 0f d6` 写、`0f 6e`/`66 0f 7e`
+    的 movd 读写），1236/1236 全过。
+    教训：**SSE 指令的方向/宽度由前缀决定**（66/F2/F3 各不同），写处理器时必须
+    先看前缀再决定读写方向；差分测试要覆盖内存形式，只测寄存器形式会漏。
