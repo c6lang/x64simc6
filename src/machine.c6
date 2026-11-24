@@ -82,8 +82,10 @@ static int machine_step_loop(u64 count)
         }
         g_m.instructions++;
         g_m.tsc++;
-        g_m.rip_ring[g_m.rip_ring_i & 4095u] = g_m.cpu.rip;
-        g_m.rip_ring_i++;
+        if (g_m.rip_dump_en) {
+            g_m.rip_ring[g_m.rip_ring_i & 4095u] = g_m.cpu.rip;
+            g_m.rip_ring_i++;
+        }
         cpu_step(&g_m.cpu);
         if (g_m.cpu.exc_pending)
             cpu_deliver(&g_m.cpu);
