@@ -180,7 +180,9 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
         printf("[PPT] va=%llx wr=%u us=%u rip=%llx\n",
                (unsigned long long)va, wr, us,
                (unsigned long long)g_m.cpu.rip);
-        if (g_m.ppt_dumps < 2) {
+        /* 前面几个用户缺页都是正常的（入口栈页按需分配）；这里专门抓
+         * 高地址共享库（musl/ld）里的缺页，那才是真正的异常。 */
+        if (g_m.cpu.rip >= 0x700000000000ull && g_m.ppt_dumps < 3) {
             u32 k = 0;
             u32 i = 0;
             g_m.ppt_dumps++;
@@ -199,7 +201,7 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
                     sv = mem_r64(g_m.cpu.r[4] + k * 8);
                 printf("[PPK] %2u %llx\n", k, (unsigned long long)sv);
             }
-            for (k = 0; k < 200; k++) {
+            for (k = 0; k < 400; k++) {
                 u32 idx = (g_m.rip_ring_i + k) & 4095u;
                 printf("[PPR] %2u %llx\n", k,
                        (unsigned long long)g_m.rip_ring[idx]);

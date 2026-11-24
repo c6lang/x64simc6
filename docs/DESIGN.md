@@ -490,3 +490,22 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     32 位写没有零扩展、或 syscall 返回值路径）。
     下一步：用 `--trace_win`（CPL3 首次进入后的 600 步全量 RIP 环）抓 musl
     加载器出错前的指令序列，定位是哪条把 RAX 留大的。
+
+39. **Alpine initramfs 已跑起多个用户进程（本轮新证据）**：用 `--ppt` 跑完整固件，
+    `[PPT]` 记录显示 initramfs 的 `/init` 脚本 fork 出了**多个进程**（每次 ASLR 基址
+    不同：0x7f20…、0x7fd4…、0x7fa9…），每个都跑到 musl 动态链接器里，说明
+    用户态、fork/exec、文件系统这些链路都基本可用。最终崩在同一个地方：
+    ```
+    [PPT] va=7fe239215da4 wr=0 us=1 rip=7fe2391dc7d3   ← musl 跳转表 movslq 的读
+    [PPT] va=7fe31d7f9d88 wr=0 us=1 rip=7fe2391dc7d3   ← 同一 RIP 再次执行，RAX 变成上次读出的值
+    [PPT] va=80009a070    wr=0 us=0 rip=80009a070       ← 处理器跳到 0x80009a070（CPL0 取指）
+    ```
+    第二条的地址精确等于 `RDI + 4*RAX`（RAX=0x39179000），也就是同一条 `movslq`
+    **在同一次重试路径上被执行了第二次**，而此时 RAX 已经是第一次读出来的值。
+    推测根因：`op_read` 在缺页时返回 0 并且**不阻止后续的写入/重试语义**，
+    配合 `step()` 的 RIP 回退，容易出现「缺页指令留下部分副作用」；另外
+    最后那条 `rip=va=0x80009a070` 属于内核态跳到野地址，说明故障处理路径上
+    内核栈里的某个返回地址被写坏了。
+    下一步（留给下一轮）：给 `step()` 加一个「本指令已因缺页中止」的硬标记
+    （`c->fault_abort`），让 `op_read`/`op_write`/`push`/串操作在置位后全部变成
+    空操作，保证缺页指令零副作用；再用同样的 `--ppt` 复验 musl 分派是否还崩。
