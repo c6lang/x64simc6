@@ -509,3 +509,15 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     下一步（留给下一轮）：给 `step()` 加一个「本指令已因缺页中止」的硬标记
     （`c->fault_abort`），让 `op_read`/`op_write`/`push`/串操作在置位后全部变成
     空操作，保证缺页指令零副作用；再用同样的 `--ppt` 复验 musl 分派是否还崩。
+
+40. **缺页指令零副作用（`fault_abort`，本轮实现）**：SDM 要求触发故障的指令完全
+    没有架构副作用。之前只有「RIP 回退 + RSP/RSI/RDI/RCX 回滚」，但像
+    `movsxd rax, [mem]` 这种指令，`op_read` 在缺页时返回 0，后面 `reg_write(RAX, 0)`
+    照样把目标寄存器写脏——Alpine musl 跳转表分派正是这样把 RAX 污染成
+    上一次读出的 32 位偏移（§39）。
+    实现：`CPUState` 增加 `fault_abort`。`pg_fault()` 置 1；`mem_w8/16/32/64`、
+    `reg_write()`、`push64()` 见到置位直接丢弃；`step()` 开头清 0；
+    `cpu_deliver()` 入口清 0（投递本身要正常压帧）。这样故障指令的一切写入
+    都被丢弃，配合已有的 RIP/寄存器回退，做到「零副作用 + 可重试」。
+    回归测试：`tests/test_cpl3.c6` 场景 8 —— 用户态 `movsxd rax,[rdi+rax*4]`
+    打未映射页，要求 RAX 保持 3、CR2=rdi+12、RIP 回退。

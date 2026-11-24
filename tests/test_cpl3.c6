@@ -176,6 +176,51 @@ int main(int argc, char **argv)
     cpu_deliver(&g_m.cpu);
     check(mem_r64(KSTACK - 40) == USTACK, "7 frame RIP = fetch address");
 
+    /* 8) 缺页指令零副作用：musl 的 movsxd 不能把目标寄存器写脏 */
+    machine_reset();
+    g_m.cpu.cr[0] = 0;
+    g_m.cpu.sel[1] = 0x10;
+    g_m.cpu.sel[2] = 0x18;
+    for (i = 0; i < 3 * 512; i++) mem_w64(PML4_PA + i * 8, 0);
+    mem_w64(PML4_PA, PDPT_PA | 7);
+    mem_w64(PDPT_PA, PD_PA | 7);
+    mem_w64(PD_PA + 0 * 8, 0x000000ull | 0x87);   /* 0..2MiB 用户页 */
+    mem_w64(PD_PA + 2 * 8, KERN_BASE | 0x83);
+    d0 = (lim & 0xffff) | ((tss & 0xffff) << 16) |
+         (((tss >> 16) & 0xff) << 32) | ((u64)0x89 << 40) |
+         (((lim >> 16) & 0xf) << 48) | (((tss >> 24) & 0xff) << 56);
+    d1 = (tss >> 32) & 0xffffffffull;
+    mem_w64(gdt + 8, d0);
+    mem_w64(gdt + 16, d1);
+    mem_w64(tss + 4, KSTACK);
+    mem_w64(IDT_PA + 14 * 16,
+            (u64)0x10 << 16 | (u64)0x8e << 40 | (u64)(HANDLER >> 16) << 48);
+    mem_w64(IDT_PA + 14 * 16 + 8, (HANDLER >> 32) & 0xffffffffull);
+    g_m.cpu.gdtr_base = gdt;
+    g_m.cpu.tr_sel = 0x08;
+    g_m.cpu.idtr_base = IDT_PA;
+    g_m.cpu.idtr_limit = 0x0fff;
+    g_m.cpu.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+    g_m.cpu.cr[3] = PML4_PA;
+    g_m.cpu.cr[0] = CR0_PE | CR0_PG;
+    /* 48 63 04 87 = movsxd rax, [rdi+rax*4]（musl 的跳转表分派） */
+    g_m.ram[UCODE + 0] = 0x48;
+    g_m.ram[UCODE + 1] = 0x63;
+    g_m.ram[UCODE + 2] = 0x04;
+    g_m.ram[UCODE + 3] = 0x87;
+    g_m.cpu.sel[1] = 0x33;
+    g_m.cpu.sel[2] = 0x2b;
+    g_m.cpu.flags = 0x202;
+    g_m.cpu.rip = UCODE;
+    g_m.cpu.r[0] = 3;                    /* 表格下标 */
+    g_m.cpu.r[7] = USTACK;               /* 未映射，读它必然缺页 */
+    g_m.cpu.r[4] = USTACK;
+    cpu_step(&g_m.cpu);
+    check(g_m.cpu.exc_pending == 1, "8 movsxd fault raises #PF");
+    check(g_m.cpu.cr[2] == USTACK + 12, "8 CR2 = rdi + rax*4");
+    check(g_m.cpu.r[0] == 3, "8 faulting movsxd leaves RAX intact");
+    check(g_m.cpu.rip == UCODE, "8 faulting movsxd rewinds RIP");
+
     if (failures == 0) printf("all cpl3 round-trip tests passed\n");
     return failures ? 1 : 0;
 }

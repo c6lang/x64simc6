@@ -168,6 +168,7 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
     u32 sup0 = g_m.emu_sup;
     if (pf_ec)
         *pf_ec = ec;
+    g_m.cpu.fault_abort = 1;
     /* 已经有一条同步异常等着投递时，后续访问故障属于同一条指令的连带效应，
      * 不能覆盖 CR2/错误码（否则内核看到的是错的故障地址）。 */
     if (g_m.cpu.exc_pending)
@@ -362,11 +363,15 @@ u64 mem_r64(u64 a)
 
 void mem_w8(u64 a, u8 v)
 {
+    if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
+
     phys_w8(mem_translate(a, 1, 0, 0), v);
 }
 
 void mem_w16(u64 a, u16 v)
 {
+    if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
+
     u64 pa = mem_translate(a, 1, 0, 0);
     if ((pa & 0xfff) > 0xffe) {
         mem_w8(a, (u8)v);
@@ -378,6 +383,8 @@ void mem_w16(u64 a, u16 v)
 
 void mem_w32(u64 a, u32 v)
 {
+    if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
+
     u64 pa = mem_translate(a, 1, 0, 0);
     if ((pa & 0xfff) > 0xffc) {
         u32 i = 0;
@@ -390,6 +397,8 @@ void mem_w32(u64 a, u32 v)
 
 void mem_w64(u64 a, u64 v)
 {
+    if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
+
     u64 pa = mem_translate(a, 1, 0, 0);
     if ((pa & 0xfffull) > 0xff8ull) {
         mem_w32(a, (u32)v);

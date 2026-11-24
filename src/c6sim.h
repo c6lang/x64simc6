@@ -101,7 +101,8 @@ struct Operand {
 
 struct CPUState {
     u8 exc_pending;
-    u8 exc_async;   /* 1=外部中断（异步），0=指令产生的异常（故障） */
+    u8 exc_async;
+    u8 fault_abort;  /* 1=本指令因缺页中止：后续写入必须全部丢弃（SDM 零副作用） */   /* 1=外部中断（异步），0=指令产生的异常（故障） */
     u32 exc_vec;
     u64 exc_ec;
     u8 exc_has_ec;

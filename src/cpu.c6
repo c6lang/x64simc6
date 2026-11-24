@@ -98,6 +98,8 @@ static u64 reg_read(struct CPUState *c, u32 i, int s)
 static void reg_write(struct CPUState *c, u32 i, int s, u64 v)
 {
     u64 m = sz_mask(s);
+    if (c->fault_abort) return;     /* 缺页指令不得写寄存器 */
+
     /* x86-64：32 位寄存器写入会把高 32 位清零 */
     if (s == 4) { c->r[i & 15] = v & 0xffffffffu; return; }
     if (s == 1 && i >= 4 && i <= 7 && !c->rex_present) {
@@ -301,6 +303,7 @@ static int cond(struct CPUState *c, u32 n)
 
 static void push64(struct CPUState *c, u64 v)
 {
+    if (c->fault_abort) return;
     c->r[4] -= 8;
     mem_w64(c->r[4], v);
 }
@@ -347,6 +350,7 @@ void cpu_deliver(struct CPUState *c)
     if (!c->exc_pending) return;
     sup0 = g_m.emu_sup;
     g_m.emu_sup = 1;
+    c->fault_abort = 0;    /* 投递本身要正常压帧/写内核栈 */
     vec = c->exc_vec;
     has_ec = c->exc_has_ec;
     ec = c->exc_ec;
@@ -903,6 +907,7 @@ int step(struct CPUState *c)
     u64 s_rdi = c->r[7];
     u64 s_rcx = c->r[1];
     g_m.cur_rip = start;
+    c->fault_abort = 0;
     u64 oc = fetch_opcode(c);
     u8 op = (u8)oc;
     u8 rex = (u8)(oc >> 8);
