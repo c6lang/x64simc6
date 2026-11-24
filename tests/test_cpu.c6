@@ -63,6 +63,30 @@ int main(void)
         check(g_m.cpu.r[0] == 0x12345680u, "SIB lea rax*4+disp32");
     }
 
+    {
+        machine_reset();
+        g_m.cpu.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+        g_m.ram[0x10000] = 0x0f;   /* syscall */
+        g_m.ram[0x10001] = 0x05;
+        g_m.ram[0x10010] = 0x0f;   /* sysret */
+        g_m.ram[0x10011] = 0x07;
+        g_m.cpu.msr_star = ((u64)0x23 << 48) | ((u64)0x10 << 32);
+        g_m.cpu.msr_lstar = 0x10010;
+        g_m.cpu.msr_sfmask = 0;
+        g_m.cpu.flags = 0x202;
+        g_m.cpu.sel[1] = 0x33;
+        g_m.cpu.rip = 0x10000;
+        cpu_step(&g_m.cpu);
+        check(g_m.cpu.rip == 0x10010, "syscall -> LSTAR");
+        check(g_m.cpu.r[1] == 0x10002, "syscall saves RIP in RCX");
+        check(g_m.cpu.r[11] == 0x202, "syscall saves RFLAGS in R11");
+        check(g_m.cpu.sel[1] == 0x10, "syscall CS=STAR[47:32]");
+        cpu_step(&g_m.cpu);
+        check(g_m.cpu.rip == 0x10002, "sysret restores RCX to RIP");
+        check((g_m.cpu.sel[1] & 0xffff) == 0x33, "sysret CS=STAR[63:48]+16|3");
+        check(g_m.cpu.flags == 0x202, "sysret restores RFLAGS from R11");
+    }
+
     if (failures == 0) printf("all unit tests passed\n");
     return failures == 0 ? 0 : 1;
 }
