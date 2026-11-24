@@ -169,7 +169,7 @@ struct Machine {
     struct PicState pic;
     struct PitState pit;
     struct PciState pci;
-    u32 lapic_id, lapic_ldr, lapic_tpr, lapic_lvr, lapic_svr, lapic_icr, lapic_eoi;
+    u32 lapic_id, lapic_ldr, lapic_tpr, lapic_lvr, lapic_svr, lapic_icr, lapic_icr2, lapic_eoi;
     u8 cmdline[512];
     u32 cmdline_len;
     u8 *fw_kernel;

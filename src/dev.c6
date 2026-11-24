@@ -313,7 +313,23 @@ void mmio_w(u64 addr, u32 size, u64 val)
     else if (off == 0xb0) g_m.lapic_eoi = (u32)val;
     else if (off == 0xd0) g_m.lapic_ldr = (u32)val;
     else if (off == 0xf0) g_m.lapic_svr = (u32)val;
-    else if (off == 0x300) g_m.lapic_icr = (u32)val;
+    else if (off == 0x310) g_m.lapic_icr2 = (u32)val;
+    else if (off == 0x300) {
+        /* ICR 低半：向量 0..7、投递模式 8..10、简写 18..19。
+         * 单 CPU 上 self/broadcast 的 fixed IPI 与 NMI 也必须真的投递，
+         * 否则内核的自检/唤醒路径会空转。 */
+        u32 lo = (u32)val;
+        u32 dm = (lo >> 8) & 7;
+        u32 sh = (lo >> 18) & 3;
+        u32 vec = lo & 0xff;
+        g_m.lapic_icr = lo;
+        if (dm == 4) {
+            raise_irq(&g_m.cpu, 2);                 /* NMI */
+        } else if (dm == 0 && vec != 0) {
+            if (sh != 0 || (g_m.lapic_icr2 >> 24) == (g_m.lapic_id & 0xff))
+                raise_irq(&g_m.cpu, vec);
+        }
+    }
 }
 
 /* ---------------- 初始化与时钟 ---------------- */
