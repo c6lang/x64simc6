@@ -41,6 +41,7 @@
 - [x] native 加载真实 bzImage+initrd 引导到串口日志——已输出 `Linux version 6.6.142-0-lts`、`BIOS-e820`、`earlycon: uart8250`、`RAMDISK`、`Zone ranges`、`mem_init`、`ftrace`、`printk: console [ttyS0] enabled`、`APIC disabled by BIOS`、`clocksource: refined-jiffies`
 - [x] 指令级差分测试器 `tools/difftest`（本机 CPU vs 模拟器）：348 条基础指令 + 800 组随机序列，1160/1160 一致
 - [x] 扩大范围随机差分测试 `tools/difftest/fuzz2.py`（全寄存器、SHLD/SHRD/IMUL/BT/rotate/SETcc/CMOV/XADD/BSWAP/ADC），并据其修正 SHLD/SHRD 零计数零扩展与 IMUL/SHLD 标志位
+- [x] 补 sgdt/sidt（store_idt/load_idt）与 clts/invd/wbinvd
 - [x] wasm 运行库重建（`~/c6/scripts/build-wasm-runtime.sh`）：`./build.sh test` 全绿，`node tests/browser_e2e.js` 通过
 - [x] 按差分测试修正乘除/移位/旋转/标志位/位操作/`mov sreg` 语义（见 DESIGN.md §13.16–13.18）
 - [x] 按诊断补 Linux 启动期缺项：MOV CR ModRM 操作数顺序、MOV r/m,reg 方向、MOV imm64/imm32 符号扩展、长模式 near call 64 位、SIB 无基址、FS/GS 段前缀、ENDBR64、0F 18 NOP、全部 PT_LOAD 装载、内核高半区页表；仍需继续排查自旋
