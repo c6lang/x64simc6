@@ -364,14 +364,37 @@ void cpu_deliver(struct CPUState *c)
         return;
     }
     {
-        /* 64 位模式：中断/异常总是压入 SS:RSP（5 槽帧） */
+        /* 64 位模式：中断/异常总是压入 5 槽帧（SS,RSP,RFLAGS,CS,RIP）；
+         * 若被中断的是用户态（CPL!=0），硬件先切到 TSS.RSP0 再压帧，
+         * 帧里保存的是被中断的 CS/SS 而不是门的选择子。 */
         u64 old_rsp = c->r[4];
-        push64(c, c->sel[2]);            /* SS */
-        push64(c, old_rsp);              /* 原 RSP（压 SS 之前） */
+        u64 old_cs = c->sel[1];
+        u64 old_ss = c->sel[2];
+        u32 cpl = (u32)(old_cs & 3);
+        if (cpl != 0) {
+            u64 toff = c->tr_sel & 0xfff8u;
+            u64 d0 = mem_r64(c->gdtr_base + toff);
+            u64 d1 = mem_r64(c->gdtr_base + toff + 8);
+            u64 tb = ((d0 >> 16) & 0xffffffu) | ((d1 & 0xffffu) << 24) |
+                     ((d1 >> 32) << 32);
+            u64 rsp0 = mem_r64(tb + 4);
+            if (rsp0 == 0)
+                rsp0 = old_rsp;
+            c->r[4] = rsp0 & ~((u64)0xf);
+            push64(c, old_ss);
+            push64(c, old_rsp);
+            push64(c, c->flags & ~((u64)0x2800));
+            push64(c, old_cs);
+            push64(c, c->rip);
+            c->sel[2] = (u16)(((c->msr_star >> 32) & 0xfffcu) + 8);
+        } else {
+            push64(c, old_ss);
+            push64(c, old_rsp);
+            push64(c, c->flags & ~((u64)0x2800));
+            push64(c, old_cs);
+            push64(c, c->rip);
+        }
     }
-    push64(c, c->flags & ~((u64)0x2800));
-    push64(c, sel);
-    push64(c, c->rip);
     if (has_ec) push64(c, ec);
     c->sel[1] = sel;
     c->rip = off;
@@ -743,15 +766,19 @@ int step(struct CPUState *c)
         int s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
         u64 v = 0, a = 0, b = 0;
         switch (op2) {
-        case 0x05:  /* syscall */
-            c->r[11] = c->rip;
-            c->flags &= ~RF_IF;
+        case 0x05:  /* syscall：RCX=RIP，R11=RFLAGS，CS/SS 取自 STAR */
+            c->r[1] = c->rip;
+            c->r[11] = c->flags;
+            c->flags &= ~(c->msr_sfmask & (RF_IF | RF_DF | RF_TF));
             c->rip = c->msr_lstar;
-            c->sel[1] = 0x10;
+            c->sel[1] = (u16)((c->msr_star >> 32) & 0xfffc);
+            c->sel[2] = (u16)(((c->msr_star >> 32) & 0xfffc) + 8);
             break;
-        case 0x07:  /* sysret */
-            c->rip = c->r[11];
-            c->sel[1] = 0x23;
+        case 0x07:  /* sysret：RIP=RCX，RFLAGS=R11，CS=STAR[63:48]+16，SS=+8 */
+            c->rip = c->r[1];
+            c->flags = c->r[11] | 2;
+            c->sel[1] = (u16)((((c->msr_star >> 48) & 0xffff) + 16) | 3);
+            c->sel[2] = (u16)((((c->msr_star >> 48) & 0xffff) + 8) | 3);
             break;
         case 0x0b:  /* ud2 */
             raise_exception(c, EXC_UD, 0, 0);
