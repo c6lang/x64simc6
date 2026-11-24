@@ -1142,7 +1142,8 @@ int step(struct CPUState *c)
             raise_exception(c, EXC_UD, 0, 0);
             break;
         }
-        if (c->exc_pending) {
+        /* 两字节指令执行完：只有同步故障才回退 RIP（异步中断必须停在下一条指令） */
+        if (c->exc_pending && !c->exc_async) {
             c->rip = start;
             return 0;
         }

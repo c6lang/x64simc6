@@ -51,7 +51,7 @@
 - [x] `tools/mkfw.py`：C6FW 头 + bzImage gzip/xz 解压 + ELF PT_LOAD 抽取 + 内核/命令行/initrd 打包
 - [x] 从 Alpine 3.20 CDN 下载 `linux-lts-6.6.142-r0.apk`（含 `vmlinuz-lts`）与 `alpine-minirootfs-3.20.3-x86_64.tar.gz`
 - [x] minirootfs → cpio.gz，注入 `/init` 与 `ttyS0` 的 getty；固件 `build/firmware.bin` 已生成（kernel 19.8 MiB + initrd 3.3 MiB）
-- [ ] native + Alpine 固件引导到 `localhost login:` 并进入 shell——现已通过 `unwind_init` ORC 自检、`mem_init`、`sched_init`、`int3` 自检、x87 初始化，进入 `arch_cpu_finalize_init` 的 alternatives 补丁阶段；在 `apply_paravirt`/`insn_decode` 返回时出现栈损坏（返回地址槽被帧指针值覆盖），未到登录提示；已修「异步中断当同步故障」的 RIP 回退 bug（引导推进到 3.75s，约 66×）；当前卡在 genl_op_from_small 的 RSI 被中断路径改写
+- [ ] native + Alpine 固件引导到 `localhost login:` 并进入 shell——现已通过 `unwind_init` ORC 自检、`mem_init`、`sched_init`、`int3` 自检、x87 初始化，进入 `arch_cpu_finalize_init` 的 alternatives 补丁阶段；在 `apply_paravirt`/`insn_decode` 返回时出现栈损坏（返回地址槽被帧指针值覆盖），未到登录提示；已修「异步中断当同步故障」的 RIP 回退 bug（引导推进到 3.75s，约 66×）；已越过 genl 阶段（772M 指令无 oops），下一步定位 initramfs/init 阶段
 
 ## 阶段 6 —— wasm 与浏览器
 
