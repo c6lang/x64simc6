@@ -851,7 +851,9 @@ int step(struct CPUState *c)
         case 0x4c: case 0x4d: case 0x4e: case 0x4f: { /* cmovcc */
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             v = op_read(c, &rm, s);
-            if (cond(c, op2 - 0x40)) reg_write(c, rm.reg, s, v);
+            /* 条件不成立时目标不变，但 32 位操作数仍按 32 位写语义零扩展高 32 位 */
+            if (!cond(c, op2 - 0x40)) v = reg_read(c, rm.reg, s);
+            reg_write(c, rm.reg, s, v);
             break;
         }
         case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85:
