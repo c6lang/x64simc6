@@ -417,3 +417,9 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
 32. **故障指令的寄存器回滚**：SDM 规定触发故障的指令不得留下任何架构副作用。`step()` 原来只把 RIP 退回指令开头；`push`（RSP 已减 8）、串操作（RSI/RDI/RCX 已推进）在 `pg_fault` 之后会带着半截副作用重试。现在同步故障回退时同时恢复 `RSP/RSI/RDI/RCX` 到指令执行前的值（内存写入不改值，天然幂等）。
 
 33. **定位手段**：`--sample` 每 2000 万条指令打一行 `[SMP] n/rip/cpl/cr3/user_entries`；`g_m.watch_fd`（native 打开 `/tmp/simwatch.bin`）每 4096 条指令写 24 字节 `{cur_rip, instructions, 0}`、`mem_translate` 每 16384 次写 24 字节 `{mt_calls, va, cur_rip}`。用「指令数停涨但翻译数继续涨」这一对观测量即可把问题收敛到“异常投递路径”，再配合 §30 的权限分析定位。
+
+34. **CPL3 换栈失效的真凶：64 位 TSS 描述符基址解析（本轮关键修复）**：`cpu_deliver()` 在 CPL3 时按 `tr_sel` 找到 GDT 里的 TSS 描述符并取 `RSP0`，但基址拼接写成了
+    `tb = ((d0>>16)&0xffffff) | ((d1&0xffff)<<24) | ((d1>>32)<<32)`。
+    64 位描述符的基址分布是：`base[23:0] = d0[39:16]`、**`base[31:24] = d0[63:56]`**、`base[63:32] = d1[31:0]`。第二项把 `d1` 的低 16 位当成了 `base[39:32]`，既丢掉 `base[31:24]`，又在基址高 32 位非零时整体错位。
+    内核的 per-CPU TSS 基址在 `0xffff8880_07xxxxxx` 一带，错位后 `mem_r64(tb+4)` 读不到 `sp0`（得到 0）， `cpu_deliver()` 只好退化成 `rsp0 = old_rsp`——把 5 槽异常帧压回**用户栈**。而用户栈页正是刚触发缺页的那一页，于是：缺页 → 投递压帧又缺页 → `error_entry`（0xffffffff81c01340）再缺页，`[SMP]` 采样永远停在该地址（60M 条指令没有位移）。
+    修正后单测把 TSS 基址取成 `0x07000000`（`base[31:24] != 0`）以覆盖这条解析。
