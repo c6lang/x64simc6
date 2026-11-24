@@ -2117,6 +2117,14 @@ int step(struct CPUState *c)
             break;
         }
         case 0xf4:  /* hlt */
+#if !defined(C6_WASM)
+            printf("[HLT] rip=%llx flags=%llx cs=%llx cr3=%llx insns=%llu\n",
+                   (unsigned long long)start, (unsigned long long)c->flags,
+                   (unsigned long long)c->sel[1],
+                   (unsigned long long)c->cr[3],
+                   (unsigned long long)g_m.instructions);
+            fflush(stdout);
+#endif
             c->halted = 1;
             break;
         case 0xf5: c->flags ^= RF_CF; break;
