@@ -343,6 +343,7 @@ void cpu_deliver(struct CPUState *c)
     u8 has_ec = 0, type = 0;
 
     if (!c->exc_pending) return;
+    g_m.emu_sup = 1;
     vec = c->exc_vec;
     has_ec = c->exc_has_ec;
     ec = c->exc_ec;
@@ -350,6 +351,7 @@ void cpu_deliver(struct CPUState *c)
     c->exc_async = 0;
     if (c->idtr_limit == 0) {
         c->halted = 1;
+        g_m.emu_sup = 0;
         return;
     }
     gate = mem_r64(c->idtr_base + vec * 16);
@@ -359,8 +361,11 @@ void cpu_deliver(struct CPUState *c)
     off = (gate & 0xffffu) | ((gate >> 48) << 16);
     /* 64 位门的高 32 位 handler 偏移在描述符后 8 字节 */
     off |= (mem_r64(c->idtr_base + vec * 16 + 8) & 0xffffffffu) << 32;
-    if ((gate >> 48) == 0) {
+    /* 门是否有效看 P 位（bit47）与 type!=0；不要误判 offset_mid：
+     * 低地址（<4GiB）处理程序 offset_mid 天然为 0。 */
+    if (((gate >> 47) & 1) == 0 || type == 0) {
         c->halted = 1;
+        g_m.emu_sup = 0;
         return;
     }
     {
@@ -400,6 +405,7 @@ void cpu_deliver(struct CPUState *c)
     c->rip = off;
     c->flags &= ~(RF_TF | RF_IF | RF_RF);
     c->flags |= 2;
+    g_m.emu_sup = 0;
     (void)type;
 }
 
@@ -884,6 +890,11 @@ static void shift_op(struct CPUState *c, int fn, u64 *v, u64 cnt, int s)
 int step(struct CPUState *c)
 {
     u64 start = c->rip;
+    u64 s_rsp = c->r[4];
+    u64 s_rsi = c->r[6];
+    u64 s_rdi = c->r[7];
+    u64 s_rcx = c->r[1];
+    g_m.cur_rip = start;
     u64 oc = fetch_opcode(c);
     u8 op = (u8)oc;
     u8 rex = (u8)(oc >> 8);
@@ -2182,7 +2193,13 @@ int step(struct CPUState *c)
     }
     /* 只有同步异常（故障）才把 RIP 退回指令开头；外部中断是异步的，必须留在下一条指令 */
     if (c->exc_pending && !trap_exc && !c->exc_async) {
+        /* SDM：故障指令不得留下部分副作用——RIP 与 RSP/RSI/RDI/RCX 都退回
+         * 指令执行前的值（内核修好页表后要原样重试）。 */
         c->rip = start;
+        c->r[4] = s_rsp;
+        c->r[6] = s_rsi;
+        c->r[7] = s_rdi;
+        c->r[1] = s_rcx;
     }
     return 0;
 }

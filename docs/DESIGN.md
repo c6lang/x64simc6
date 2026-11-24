@@ -404,3 +404,16 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
 29. **下一步**：长跑（≥30 min）等到 `/init` → busybox → getty → `login:`；若用户态首条路径出错，按 §26 的 CPL3/syscall/TSS 三条链路依次核对。
 26. **引导卡点定位（中断返回栈错位，历史记录）**：用「RIP 环 + 栈写入环 + 函数入口环」三组探针把 alternatives 崩溃收敛到一条证据链——`text_poke_early` 的**正常**调用（入口 `0x81053ba0`，RSP=0x…d80，四次 push 到 0x…d60）完全平衡；崩溃那次则是从 `0xffffffff81c0198c`（IRQ 桩）"返回"到 `0x81053bcf` 时 RSP=0x…**d58**（本该是 0x…d60），也就是**中断返回把被打断上下文的 RSP 少还原了 8 字节**，导致随后 4 次 pop 从 d58 弹到 d78，ret 弹到的是被保存的 r13（0x82403d8a，补丁缓冲区指针）而不是返回地址。下一步：查 IRQ 入口/出口的 5 槽帧在哪种路径上少压/多弹一个 qword（重点：`irq_entries_start` 的向量 0x30 桩、`irq_return`、以及嵌套中断）。
 24. **引导进度续（2026-06 更新，二）**：又修了一批导致内核早期失败的问题——`bt/bts/btr/btc` 内存操作数的位偏移必须参与有效地址计算（否则 `set_bit` 落错字，`system_vectors` 位图错位，IRQ 向量门缺失）；INT3/INT n/INTO/ICEBP 属于陷阱类异常，保存的 RIP 指向下一条指令（内核 `int3_selftest` 依赖这一点）；补 x87 状态管理指令（`fninit`/`fldcw`/`fnstcw`/`fnstsw`/`fwait`），否则 `fpu__init_system` 直接 #UD；8259A 每片独立保存 ICW2/ICW3/ICW4 并按初始化序列区分数据口语义；HLT 在 IF=1 时等待中断而不是停机；`rep` 字符串指令改为每条目一步，避免长拷贝期间无法投递中断。内核现在通过 `unwind_init`、`mem_init`、`sched_init`、`int3` 自检与 x87 初始化，进入 `arch_cpu_finalize_init` → `alternative_instructions`。当前卡点：alternatives 打补丁期间（`apply_paravirt` 调用 `insn_decode`/`insn_get_displacement` 返回时）栈帧错位，返回地址槽被帧指针值（`0xffffffff82403e08`）覆盖导致跳入栈区；RIP 环显示中断在 `insn_get_displacement` 尾声被投递后返回即错位。：native + Alpine 固件现已输出完整串口日志：`Linux version 6.6.142-0-lts`、`BIOS-e820`、`earlycon: uart8250`、`RAMDISK`、`Zone ranges`、`mem_init`、`ftrace`、`Console: colour dummy device`、`printk: console [ttyS0] enabled`、`APIC disabled by BIOS`、`clocksource: refined-jiffies`；随后进入 `unwind_init()` 的 ORC 自检（约 4×10^7 条指令，属正常一次性开销），仍在向用户态推进。
+
+30. **CPL3 下模拟器“代访”的权限判定（本轮关键修复）**：`mem_translate()` 原先用 `sel[1] & 3` 推断访问是否属于用户态。这条推断只对**客户指令自己**的访存成立；而 CPL3 期间模拟器自身也要访存——读 IDT 门描述符、把 5 槽异常帧压到 TSS.RSP0 栈上、缺页诊断探针读内核栈——这些都是**内核特权**访问。用 `sel[1]&3` 推断后，这些代访遇到内核页（U/S=0）就会误抛 #PF：
+   - `cpu_deliver()` 读门外加压帧全部失败，异常帧根本没写进内核栈；
+   - 内核的 #PF 处理器永远进不去；
+   - 用户态首指令（`_start` 的 `push rbp` 撞未映射栈页）之后就一直重试，表现为“停在 0x401030 且不再推进指令数”。
+   
+   修法：`struct Machine` 增加 `emu_sup`；`cpu_deliver()`、`pg_fault()` 的诊断块内置 1；`mem_translate()` 的 CPL 推断改为 `((sel[1]&3) != 0 && !emu_sup)`。测试/自检代码在 CPL3 状态下改内存时也要显式置 `emu_sup`。
+
+31. **64 位中断门有效性判断**：原判据是 `(gate >> 48) == 0` 就 `halted=1`——`gate>>48` 是 **offset_mid**，于是 handler 地址 < 4 GiB（offset_mid 天然为 0）的门全部被判死（内核高地址 handler 侥幸不受影响）。改为检查 P 位（bit47）与 `type != 0`。
+
+32. **故障指令的寄存器回滚**：SDM 规定触发故障的指令不得留下任何架构副作用。`step()` 原来只把 RIP 退回指令开头；`push`（RSP 已减 8）、串操作（RSI/RDI/RCX 已推进）在 `pg_fault` 之后会带着半截副作用重试。现在同步故障回退时同时恢复 `RSP/RSI/RDI/RCX` 到指令执行前的值（内存写入不改值，天然幂等）。
+
+33. **定位手段**：`--sample` 每 2000 万条指令打一行 `[SMP] n/rip/cpl/cr3/user_entries`；`g_m.watch_fd`（native 打开 `/tmp/simwatch.bin`）每 4096 条指令写 24 字节 `{cur_rip, instructions, 0}`、`mem_translate` 每 16384 次写 24 字节 `{mt_calls, va, cur_rip}`。用「指令数停涨但翻译数继续涨」这一对观测量即可把问题收敛到“异常投递路径”，再配合 §30 的权限分析定位。

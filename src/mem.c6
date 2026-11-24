@@ -169,6 +169,7 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
         *pf_ec = ec;
     g_m.cpu.cr[2] = va;
 #if !defined(C6_WASM)
+    g_m.emu_sup = 1;   /* dump 里的探针读取按内核权限，不能被当成用户缺页 */
     if (g_m.rip_dump_en && va < 0x8000000000000000ull && g_m.ppt_count < 400) {
         g_m.ppt_count++;
         printf("[PPT] va=%llx wr=%u us=%u rip=%llx\n",
@@ -186,6 +187,13 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
             for (i = 0; i < 16; i++)
                 printf("[PPG] r%u=%llx\n", i,
                        (unsigned long long)g_m.cpu.r[i]);
+            printf("[PPS] rsp=%llx\n", (unsigned long long)g_m.cpu.r[4]);
+            for (k = 0; k < 40; k++) {
+                u64 sv = 0;
+                if (g_m.cpu.r[4] + k * 8 < RAM_SIZE)
+                    sv = mem_r64(g_m.cpu.r[4] + k * 8);
+                printf("[PPK] %2u %llx\n", k, (unsigned long long)sv);
+            }
             for (k = 0; k < 200; k++) {
                 u32 idx = (g_m.rip_ring_i + k) & 4095u;
                 printf("[PPR] %2u %llx\n", k,
@@ -194,6 +202,7 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
         }
         fflush(stdout);
     }
+    g_m.emu_sup = 0;
 #endif
     raise_exception(&g_m.cpu, EXC_PF, 1, ec);
 }
@@ -206,9 +215,17 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
      * SDM：U/S 位和 #PF 错误码 bit2 都取决于 CPL——CPL3 的任何访问都要求
      * U/S=1；CPL0 的 copy_from_user 之类不要求。 */
     u32 level = 0, shift = 0, is_user = 0;
-    u32 cpl3 = (g_m.cpu.sel[1] & 3) ? 1 : 0;
+    u32 cpl3 = ((g_m.cpu.sel[1] & 3) != 0 && !g_m.emu_sup) ? 1 : 0;
 
     is_user = cpl3 | (user == 1);
+    g_m.mt_calls++;
+    if ((g_m.mt_calls & 0x3fffu) == 0 && g_m.watch_fd >= 0) {
+        u64 mb[3] = {0, 0, 0};
+        mb[0] = g_m.mt_calls;
+        mb[1] = va;
+        mb[2] = g_m.cur_rip;
+        write(g_m.watch_fd, mb, 24);
+    }
 
     if (!(g_m.cpu.cr[0] & CR0_PG))
         return va;

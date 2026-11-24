@@ -72,13 +72,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--kernel', required=True, help='bzImage (vmlinuz)')
     ap.add_argument('--initrd', help='Alpine minirootfs tar.gz')
+    ap.add_argument('--raw-initrd', action='store_true',
+                    help='initrd 已经是 cpio.gz，原样打包（不再注入 /init）')
     ap.add_argument('--cmdline', default='console=ttyS0,115200 earlyprintk=ttyS0,115200 panic=-1')
     ap.add_argument('--out', default='build/firmware.bin')
     a = ap.parse_args()
     kernel, kpaddr = extract_vmlinux(a.kernel)
     if kpaddr != 0x01000000:
         print('mkfw: warning: kernel load paddr=0x%x (expected 0x01000000)' % kpaddr, file=sys.stderr)
-    initrd = make_initrd(a.initrd) if a.initrd else b''
+    if not a.initrd:
+        initrd = b''
+    elif a.raw_initrd:
+        initrd = open(a.initrd, 'rb').read()
+    else:
+        initrd = make_initrd(a.initrd)
     cmd = a.cmdline.encode()
     off = HDR
     blobs = []

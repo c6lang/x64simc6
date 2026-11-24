@@ -179,6 +179,12 @@ struct Machine {
     u64 rip_ring[4096];
     u32 rip_ring_i;
     u64 user_entries;
+    u64 sample_marks;
+    u64 cur_rip;
+    int watch_fd;
+    u32 emu_sup;                 /* 1 = 模拟器自身代访（分页遍历/门读取/压帧），按内核权限 */
+    u64 mt_calls;
+    u64 sample_on;
     u32 ppt_dumps;
     u8 rip_dump_en;
     u32 ppt_count;
