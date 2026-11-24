@@ -316,11 +316,23 @@ static u64 pop64(struct CPUState *c)
 
 void raise_exception(struct CPUState *c, u32 vec, u8 has_ec, u64 ec)
 {
-    if (c->exc_pending) return;
+    /* 同步异常优先于挂起的异步中断 */
+    if (c->exc_pending && !c->exc_async) return;
     c->exc_pending = 1;
+    c->exc_async = 0;
     c->exc_vec = vec;
     c->exc_has_ec = has_ec;
     c->exc_ec = ec;
+}
+
+void raise_irq(struct CPUState *c, u32 vec)
+{
+    if (c->exc_pending) return;
+    c->exc_pending = 1;
+    c->exc_async = 1;
+    c->exc_vec = vec;
+    c->exc_has_ec = 0;
+    c->exc_ec = 0;
 }
 
 void cpu_deliver(struct CPUState *c)
@@ -335,6 +347,7 @@ void cpu_deliver(struct CPUState *c)
     has_ec = c->exc_has_ec;
     ec = c->exc_ec;
     c->exc_pending = 0;
+    c->exc_async = 0;
     if (c->idtr_limit == 0) {
         c->halted = 1;
         return;
@@ -416,7 +429,7 @@ static void do_cpuid(struct CPUState *c)
     } else if (leaf == 1) {
         a = 0x000306a9;
         b = 0x00100800;
-        cc = 0x00000200;          /* 不报 SSSE3，避免 guest 用未实现指令 */
+        cc = 0x00000000;          /* 不报 SSSE3/SSE4/AVX，避免 guest 用未实现指令 */
         d = 0x078bfbff;           /* PAE/APIC/SSE2/FXSR ... */
     } else if (leaf == 2 || leaf == 4) {
         a = 0; b = 0; cc = 0; d = 0;
@@ -1081,14 +1094,39 @@ int step(struct CPUState *c)
             }
             break;
         }
+        case 0x6e: {  /* movd/movq：GPR/内存 → xmm（REX.W 时 64 位） */
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            u32 x = rm.reg & 15;
+            c->xmm[x][0] = op_read(c, &rm, (rex & 8) ? 8 : 4);
+            c->xmm[x][1] = 0;
+            break;
+        }
+        case 0x7e: {  /* movd/movq：xmm → GPR/内存 */
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            u32 x = rm.reg & 15;
+            op_write(c, &rm, (rex & 8) ? 8 : 4, c->xmm[x][0]);
+            break;
+        }
         case 0x57: case 0xef: case 0xeb: case 0xdb: { /* xorps/pxor/por/pand */
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             u32 x = rm.reg & 15;
-            a = op_read(c, &rm, 8);
-            b = c->xmm[x][0];
-            if (op2 == 0x57 || op2 == 0xef) c->xmm[x][0] = a ^ b;
-            else if (op2 == 0xeb) c->xmm[x][0] = a | b;
-            else c->xmm[x][0] = a & b;
+            {
+                u32 sreg = rm.rm & 15;
+                u64 alo = op_read(c, &rm, 8);
+                u64 ahi = rm.is_reg ? ((pre & PRE_66) ? c->xmm[sreg][1] : 0)
+                                    : mem_r64(rm.addr + 8);
+                u64 blo = c->xmm[x][0], bhi = c->xmm[x][1];
+                if (op2 == 0x57 || op2 == 0xef) {
+                    c->xmm[x][0] = alo ^ blo;
+                    c->xmm[x][1] = ahi ^ bhi;
+                } else if (op2 == 0xeb) {
+                    c->xmm[x][0] = alo | blo;
+                    c->xmm[x][1] = ahi | bhi;
+                } else {
+                    c->xmm[x][0] = alo & blo;
+                    c->xmm[x][1] = ahi & bhi;
+                }
+            }
             break;
         }
         case 0x71: case 0x72: case 0x73: { /* MMX/SSE 移位组 */
@@ -1641,8 +1679,10 @@ int step(struct CPUState *c)
             break;
         }
     }
-    if (c->exc_pending && !trap_exc)
+    /* 只有同步异常（故障）才把 RIP 退回指令开头；外部中断是异步的，必须留在下一条指令 */
+    if (c->exc_pending && !trap_exc && !c->exc_async) {
         c->rip = start;
+    }
     return 0;
 }
 

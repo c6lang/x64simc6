@@ -11,6 +11,7 @@ typedef short i16;
 typedef int i32;
 typedef long long i64;
 
+
 /* 客户机物理内存布局 */
 #define RAM_SIZE        0x08000000u   /* 128 MiB */
 #define RAM_TOP         0x08000000u
@@ -100,6 +101,7 @@ struct Operand {
 
 struct CPUState {
     u8 exc_pending;
+    u8 exc_async;   /* 1=外部中断（异步），0=指令产生的异常（故障） */
     u32 exc_vec;
     u64 exc_ec;
     u8 exc_has_ec;
@@ -201,6 +203,7 @@ void mem_w64(u64 a, u64 v);
 void mem_copy_from(u64 dst, const u8 *src, u64 n);
 u64 mem_translate(u64 va, u32 write, u32 user, u32 *pf_ec);
 void mem_tlb_flush(void);
+void raise_irq(struct CPUState *c, u32 vec);
 
 /* cpu.c6 */
 int cpu_step(struct CPUState *c);

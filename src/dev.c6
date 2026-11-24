@@ -416,6 +416,6 @@ void dev_tick(void)
         (void)irq;
         (void)found;
         if (deliver)
-            raise_exception(&m->cpu, vec, 0, 0);
+            raise_irq(&m->cpu, vec);
     }
 }
