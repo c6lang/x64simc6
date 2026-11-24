@@ -797,8 +797,17 @@ int step(struct CPUState *c)
             } else if (regf == 3 && mod == 0) { /* lidt */
                 c->idtr_base = mem_r64(rm.addr + 2);
                 c->idtr_limit = mem_r16(rm.addr);
+            } else if (regf == 4) {           /* smsw r/m16 */
+                if (mod == 3) reg_write(c, (m1 >> 3) & 7, 2, c->cr[0] & 0xffff);
+                else mem_w16(rm.addr, c->cr[0] & 0xffff);
+            } else if (regf == 6 && mod == 3) { /* lmsw */
+                u16 v = (u16)reg_read(c, (m1 >> 3) & 7, 2);
+                c->cr[0] = (c->cr[0] & ~0xfull) | (v & 0xf);
+                mem_tlb_flush();
             } else if (regf == 6) {           /* 16 位 smsw */
                 reg_write(c, (m1 >> 3) & 7, 2, c->cr[0] & 0xffff);
+            } else if (regf == 7) {           /* invlpg：整 TLB 刷新 */
+                mem_tlb_flush();
             } else if ((m1 & 0xf8) == 0xd0) { /* xgetbv */
                 c->r[0] = 3; c->r[2] = 0;
             } else if ((m1 & 0xf8) == 0xf8) { /* swapgs */
