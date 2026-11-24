@@ -614,3 +614,17 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     （THRE 中断 → `serial8250_tx_chars`）没有被正确驱动。下一步：
     检查 8250 的 IIR/IER/THRE 与 IRQ4（PIC/IOAPIC）投递，或先用轮询模式
     （Console 走 `serial8250_console_write` 已能工作到 5.98s）验证。
+
+47. **确定性停机点 + 串口输出缺口（本轮收尾状态）**：反复跑都在
+    `instructions=2261778433` 精确停机（两次独立运行同一数字），说明是某个
+    **确定性 bug**（大概率是 `hlt` 时 IF=0 或三重故障），而不是超时/竞态。
+    同一次运行里 `[SYST] ttyS0::respawn:-/bin/login.` 能出现在串口输出里，
+    说明 6s 前后的 console 输出通路是通的；但 `/bin/login` 通过
+    `writev(1, …)` 发出的提示没有落到模拟器 stdout（`[SYS]` 只看到
+    `ioctl(0,0x5402)`(TCSETS) 与 `read(0,…)`），又说明 **tty 驱动 → 16550 的
+    中断发送路径**在用户态加入后有问题。
+    下一步（按优先级）：
+    1. 给 `machine_step_loop` 的停机分支加诊断（打印停机前的 RIP/IF/halted 来源），
+       定位 2261778433 这条确定性停机；
+    2. 检查 8250 的 TX 中断（IER bit1 / IIR=0x02 / THRE）与 IRQ4 的投递；
+    3. 或用 `console=ttyS0` 下轮询模式验证串口输出是否恢复。
