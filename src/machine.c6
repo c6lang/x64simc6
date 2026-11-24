@@ -110,7 +110,8 @@ static int machine_step_loop(u64 count)
             write(g_m.watch_fd, tb, 24);
             g_m.trace_win++;
         }
-        if (g_m.watch_fd >= 0 && (g_m.instructions & 0xfffu) == 0) {
+        if (g_m.watch_fd >= 0 && !g_m.sys_trace &&
+            (g_m.instructions & 0xfffu) == 0) {
             u64 wb[3] = {0, 0, 0};
             wb[0] = g_m.cur_rip;
             wb[1] = g_m.instructions;

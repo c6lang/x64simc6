@@ -928,6 +928,18 @@ int step(struct CPUState *c)
         u64 v = 0, a = 0, b = 0;
         switch (op2) {
         case 0x05:  /* syscall：RCX=RIP，R11=RFLAGS，CS/SS 取自 STAR */
+#if !defined(C6_WASM)
+            if (g_m.sys_trace && g_m.sys_count < 6000) {
+                printf("[SYS] cr3=%llx nr=%llu a0=%llx a1=%llx a2=%llx a3=%llx\n",
+                       (unsigned long long)c->cr[3],
+                       (unsigned long long)c->r[0],
+                       (unsigned long long)c->r[7],
+                       (unsigned long long)c->r[6],
+                       (unsigned long long)c->r[2],
+                       (unsigned long long)c->r[10]);
+                g_m.sys_count++;
+            }
+#endif
             c->r[1] = c->rip;
             c->r[11] = c->flags;
             c->flags &= ~(c->msr_sfmask & (RF_IF | RF_DF | RF_TF));

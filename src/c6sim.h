@@ -184,7 +184,10 @@ struct Machine {
     u64 cur_rip;
     int watch_fd;
     u32 emu_sup;
-    u32 trace_win;               /* CPL3 首次进入后的逐步记录窗口 */                 /* 1 = 模拟器自身代访（分页遍历/门读取/压帧），按内核权限 */
+    u32 trace_win;
+    u32 sys_trace;               /* 1 = 记录每次 syscall 到 watch_fd */
+    u64 sysrec[8];
+    u64 sys_count;               /* syscall 记录缓冲：cr3,nr,rdi,rsi,rdx,r10,r8,r9 */               /* CPL3 首次进入后的逐步记录窗口 */                 /* 1 = 模拟器自身代访（分页遍历/门读取/压帧），按内核权限 */
     u64 mt_calls;
     u64 sample_on;
     u32 ppt_dumps;
