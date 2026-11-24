@@ -447,3 +447,14 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     - 用户 `push rbp` 打未映射栈页 → 投递到 `TSS.sp0` → 内核建页表 → `iretq` 回 CPL3 → 重试 `push` 成功；
     - 取指缺页必须回退 RIP，CR2 必须是取指地址（不能被后续连带访存覆盖）。
     经验：**凡是在 `step()` 中间 `return` 的路径，都必须自己做完故障回退**；更好的做法是不要在中间 return。
+
+36. **mini init 全链路验证通过（本轮里程碑）**：修完 §34/§35 后，用 mini initramfs
+    （942 字节 cpio.gz，内含静态 `_start`：`write(1, "MINIT-OK", 9); exit(0)`）引导
+    Alpine `vmlinuz-lts`：
+    - 修复前：`init[1]: segfault at 0 ip 0000000000401032`，随后
+      `Attempted to kill init! exitcode=0x0000000b`（SIGSEGV）；
+    - 修复后：**没有 segfault**，内核直接报
+      `Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000000`
+      —— `exitcode=0` 说明 `/init` 完整执行到 `exit(0)`（init 退出触发 panic 属正常）。
+    这验证了 CPL3 进入、用户栈缺页处理、`syscall`、`exit` 全链路。下一步用真正的
+    Alpine initramfs 跑到 `login:`。
