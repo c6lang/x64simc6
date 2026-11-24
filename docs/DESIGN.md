@@ -582,3 +582,16 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     再按行首判据 `grep -q '^ttyS0::respawn'` 兜底追加。
     这条经验说明：**"系统看起来卡住" 常常只是最后一个用户态进程在报错循环**，
     一个 syscall 跟踪器比猜测内核栈快得多。
+
+45. **改用 `/bin/login` 后系统在 init 阶段 halt（当前卡点）**：minirootfs 里既没有
+    `/sbin/openrc` 也没有 `/sbin/getty`（`--sys` 跟踪里是
+    `can't run '/sbin/openrc'`、`can't change directory to '/lib/modules'`），
+    所以把 inittab 的串口行改成 `ttyS0::respawn:-/bin/login`，并清空 root 密码、
+    给 `/init` 补 `mount -t devtmpfs`。重建固件后用 `tools/boot_login.py` 跑：
+    ```
+    [c6sim] halted, instructions=2261778433, exit=0
+    ```
+    模拟器在 2.26e9 条指令（约 7.5s 客户机时间）后停机 —— 说明新路径下有
+    三重故障/`hlt` 且 IF=0 的情况。下一步：用 `--sys --sample` 复跑，看停机前
+    最后几条 syscall 和 RIP；重点怀疑 `sed -i`（写临时文件+rename）、
+    `mount -t devtmpfs`，以及 `/bin/login` 依赖的 tty ioctl 路径。
