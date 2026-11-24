@@ -562,3 +562,23 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     下一步：加一个**系统调用跟踪器**（PID 1 的前 N 个 syscall 号 + 参数 + 返回值），
     直接看 `/init` 卡在哪个 syscall（很可能是 mount/mdev/wait4/vfork 之一），
     比继续猜快得多。
+
+44. **用 `--sys` 跟踪器定位到「没有 login 提示」的真因（本轮）**：给模拟器加
+    `--sys` 后，每次 `syscall` 打一行 `[SYS] cr3/nr/a0..a3`（前 6000 条），
+    并对 `write(2,…)`、`connect(…, AF_UNIX)` 额外打印内容。Alpine 固件跑到
+    32 亿条指令后，日志里出现：
+    ```
+    [SYST] .can't open /dev/tty6: No such file or directory.
+    [SYST] .can't open /dev/tty1: No such file or directory.
+    ...
+    [SYSC] /dev/log..
+    ```
+    ⇒ 系统**早已进到真实 root 并在跑 getty**，只是：
+    1. `/dev` 不是 devtmpfs ⇒ `/dev/tty1..6`、`/dev/ttyS0` 都不存在；
+    2. Alpine 的 `/etc/inittab` 里串口那行是**注释掉的**：
+       `#ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100`，
+       而 `mkfw.py` 的注入脚本用 `grep -q ttyS0` 判断——命中注释就**从不追加**。
+    修法：`/init` 补 `mount -t devtmpfs dev /dev`；inittab 先用 `sed` 取消注释，
+    再按行首判据 `grep -q '^ttyS0::respawn'` 兜底追加。
+    这条经验说明：**"系统看起来卡住" 常常只是最后一个用户态进程在报错循环**，
+    一个 syscall 跟踪器比猜测内核栈快得多。
