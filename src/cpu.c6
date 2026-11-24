@@ -342,6 +342,7 @@ void cpu_deliver(struct CPUState *c)
     u16 sel = 0;
     u8 has_ec = 0, type = 0;
     u32 sup0 = 0;
+    u64 frf = 0;
 
     if (!c->exc_pending) return;
     sup0 = g_m.emu_sup;
@@ -390,16 +391,19 @@ void cpu_deliver(struct CPUState *c)
             if (rsp0 == 0)
                 rsp0 = old_rsp;
             c->r[4] = rsp0 & ~((u64)0xf);
+            /* SDM：异常帧里保存的 RFLAGS 会清掉 TF/RF/VM/NT，其余位保持 */
+            frf = c->flags & ~(RF_TF | RF_RF | 0x00020000ull | 0x00004000ull);
             push64(c, old_ss);
             push64(c, old_rsp);
-            push64(c, c->flags & ~((u64)0x2800));
+            push64(c, frf);
             push64(c, old_cs);
             push64(c, c->rip);
             c->sel[2] = (u16)(((c->msr_star >> 32) & 0xfffcu) + 8);
         } else {
+            frf = c->flags & ~(RF_TF | RF_RF | 0x00020000ull | 0x00004000ull);
             push64(c, old_ss);
             push64(c, old_rsp);
-            push64(c, c->flags & ~((u64)0x2800));
+            push64(c, frf);
             push64(c, old_cs);
             push64(c, c->rip);
         }
@@ -1658,6 +1662,10 @@ int step(struct CPUState *c)
         /* 两字节指令执行完：只有同步故障才回退 RIP（异步中断必须停在下一条指令） */
         if (c->exc_pending && !c->exc_async) {
             c->rip = start;
+            c->r[4] = s_rsp;
+            c->r[6] = s_rsi;
+            c->r[7] = s_rdi;
+            c->r[1] = s_rcx;
             return 0;
         }
         return 0;
@@ -1688,6 +1696,14 @@ int step(struct CPUState *c)
             if ((op & 7) >= 4) b = imm;
             if (grp == 7) {
                 flags_sub(c, a, b, (a - b) & sz_mask(s), s);
+                /* 同步故障必须回退 RIP 与已改动的寄存器（ALU 家族走的是提前 return） */
+                if (c->exc_pending && !c->exc_async) {
+                    c->rip = start;
+                    c->r[4] = s_rsp;
+                    c->r[6] = s_rsi;
+                    c->r[7] = s_rdi;
+                    c->r[1] = s_rcx;
+                }
                 return 0;
             }
             if (grp == 4) res = a & b;
@@ -1713,6 +1729,14 @@ int step(struct CPUState *c)
                 reg_write(c, rm.reg, s, res);
             else
                 op_write(c, &rm, s, res);
+                /* 同步故障必须回退 RIP 与已改动的寄存器（ALU 家族走的是提前 return） */
+                if (c->exc_pending && !c->exc_async) {
+                    c->rip = start;
+                    c->r[4] = s_rsp;
+                    c->r[6] = s_rsi;
+                    c->r[7] = s_rdi;
+                    c->r[1] = s_rcx;
+                }
             return 0;
         }
 

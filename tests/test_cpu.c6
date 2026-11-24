@@ -159,6 +159,30 @@ int main(void)
         check(mem_r64(0x15000 - 8) == 0x2b, "CPL3 frame: user SS");
     }
 
+    {
+        /* 指令长度回归：_start 序言 push rbp; mov rbp,rsp */
+        machine_reset();
+        g_m.cpu.cr[0] = 0;
+        g_m.cpu.sel[1] = 0x10;
+        g_m.ram[0x10000] = 0x55;            /* push rbp */
+        g_m.ram[0x10001] = 0x48;            /* mov rbp,rsp */
+        g_m.ram[0x10002] = 0x89;
+        g_m.ram[0x10003] = 0xe5;
+        g_m.ram[0x10004] = 0xf4;            /* hlt */
+        g_m.cpu.rip = 0x10000;
+        g_m.cpu.r[4] = 0x20000;
+        g_m.cpu.r[5] = 0x1111;
+        cpu_step(&g_m.cpu);
+        printf("[L] after push rip=%llx rsp=%llx\n",
+               (unsigned long long)g_m.cpu.rip, (unsigned long long)g_m.cpu.r[4]);
+        check(g_m.cpu.rip == 0x10001, "push rbp is 1 byte");
+        check(g_m.cpu.r[4] == 0x1fff8, "push rbp decrements rsp");
+        check(mem_r64(0x1fff8) == 0x1111, "push rbp stores rbp");
+        cpu_step(&g_m.cpu);
+        check(g_m.cpu.rip == 0x10004, "mov rbp,rsp is 3 bytes");
+        check(g_m.cpu.r[5] == 0x1fff8, "mov rbp,rsp copies rsp");
+    }
+
     if (failures == 0) printf("all unit tests passed\n");
     return failures == 0 ? 0 : 1;
 }

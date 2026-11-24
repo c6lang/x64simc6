@@ -168,6 +168,10 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
     u32 sup0 = g_m.emu_sup;
     if (pf_ec)
         *pf_ec = ec;
+    /* 已经有一条同步异常等着投递时，后续访问故障属于同一条指令的连带效应，
+     * 不能覆盖 CR2/错误码（否则内核看到的是错的故障地址）。 */
+    if (g_m.cpu.exc_pending)
+        return;
     g_m.cpu.cr[2] = va;
 #if !defined(C6_WASM)
     g_m.emu_sup = 1;   /* dump 里的探针读取按内核权限，不能被当成用户缺页 */

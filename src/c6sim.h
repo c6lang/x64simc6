@@ -182,7 +182,8 @@ struct Machine {
     u64 sample_marks;
     u64 cur_rip;
     int watch_fd;
-    u32 emu_sup;                 /* 1 = 模拟器自身代访（分页遍历/门读取/压帧），按内核权限 */
+    u32 emu_sup;
+    u32 trace_win;               /* CPL3 首次进入后的逐步记录窗口 */                 /* 1 = 模拟器自身代访（分页遍历/门读取/压帧），按内核权限 */
     u64 mt_calls;
     u64 sample_on;
     u32 ppt_dumps;

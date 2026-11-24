@@ -1,0 +1,181 @@
+/* CPL3 往返单测：模拟内核给 /init 建立用户态后的完整一轮
+ *   用户首指令 push rbp -> 栈页未映射 #PF -> 投递到内核 TSS.RSP0
+ *   -> 内核把栈页映射上 -> iretq 回到 CPL3 -> 重试 push 成功
+ * 目的是在秒级复现引导里 "CPL3 首指令就 segfault" 的问题。
+ */
+#include "c6sim.h"
+
+static int failures = 0;
+
+static void check(int ok, const char *what)
+{
+    if (!ok) { printf("FAIL: %s\n", what); failures++; }
+}
+
+/* 页表（物理地址，机器复位后 RAM 全 0） */
+#define PML4_PA   0x500000ull
+#define PDPT_PA   0x501000ull
+#define PD_PA     0x502000ull
+#define KERN_BASE 0x400000ull       /* 4MiB：内核 2MiB 大页 */
+#define HANDLER   0x400000ull
+#define GDT_PA    0x401000ull
+#define IDT_PA    0x402000ull
+#define TSS_PA    0x403000ull
+#define KSTACK    0x410000ull       /* TSS.sp0 */
+#define UCODE     0x10000ull        /* 用户代码页（0..2MiB） */
+#define USTACK    0x300000ull       /* 用户栈（2..4MiB，故意不映射） */
+
+int main(int argc, char **argv)
+{
+    u64 i = 0;
+    u64 gdt = GDT_PA, tss = TSS_PA, lim = 0x67;
+    u64 d0 = 0, d1 = 0;
+
+    (void)argc; (void)argv;
+    machine_reset();
+    g_m.cpu.cr[0] = 0;                  /* 建表阶段关分页 */
+    g_m.cpu.sel[1] = 0x10;
+    g_m.cpu.sel[2] = 0x18;
+
+    /* 页表：0..2MiB 用户 RWX；2..4MiB 不存在；4..6MiB 内核 RWX */
+    for (i = 0; i < 3 * 512; i++) mem_w64(PML4_PA + i * 8, 0);
+    mem_w64(PML4_PA, PDPT_PA | 7);                /* P|RW|US */
+    mem_w64(PDPT_PA, PD_PA | 7);
+    mem_w64(PD_PA + 0 * 8, 0x000000ull | 0x87);   /* 2MiB 用户页 */
+    mem_w64(PD_PA + 1 * 8, 0);                    /* 2..4MiB 不映射 */
+    mem_w64(PD_PA + 2 * 8, KERN_BASE | 0x83);     /* 4MiB 内核页 */
+
+    /* GDT 第 1 项：64 位 TSS 描述符 */
+    d0 = (lim & 0xffff) | ((tss & 0xffff) << 16) |
+         (((tss >> 16) & 0xff) << 32) | ((u64)0x89 << 40) |
+         (((lim >> 16) & 0xf) << 48) | (((tss >> 24) & 0xff) << 56);
+    d1 = (tss >> 32) & 0xffffffffull;
+    mem_w64(gdt + 8, d0);
+    mem_w64(gdt + 16, d1);
+    mem_w64(tss + 4, KSTACK);           /* sp0 */
+
+    /* IDT 第 14 号门（#PF） */
+    mem_w64(IDT_PA + 14 * 16,
+            (u64)0x10 << 16 | (u64)0x8e << 40 | (u64)(HANDLER >> 16) << 48);
+    mem_w64(IDT_PA + 14 * 16 + 8, (HANDLER >> 32) & 0xffffffffull);
+
+    g_m.cpu.gdtr_base = gdt;
+    g_m.cpu.tr_sel = 0x08;
+    g_m.cpu.idtr_base = IDT_PA;
+    g_m.cpu.idtr_limit = 0x0fff;
+    g_m.cpu.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+    g_m.cpu.cr[3] = PML4_PA;
+    g_m.cpu.cr[0] = CR0_PE | CR0_PG;
+
+    /* 代码最后写，避免被前面的页表/描述符写干扰 */
+    g_m.ram[UCODE + 0] = 0x55;   /* push rbp */
+    g_m.ram[UCODE + 1] = 0x48;   /* mov rbp,rsp */
+    g_m.ram[UCODE + 2] = 0x89;
+    g_m.ram[UCODE + 3] = 0xe5;
+    g_m.ram[UCODE + 4] = 0xf4;   /* hlt */
+    g_m.ram[HANDLER + 0] = 0x48; /* add rsp,8（弹掉硬件压入的错误码） */
+    g_m.ram[HANDLER + 1] = 0x83;
+    g_m.ram[HANDLER + 2] = 0xc4;
+    g_m.ram[HANDLER + 3] = 0x08;
+    g_m.ram[HANDLER + 4] = 0xcf; /* iretq */
+
+    /* 内核 start_thread() 的效果：CPL3，RIP=入口，RSP=用户栈顶 */
+    g_m.cpu.sel[1] = 0x33;
+    g_m.cpu.sel[2] = 0x2b;
+    g_m.cpu.flags = 0x202;
+    g_m.cpu.rip = UCODE;
+    g_m.cpu.r[4] = USTACK;
+    g_m.cpu.r[5] = 0x1111;
+
+    /* 1) 首指令 push rbp 打到未映射栈页 -> #PF */
+    cpu_step(&g_m.cpu);
+    check(g_m.cpu.exc_pending == 1, "1 first user store raises #PF");
+    check(g_m.cpu.exc_vec == 14, "1 vector is #PF");
+    check(g_m.cpu.cr[2] == USTACK - 8, "1 CR2 is stack slot");
+    check(g_m.cpu.exc_ec == 6, "1 error code = U/S|W");
+    check(g_m.cpu.rip == UCODE, "1 RIP rewound to push");
+    check(g_m.cpu.r[4] == USTACK, "1 RSP rolled back");
+
+    /* 2) 投递到内核 */
+    cpu_deliver(&g_m.cpu);
+    check(g_m.cpu.halted == 0, "2 delivery does not halt");
+    check(g_m.cpu.r[4] == KSTACK - 48, "2 frame on TSS.sp0");
+    check(g_m.cpu.rip == HANDLER, "2 RIP = handler");
+    check(g_m.cpu.sel[1] == 0x10, "2 CS = kernel");
+    check(mem_r64(KSTACK - 48) == 6, "2 frame[0] error code");
+    check(mem_r64(KSTACK - 40) == UCODE, "2 frame[1] user RIP");
+    check(mem_r64(KSTACK - 32) == 0x33, "2 frame[2] user CS");
+    check(mem_r64(KSTACK - 24) == 0x202, "2 frame[3] user RFLAGS");
+    check(mem_r64(KSTACK - 16) == USTACK, "2 frame[4] user RSP");
+    check(mem_r64(KSTACK - 8) == 0x2b, "2 frame[5] user SS");
+
+    /* 3) 内核修页表（相当于 handle_mm_fault 成功） */
+    g_m.cpu.cr[0] = 0;
+    mem_w64(PD_PA + 1 * 8, 0x200000ull | 0x87);
+    g_m.cpu.cr[0] = CR0_PE | CR0_PG;
+
+    /* 4) 内核 handler：add rsp,8; iretq -> 回 CPL3 重试 push */
+    cpu_step(&g_m.cpu);
+    check(g_m.cpu.rip == HANDLER + 4, "4 add rsp,8 executed");
+    cpu_step(&g_m.cpu);
+    check(g_m.cpu.sel[1] == 0x33, "4 iretq restores CPL3");
+    check(g_m.cpu.rip == UCODE, "4 iretq returns to user push");
+    check(g_m.cpu.r[4] == USTACK, "4 iretq restores user RSP");
+
+    /* 5) 重试 push：这次栈页已映射，应成功 */
+    cpu_step(&g_m.cpu);
+    check(g_m.cpu.exc_pending == 0, "5 retried push does not fault");
+    check(g_m.cpu.rip == UCODE + 1, "5 push rbp is 1 byte");
+    check(g_m.cpu.r[4] == USTACK - 8, "5 RSP decremented");
+    check(mem_r64(USTACK - 8) == 0x1111, "5 rbp stored on user stack");
+
+    /* 6) 下一条 mov rbp,rsp */
+    cpu_step(&g_m.cpu);
+    check(g_m.cpu.rip == UCODE + 4, "6 mov rbp,rsp is 3 bytes");
+    check(g_m.cpu.r[5] == USTACK - 8, "6 rbp = rsp");
+
+    /* 7) 取指缺页：代码页不映射时，RIP 必须回退到指令开头（不能 +1） */
+    machine_reset();
+    g_m.cpu.cr[0] = 0;
+    g_m.cpu.sel[1] = 0x10;
+    g_m.cpu.sel[2] = 0x18;
+    for (i = 0; i < 3 * 512; i++) mem_w64(PML4_PA + i * 8, 0);
+    mem_w64(PML4_PA, PDPT_PA | 7);
+    mem_w64(PDPT_PA, PD_PA | 7);
+    mem_w64(PD_PA + 2 * 8, KERN_BASE | 0x83);
+    d0 = (lim & 0xffff) | ((tss & 0xffff) << 16) |
+         (((tss >> 16) & 0xff) << 32) | ((u64)0x89 << 40) |
+         (((lim >> 16) & 0xf) << 48) | (((tss >> 24) & 0xff) << 56);
+    d1 = (tss >> 32) & 0xffffffffull;
+    mem_w64(gdt + 8, d0);
+    mem_w64(gdt + 16, d1);
+    mem_w64(tss + 4, KSTACK);
+    mem_w64(IDT_PA + 14 * 16,
+            (u64)0x10 << 16 | (u64)0x8e << 40 | (u64)(HANDLER >> 16) << 48);
+    mem_w64(IDT_PA + 14 * 16 + 8, (HANDLER >> 32) & 0xffffffffull);
+    g_m.cpu.gdtr_base = gdt;
+    g_m.cpu.tr_sel = 0x08;
+    g_m.cpu.idtr_base = IDT_PA;
+    g_m.cpu.idtr_limit = 0x0fff;
+    g_m.cpu.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+    g_m.cpu.cr[3] = PML4_PA;
+    g_m.cpu.cr[0] = CR0_PE | CR0_PG;
+    g_m.cpu.sel[1] = 0x33;
+    g_m.cpu.sel[2] = 0x2b;
+    g_m.cpu.flags = 0x202;
+    g_m.cpu.rip = USTACK;               /* 2..4MiB 未映射 */
+    g_m.cpu.r[4] = USTACK;
+
+    cpu_step(&g_m.cpu);
+    check(g_m.cpu.exc_pending == 1, "7 unmapped fetch raises #PF");
+    check(g_m.cpu.exc_vec == 14, "7 vector is #PF");
+    check(g_m.cpu.cr[2] == USTACK, "7 CR2 = fetch address");
+    check(g_m.cpu.exc_ec == 4, "7 error code = U/S only");
+    check(g_m.cpu.rip == USTACK, "7 fetch fault rewinds RIP");
+
+    cpu_deliver(&g_m.cpu);
+    check(mem_r64(KSTACK - 40) == USTACK, "7 frame RIP = fetch address");
+
+    if (failures == 0) printf("all cpl3 round-trip tests passed\n");
+    return failures ? 1 : 0;
+}
