@@ -521,3 +521,15 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     都被丢弃，配合已有的 RIP/寄存器回退，做到「零副作用 + 可重试」。
     回归测试：`tests/test_cpl3.c6` 场景 8 —— 用户态 `movsxd rax,[rdi+rax*4]`
     打未映射页，要求 RAX 保持 3、CR2=rdi+12、RIP 回退。
+
+41. **`fault_abort` 之后的 Alpine 状态：不再崩，但系统停在 idle**：完整固件复跑
+    45 分钟（`loglevel=4`）没有再出现 segfault/panic，`--sample` 采样显示
+    ```
+    [SMP] n=1540100150 rip=ffffffff81c003f0 cpl=0 cr3=2434000 ue=541
+    ```
+    - `rip=ffffffff81c003f0` = `irq_entries_start + 0x100`，采样里 25/40 次都命中这里，
+      另有 `arch_cpu_idle_exit + 4` —— 说明 CPU **大部分时间在中断入口和 idle 循环**；
+    - `ue=541` 且 15 亿条指令里只进过 541 次用户态 —— 用户进程几乎没在跑；
+    - `cr3=0x2434000` 是 initramfs 阶段 PID 1 的 mm。
+    结论：**系统没崩，但所有任务都在等事件**（idle），initramfs 的某个环节卡住了。
+    下一步用 `loglevel=7` 抓内核消息，看 `/init` 脚本停在 mount/mdev/modprobe 哪一步。
