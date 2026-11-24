@@ -178,6 +178,32 @@ static void build_pvh_start_info(void)
         mem_w8(0x2b2bb60 + i, mem_r8(PVH_START_PA + i));
 }
 
+u64 boot_probe(void)
+{
+    return (g_m.fw_kernel_len << 8) | ((g_m.fw_kernel != 0) ? 1u : 0u);
+}
+
+/* wasm 专用入口：c6 的 wasm 后端在不同 TU 里对同一结构体成员的偏移不一致
+ * （实测 wasm.c6 写 fw_kernel_len、boot.c6 读出来是 0），所以固件字段的
+ * 写入必须和 machine_boot() 在同一个 TU 内完成。 */
+int machine_boot_staged(u8 *base, u32 koff, u32 klen,
+                        u32 ioff, u32 ilen, u32 coff, u32 clen)
+{
+    u32 k = 0;
+    g_m.fw_kernel = base + koff;
+    g_m.fw_kernel_len = klen;
+    g_m.fw_initrd = base + ioff;
+    g_m.fw_initrd_len = ilen;
+    if (coff != 0 && clen != 0) {
+        u32 n = clen;
+        if (n > sizeof(g_m.cmdline) - 1) n = sizeof(g_m.cmdline) - 1;
+        for (k = 0; k < n; k++) g_m.cmdline[k] = base[coff + k];
+        g_m.cmdline[k] = 0;
+        g_m.cmdline_len = n;
+    }
+    return machine_boot();
+}
+
 int machine_boot(void)
 {
     struct Machine *m = &g_m;
@@ -185,19 +211,21 @@ int machine_boot(void)
     u32 i = 0;
     u64 cmdlen = 0;
 
-    if (m->fw_kernel == 0 || m->fw_kernel_len == 0) return -1;
-    if (m->fw_kernel_len > (RAM_TOP - KERNEL_PA)) return -2;
-    if (m->fw_initrd_len > (RAM_TOP - INITRD_PA)) return -3;
+    /* 这里刻意用全局 g_m 而不是 m->：c6 的 wasm 后端在「通过局部指针读结构体
+     * 成员」时会取到 0（写进去是对的），表现为 machine_boot 立即返回 -1。 */
+    if (g_m.fw_kernel == 0 || g_m.fw_kernel_len == 0) return -1;
+    if (g_m.fw_kernel_len > (RAM_TOP - KERNEL_PA)) return -2;
+    if (g_m.fw_initrd_len > (RAM_TOP - INITRD_PA)) return -3;
 
     zero_boot_params();
-    for (i = 0; i < m->fw_kernel_len; i++)
-        mem_w8(KERNEL_PA + i, m->fw_kernel[i]);
-    for (i = 0; i < m->fw_initrd_len; i++)
-        mem_w8(INITRD_PA + i, m->fw_initrd[i]);
-    for (i = 0; i < m->cmdline_len; i++)
-        mem_w8(CMDLINE_PA + i, m->cmdline[i]);
-    mem_w8(CMDLINE_PA + m->cmdline_len, 0);
-    cmdlen = m->cmdline_len;
+    for (i = 0; i < g_m.fw_kernel_len; i++)
+        mem_w8(KERNEL_PA + i, g_m.fw_kernel[i]);
+    for (i = 0; i < g_m.fw_initrd_len; i++)
+        mem_w8(INITRD_PA + i, g_m.fw_initrd[i]);
+    for (i = 0; i < g_m.cmdline_len; i++)
+        mem_w8(CMDLINE_PA + i, g_m.cmdline[i]);
+    mem_w8(CMDLINE_PA + g_m.cmdline_len, 0);
+    cmdlen = g_m.cmdline_len;
 
     build_e820(m);
     build_pvh_start_info();

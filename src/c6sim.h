@@ -193,6 +193,9 @@ struct Machine {
 };
 
 extern struct Machine g_m;
+u64 boot_probe(void);
+int machine_boot_staged(u8 *base, u32 koff, u32 klen,
+                        u32 ioff, u32 ilen, u32 coff, u32 clen);
 
 /* machine.c6 */
 void machine_init(void);

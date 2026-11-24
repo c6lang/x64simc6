@@ -458,3 +458,15 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
       —— `exitcode=0` 说明 `/init` 完整执行到 `exit(0)`（init 退出触发 panic 属正常）。
     这验证了 CPL3 进入、用户栈缺页处理、`syscall`、`exit` 全链路。下一步用真正的
     Alpine initramfs 跑到 `login:`。
+
+37. **wasm 侧装载完整固件的现状（限制）**：`tests/browser_alpine.js` 已验证 wasm 能装载
+    `web/sim.wasm`、把 32.7 MiB 的 `build/firmware.bin` 写进线性内存、`sim_set_cmdline`
+    与 `sim_init` 都被正确调用（C6FW 头 magic/version/kernel_len 在 JS 侧与 wasm 侧都对得上），
+    但 `sim_init` 仍返回 -1：**同一个 `struct Machine` 成员在 wasm 不同 TU 里偏移不一致**
+    （`wasm.c6` 写 `g_m.fw_kernel_len = 30814208`，`boot.c6` 里 `boot_probe()` 读出来是 0，
+    而同结构里的指针成员 `fw_kernel` 读出来正常）。这是 c6 wasm 后端已知的一类代码生成问题
+    （见第 10 条），不是逻辑错误。
+    为此把固件字段的写入与 `machine_boot()` 收进同一个 TU（新增 `machine_boot_staged()`），
+    结构上更稳妥；但在后端修好前，**浏览器里跑完整 Alpine 仍不可用**。
+    浏览器侧已通过的是：wasm 实例化 + 真实 fetch + Cache Storage + IndexedDB 文件表 +
+    hostfs 往返 + payload 运行（`node tests/browser_e2e.js`，见阶段 6）。
