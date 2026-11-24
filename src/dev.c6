@@ -249,6 +249,12 @@ void io_w8(u32 port, u8 v)
         return;
     }
     if (port == 0xf4 || port == 0xfe) {
+#if !defined(C6_WASM)
+        printf("[OFF] port=%x val=%x rip=%llx insns=%llu\n",
+               port, (u32)v, (unsigned long long)g_m.cur_rip,
+               (unsigned long long)g_m.instructions);
+        fflush(stdout);
+#endif
         g_m.halted = 1;
         g_m.exit_code = (u32)v;
         g_m.cpu.halted = 1;
