@@ -219,6 +219,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
 
     is_user = cpl3 | (user == 1);
     g_m.mt_calls++;
+#if !defined(C6_WASM)
     if ((g_m.mt_calls & 0x3fffu) == 0 && g_m.watch_fd >= 0) {
         u64 mb[3] = {0, 0, 0};
         mb[0] = g_m.mt_calls;
@@ -226,6 +227,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         mb[2] = g_m.cur_rip;
         write(g_m.watch_fd, mb, 24);
     }
+#endif
 
     if (!(g_m.cpu.cr[0] & CR0_PG))
         return va;

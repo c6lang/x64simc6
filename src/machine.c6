@@ -82,6 +82,7 @@ static int machine_step_loop(u64 count)
         }
         g_m.instructions++;
         g_m.tsc++;
+#if !defined(C6_WASM)
         if (g_m.sample_on && g_m.instructions - g_m.sample_marks >= 20000000ull) {
             g_m.sample_marks = g_m.instructions;
             printf("[SMP] n=%llu rip=%llx cpl=%u cr3=%llx ue=%llu\n",
@@ -92,16 +93,19 @@ static int machine_step_loop(u64 count)
                    (unsigned long long)g_m.user_entries);
             fflush(stdout);
         }
+#endif
         if (g_m.rip_dump_en) {
             g_m.rip_ring[g_m.rip_ring_i & 4095u] = g_m.cpu.rip;
             g_m.rip_ring_i++;
         }
+#if !defined(C6_WASM)
         if (g_m.watch_fd >= 0 && (g_m.instructions & 0xfffu) == 0) {
             u64 wb[3] = {0, 0, 0};
             wb[0] = g_m.cur_rip;
             wb[1] = g_m.instructions;
             write(g_m.watch_fd, wb, 24);
         }
+#endif
         cpu_step(&g_m.cpu);
         if (g_m.cpu.exc_pending)
             cpu_deliver(&g_m.cpu);
