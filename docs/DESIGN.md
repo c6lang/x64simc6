@@ -470,3 +470,23 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     结构上更稳妥；但在后端修好前，**浏览器里跑完整 Alpine 仍不可用**。
     浏览器侧已通过的是：wasm 实例化 + 真实 fetch + Cache Storage + IndexedDB 文件表 +
     hostfs 往返 + payload 运行（`node tests/browser_e2e.js`，见阶段 6）。
+
+38. **Alpine 真实 initramfs 进展：进到 musl 动态链接器（当前卡点）**：用官方
+    `build/firmware.bin`（内核 30 MiB + Alpine minirootfs initrd 3.4 MiB）跑到
+    `Run /init as init process` 之后，用户态真正跑起来了：
+    ```
+    [    5.959745] Problem loading in-kernel X.509 certificate (-129)
+    [    6.243060] init[1]: segfault at 7fe31d7f9d88 ip 00007fe2391dc7cf sp 00007fffe06936d0
+                  error 4 in ld-musl-x86_64.so.1[7fe23918d000+54000]
+    Code: ... 48 8d 3d bc 95 03 00 44 89 e0 <48 63 04 87> 48 01 f8 ff e0 ...
+    ```
+    `<48 63 04 87>` 就是 `movslq (%rdi,%rax,4),%rax`（musl 的跳转表分派），
+    而 CR2 精确等于 `RDI + 4*RAX`（RDI=0x7fe239215d88、RAX=0x39179000）。
+    也就是说前一条 `mov eax,r12d`（`44 89 e0`）没有把 RAX 变成 R12 里的小索引
+    （内核 dump 里 R12=7），RAX 还留着上一个系统调用返回值。
+    已把 `mov r/m,r`（0x88..0x8b）与 `movsxd`（0x63）的寄存器形式补进差分测试
+    （原来 alu 列表里没有 0x89/0x8b，是覆盖盲区），1232/1232 全过——说明这两条
+    指令本身实现是对的，问题更可能在这些指令**之前**的状态（例如某条指令的
+    32 位写没有零扩展、或 syscall 返回值路径）。
+    下一步：用 `--trace_win`（CPL3 首次进入后的 600 步全量 RIP 环）抓 musl
+    加载器出错前的指令序列，定位是哪条把 RAX 留大的。

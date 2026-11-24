@@ -93,6 +93,19 @@ def gen_basic():
                           [0x66, rex(0, b, 0, a), op, modrm(3, b, a)]))
             tests.append(("alu8 %02x r%d,r%d" % (op - 1, a, b),
                           [rex(0, b, 0, a), op - 1, modrm(3, b, a)]))
+    # mov r/m,r 与 mov reg,r/m（0x88..0x8b）——musl 动态链接器里到处都是
+    for op in (0x88, 0x89, 0x8a, 0x8b):
+        w = 0 if op in (0x88, 0x8a) else 1
+        for a, b in [(0, 0), (3, 5), (7, 2), (8, 9), (12, 14), (15, 1)]:
+            tests.append(("mov %02x r%d,r%d" % (op, a, b),
+                          [rex(w, b, 0, a), op, modrm(3, b, a)]))
+    # movsxd r64,r/m32（0x63）
+    for a in range(8):
+        tests.append(("movsxd r%d,r%d" % (a, a),
+                      [0x48, 0x63, modrm(3, a, a)]))
+    tests.append(("movsxd rax,eax", [0x48, 0x63, 0xc0]))
+    tests.append(("mov eax,r12d", [0x44, 0x89, 0xe0]))
+
     # 立即数形式 83 /0../7 与 81 /0../7
     for op in range(8):
         for imm in (1, 0x7f, 0x80, 0xff):
