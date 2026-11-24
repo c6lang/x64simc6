@@ -88,6 +88,28 @@ int main(void)
     }
 
     {
+        /* iretq 回用户态：5 槽帧 {RIP,CS,RFLAGS,RSP,SS} */
+        u64 sp = 0x14000;
+        machine_reset();
+        g_m.cpu.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+        g_m.cpu.cr[0] = 0;
+        g_m.ram[0x10000] = 0xcf;            /* iretq */
+        mem_w64(sp + 0, 0x20000);
+        mem_w64(sp + 8, 0x33);
+        mem_w64(sp + 16, 0x202);
+        mem_w64(sp + 24, 0x30000);
+        mem_w64(sp + 32, 0x2b);
+        g_m.cpu.r[4] = sp;
+        g_m.cpu.rip = 0x10000;
+        cpu_step(&g_m.cpu);
+        check(g_m.cpu.rip == 0x20000, "iretq returns to user RIP");
+        check(g_m.cpu.sel[1] == 0x33, "iretq restores user CS");
+        check(g_m.cpu.sel[2] == 0x2b, "iretq restores user SS");
+        check(g_m.cpu.r[4] == 0x30000, "iretq restores user RSP");
+        check(g_m.cpu.flags == 0x202, "iretq restores RFLAGS");
+    }
+
+    {
         /* CPL3 中断换栈：GDT 第 1 项放 64 位 TSS 描述符，TSS.sp0 = 0x15000 */
         u64 gdt = 0x1000;
         u64 tss = 0x2000;
