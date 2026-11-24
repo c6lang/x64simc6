@@ -382,8 +382,10 @@ void cpu_deliver(struct CPUState *c)
             u64 toff = c->tr_sel & 0xfff8u;
             u64 d0 = mem_r64(c->gdtr_base + toff);
             u64 d1 = mem_r64(c->gdtr_base + toff + 8);
-            u64 tb = ((d0 >> 16) & 0xffffffu) | ((d1 & 0xffffu) << 24) |
-                     ((d1 >> 32) << 32);
+            /* 64 位 TSS 描述符基址：base[23:0]=d0[39:16]，base[31:24]=d0[63:56]，
+             * base[63:32]=d1[31:0]。把 d1 的低 16 位当 base[39:32] 是错的。 */
+            u64 tb = ((d0 >> 16) & 0xffffffu) | (((d0 >> 56) & 0xffu) << 24) |
+                     ((d1 & 0xffffffffu) << 32);
             u64 rsp0 = mem_r64(tb + 4);
             if (rsp0 == 0)
                 rsp0 = old_rsp;
