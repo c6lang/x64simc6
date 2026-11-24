@@ -423,3 +423,27 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     64 位描述符的基址分布是：`base[23:0] = d0[39:16]`、**`base[31:24] = d0[63:56]`**、`base[63:32] = d1[31:0]`。第二项把 `d1` 的低 16 位当成了 `base[39:32]`，既丢掉 `base[31:24]`，又在基址高 32 位非零时整体错位。
     内核的 per-CPU TSS 基址在 `0xffff8880_07xxxxxx` 一带，错位后 `mem_r64(tb+4)` 读不到 `sp0`（得到 0）， `cpu_deliver()` 只好退化成 `rsp0 = old_rsp`——把 5 槽异常帧压回**用户栈**。而用户栈页正是刚触发缺页的那一页，于是：缺页 → 投递压帧又缺页 → `error_entry`（0xffffffff81c01340）再缺页，`[SMP]` 采样永远停在该地址（60M 条指令没有位移）。
     修正后单测把 TSS 基址取成 `0x07000000`（`base[31:24] != 0`）以覆盖这条解析。
+
+35. **CPL3 首次进入就 segfault 的两个真凶（本轮，单测复现）**：内核日志是
+    `init[1]: segfault at 0 ip 0000000000401032 ... error 4` + `Code: Unable to access opcode bytes at 0x401008`，
+    而 `/init` 的入口 `0x401030` 是 `55 48 89 e5 ...`（`push rbp; mov rbp,rsp`）。
+    `--ppt` 打出前四条缺页，直接暴露了问题：
+    ```
+    [PPT] va=401030 wr=0 us=1 rip=401030     ← 取指缺页（正常：代码页首次访问）
+    [PPT] va=401031 wr=0 us=1 rip=401031     ← RIP 没有回退，前进了 1 字节
+    [PPT] va=0      wr=0 us=1 rip=401032     ← 又前进 1 字节，解码出 add [rax],al
+    [PPT] va=0      wr=1 us=1 rip=401032
+    ```
+    1. **ALU 家族缺页不回退 RIP**：`step()` 里 `op <= 0x3d` 的分支（`add/or/adc/sbb/and/sub/xor/cmp` 及其 `r/m` 形式）
+       用**裸 `return 0;`** 提前返回，绕过了函数末尾统一的「同步故障回退 RIP + 回滚 RSP/RSI/RDI/RCX」。
+       取指缺页时 `fetch8` 已经把 RIP 推进，返回值又被当成操作码继续解码，于是 RIP 一条一条往上漂，
+       内核按错误的 RIP 重试，最终在 `add [rax],al`（RAX=0）上真正触碰地址 0。
+       `0F` 两字节分支也有同样的提前返回，一并补上回滚。
+    2. **`pg_fault()` 覆盖首条异常的 CR2**：同一条指令后续的连带访存（如上例的第二条 `wr=1 va=0`）
+       仍会执行 `g_m.cpu.cr[2] = va` 并重设错误码，虽然 `raise_exception()` 因已挂起而忽略，
+       但 CR2 已经被改成 0。内核 `do_user_addr_fault` 于是拿着 CR2=0 判定「不在任何 VMA」→ SIGSEGV。
+       修复：`exc_pending` 已置位时直接返回，保留第一条异常的 CR2/ec。
+    这两个 bug 都在 `tests/test_cpl3.c6` 里以秒级单测复现/守护：
+    - 用户 `push rbp` 打未映射栈页 → 投递到 `TSS.sp0` → 内核建页表 → `iretq` 回 CPL3 → 重试 `push` 成功；
+    - 取指缺页必须回退 RIP，CR2 必须是取指地址（不能被后续连带访存覆盖）。
+    经验：**凡是在 `step()` 中间 `return` 的路径，都必须自己做完故障回退**；更好的做法是不要在中间 return。
