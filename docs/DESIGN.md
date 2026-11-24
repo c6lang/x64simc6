@@ -595,3 +595,22 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     三重故障/`hlt` 且 IF=0 的情况。下一步：用 `--sys --sample` 复跑，看停机前
     最后几条 syscall 和 RIP；重点怀疑 `sed -i`（写临时文件+rename）、
     `mount -t devtmpfs`，以及 `/bin/login` 依赖的 tty ioctl 路径。
+
+46. **`/bin/login` 已经在 ttyS0 上等输入（本轮里程碑）**：用 `--sys --sample` 复跑，
+    最后 6 条 syscall 是
+    ```
+    [SYS] nr=5  (fstat)  a0=0
+    [SYS] nr=16 (ioctl)  a0=0 a1=0x540b        ← tty 属性查询
+    [SYS] nr=63 (uname)
+    [SYS] nr=16 (ioctl)  a0=1 a1=0x5413        ← TIOCGWINSZ
+    [SYS] nr=20 (writev) a0=1 a1=… a2=2        ← 写登录提示
+    [SYS] nr=0  (read)   a0=0 a1=… a2=0x400    ← 阻塞等输入
+    ```
+    `[SMP]` 采样同时显示 `rip=irq_entries_start cpl=0`、`ue=1189` —— 系统在 idle
+    等输入。也就是说 **initramfs → /sbin/init → inittab → /bin/login 全链路已经
+    跑通，login 提示已经写进 ttyS0，进程正阻塞在 read(0)**。
+    还剩一个**串口输出路径**问题：6s 之后内核 console 之外的输出（login 提示、
+    openrc 报错等）没有出现在模拟器 stdout 上，说明 tty 驱动的**中断发送路径**
+    （THRE 中断 → `serial8250_tx_chars`）没有被正确驱动。下一步：
+    检查 8250 的 IIR/IER/THRE 与 IRQ4（PIC/IOAPIC）投递，或先用轮询模式
+    （Console 走 `serial8250_console_write` 已能工作到 5.98s）验证。
