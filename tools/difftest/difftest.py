@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SIM = os.path.join(ROOT, "build", "sim")
+SIM = os.environ.get("SIM", os.path.join(ROOT, "build", "sim"))
 NATIVE = os.path.join(ROOT, "build", "native_run")
 TMP = "/tmp/dt_blob.bin"
 

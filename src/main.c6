@@ -133,6 +133,7 @@ int main(int argc, char **argv)
     u8 out[8192] = {0};
     int a = 1;
     int payload = 0;
+    int ppt = 0;
     const char *blob = 0;
 
     for (a = 1; a < argc; a++) {
@@ -140,6 +141,8 @@ int main(int argc, char **argv)
             payload = 1;
         else if (strncmp(argv[a], "--cmdline=", 10) == 0)
             cmdline = argv[a] + 10;
+        else if (strcmp(argv[a], "--ppt") == 0)
+            ppt = 1;
         else if (strcmp(argv[a], "--blob") == 0 && a + 1 < argc)
             blob = argv[++a];
         else if (argv[a][0] == '-') {
@@ -166,6 +169,8 @@ int main(int argc, char **argv)
     defer free(fw);
 
     machine_init();
+    if (ppt)
+        g_m.rip_dump_en = 1;   /* 调试：低地址 #PF 时打印最近 64 条 RIP */
     if (payload) {
         int rc = machine_boot_payload(fw, len, 0x10000);
         if (rc != 0) {

@@ -1,4 +1,7 @@
 /* mem.c6 —— 客户机物理内存、MMIO 分派与 4 级分页 */
+#if !defined(C6_WASM)
+#include <stdio.h>
+#endif
 #include "c6sim.h"
 
 #define TLB_BITS 13
@@ -25,90 +28,136 @@ void mem_tlb_flush(void)
 
 static u8 phys_r8(u64 a)
 {
-    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
-        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
-        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000))
-        return (u8)mmio_r(a, 1);
+    /* MMIO 窗口都在 0xfeb00000 以上，先判 RAM 可以省掉三次区间比较 */
     if (a < RAM_SIZE)
         return g_m.ram[(u32)a];
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+        return (u8)mmio_r(a, 1);
+    if (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000)
+        return (u8)mmio_r(a, 1);
+    if (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)
+        return (u8)mmio_r(a, 1);
     return 0xff;
 }
 
 static u16 phys_r16(u64 a)
 {
-    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
-        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
-        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000))
+    if (a < RAM_SIZE - 1) {
+        u32 p = (u32)a;
+        return (u16)g_m.ram[p] | ((u16)g_m.ram[p + 1] << 8);
+    }
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
         return (u16)mmio_r(a, 2);
-    if (a < RAM_SIZE - 1)
-        return (u16)g_m.ram[(u32)a] | ((u16)g_m.ram[(u32)a + 1] << 8);
+    if (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000)
+        return (u16)mmio_r(a, 2);
+    if (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)
+        return (u16)mmio_r(a, 2);
     return 0xffff;
 }
 
 static u32 phys_r32(u64 a)
 {
-    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
-        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
-        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000))
-        return (u32)mmio_r(a, 4);
     if (a < RAM_SIZE - 3) {
         u32 p = (u32)a;
         return (u32)g_m.ram[p] | ((u32)g_m.ram[p + 1] << 8) |
                ((u32)g_m.ram[p + 2] << 16) | ((u32)g_m.ram[p + 3] << 24);
     }
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000)
+        return (u32)mmio_r(a, 4);
+    if (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000)
+        return (u32)mmio_r(a, 4);
+    if (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)
+        return (u32)mmio_r(a, 4);
     return 0xffffffff;
 }
 
 static u64 phys_r64(u64 a)
 {
+    if (a < RAM_SIZE - 7) {
+        u32 p = (u32)a;
+        u64 v = 0;
+        v = (u64)g_m.ram[p] | ((u64)g_m.ram[p + 1] << 8) |
+            ((u64)g_m.ram[p + 2] << 16) | ((u64)g_m.ram[p + 3] << 24);
+        v |= ((u64)g_m.ram[p + 4] | ((u64)g_m.ram[p + 5] << 8) |
+              ((u64)g_m.ram[p + 6] << 16) | ((u64)g_m.ram[p + 7] << 24)) << 32;
+        return v;
+    }
     return (u64)phys_r32(a) | ((u64)phys_r32(a + 4) << 32);
 }
 
 static void phys_w8(u64 a, u8 v)
 {
-    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
-        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
-        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)) {
+    if (a < RAM_SIZE) {
+        g_m.ram[(u32)a] = v;
+        return;
+    }
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
         mmio_w(a, 1, v);
         return;
     }
-    if (a < RAM_SIZE)
-        g_m.ram[(u32)a] = v;
+    if (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) {
+        mmio_w(a, 1, v);
+        return;
+    }
+    if (a >= C6BLK_PA && a < C6BLK_PA + 0x1000) {
+        mmio_w(a, 1, v);
+        return;
+    }
 }
 
 static void phys_w16(u64 a, u16 v)
 {
-    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
-        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
-        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)) {
+    if (a < RAM_SIZE - 1) {
+        u32 p = (u32)a;
+        g_m.ram[p] = (u8)v;
+        g_m.ram[p + 1] = (u8)(v >> 8);
+        return;
+    }
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
         mmio_w(a, 2, v);
         return;
     }
-    if (a < RAM_SIZE - 1) {
-        g_m.ram[(u32)a] = (u8)v;
-        g_m.ram[(u32)a + 1] = (u8)(v >> 8);
+    if (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) {
+        mmio_w(a, 2, v);
+        return;
+    }
+    if (a >= C6BLK_PA && a < C6BLK_PA + 0x1000) {
+        mmio_w(a, 2, v);
+        return;
     }
 }
 
 static void phys_w32(u64 a, u32 v)
 {
-    if ((a >= LAPIC_PA && a < LAPIC_PA + 0x1000) || \
-        (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) || \
-        (a >= C6BLK_PA && a < C6BLK_PA + 0x1000)) {
-        mmio_w(a, 4, v);
-        return;
-    }
     if (a < RAM_SIZE - 3) {
         u32 p = (u32)a;
         g_m.ram[p] = (u8)v;
         g_m.ram[p + 1] = (u8)(v >> 8);
         g_m.ram[p + 2] = (u8)(v >> 16);
         g_m.ram[p + 3] = (u8)(v >> 24);
+        return;
+    }
+    if (a >= LAPIC_PA && a < LAPIC_PA + 0x1000) {
+        mmio_w(a, 4, v);
+        return;
+    }
+    if (a >= VIRTIO_NET_PA && a < VIRTIO_NET_PA + 0x1000) {
+        mmio_w(a, 4, v);
+        return;
+    }
+    if (a >= C6BLK_PA && a < C6BLK_PA + 0x1000) {
+        mmio_w(a, 4, v);
+        return;
     }
 }
 
 static void phys_w64(u64 a, u64 v)
 {
+    if (a < RAM_SIZE - 7) {
+        phys_w32(a, (u32)v);
+        phys_w32(a + 4, (u32)(v >> 32));
+        return;
+    }
     phys_w32(a, (u32)v);
     phys_w32(a + 4, (u32)(v >> 32));
 }
@@ -119,6 +168,22 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
     if (pf_ec)
         *pf_ec = ec;
     g_m.cpu.cr[2] = va;
+#if !defined(C6_WASM)
+    if (g_m.rip_dump_en && !g_m.rip_dumped && va < 0x8000000000000000ull) {
+        u32 k = 0;
+        g_m.rip_dumped = 1;
+        printf("[PPT] va=%llx wr=%u us=%u rip=%llx n=%llu\n",
+               (unsigned long long)va, wr, us,
+               (unsigned long long)g_m.cpu.rip,
+               (unsigned long long)g_m.instructions);
+        for (k = 0; k < 64; k++) {
+            u32 idx = (g_m.rip_ring_i + k) & 63;
+            printf("[PPT] %2u %llx\n", k,
+                   (unsigned long long)g_m.rip_ring[idx]);
+        }
+        fflush(stdout);
+    }
+#endif
     raise_exception(&g_m.cpu, EXC_PF, 1, ec);
 }
 
@@ -247,7 +312,10 @@ u32 mem_r32(u64 a)
 
 u64 mem_r64(u64 a)
 {
-    return (u64)mem_r32(a) | ((u64)mem_r32(a + 4) << 32);
+    u64 pa = mem_translate(a, 0, 0, 0);
+    if ((pa & 0xfffull) > 0xff8ull)
+        return (u64)mem_r32(a) | ((u64)mem_r32(a + 4) << 32);
+    return phys_r64(pa);
 }
 
 void mem_w8(u64 a, u8 v)
@@ -280,8 +348,13 @@ void mem_w32(u64 a, u32 v)
 
 void mem_w64(u64 a, u64 v)
 {
-    mem_w32(a, (u32)v);
-    mem_w32(a + 4, (u32)(v >> 32));
+    u64 pa = mem_translate(a, 1, 0, 0);
+    if ((pa & 0xfffull) > 0xff8ull) {
+        mem_w32(a, (u32)v);
+        mem_w32(a + 4, (u32)(v >> 32));
+        return;
+    }
+    phys_w64(pa, v);
 }
 
 void mem_copy_from(u64 dst, const u8 *src, u64 n)

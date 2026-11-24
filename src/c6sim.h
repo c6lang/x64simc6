@@ -175,6 +175,11 @@ struct Machine {
     u8 *fw_kernel;
     u8 *fw_initrd;
     u32 fw_kernel_len, fw_initrd_len;
+    /* 调试用：最近 64 条指令的 RIP 环形缓冲，在异常/坏指针时打印 */
+    u64 rip_ring[64];
+    u32 rip_ring_i;
+    u8 rip_dumped;
+    u8 rip_dump_en;
     u8 ram[RAM_SIZE];
 };
 

@@ -29,7 +29,7 @@ native() {
 
 wasm() {
     mkdir -p build web
-    TCC_CCFLAGS="$WASM_FLAGS" "$TCC" -B "$TCCDIR" -I src --target=wasm32-unknown-unknown \
+    TCC_CCFLAGS="$WASM_FLAGS" "$TCC" -B "$TCCDIR" -DC6_WASM=1 -I src --target=wasm32-unknown-unknown \
         -o web/sim.wasm $CORE src/hostfs.c6 src/wasm.c6
     echo "wasm: web/sim.wasm ($(wc -c < web/sim.wasm) bytes)"
 }
