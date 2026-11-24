@@ -1,7 +1,8 @@
 /* wasm.c6 —— 浏览器侧的导出 API（wasm-ld --export-all 会全部导出） */
 #include "c6sim.h"
 
-static u8 g_fw_stage[4u << 20];
+/* Alpine 固件约 34 MiB（内核 30 MiB + initrd 3.4 MiB），staging 必须放得下 */
+static u8 g_fw_stage[48u << 20];
 
 int sim_init(u8 *fw, int len)
 {
