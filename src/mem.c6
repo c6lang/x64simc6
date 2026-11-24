@@ -174,11 +174,20 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
         printf("[PPT] va=%llx wr=%u us=%u rip=%llx\n",
                (unsigned long long)va, wr, us,
                (unsigned long long)g_m.cpu.rip);
-        if (!g_m.rip_dumped && va >= 0x000000e000000000ull) {
+        if (g_m.ppt_dumps < 2) {
             u32 k = 0;
-            g_m.rip_dumped = 1;
-            for (k = 0; k < 64; k++) {
-                u32 idx = (g_m.rip_ring_i + k) & 63;
+            u32 i = 0;
+            g_m.ppt_dumps++;
+            printf("[PPR] user_entries=%llu cr3=%llx sel_cs=%llx sel_ss=%llx\n",
+                   (unsigned long long)g_m.user_entries,
+                   (unsigned long long)g_m.cpu.cr[3],
+                   (unsigned long long)g_m.cpu.sel[1],
+                   (unsigned long long)g_m.cpu.sel[2]);
+            for (i = 0; i < 16; i++)
+                printf("[PPG] r%u=%llx\n", i,
+                       (unsigned long long)g_m.cpu.r[i]);
+            for (k = 0; k < 200; k++) {
+                u32 idx = (g_m.rip_ring_i + k) & 4095u;
                 printf("[PPR] %2u %llx\n", k,
                        (unsigned long long)g_m.rip_ring[idx]);
             }

@@ -1978,6 +1978,8 @@ int step(struct CPUState *c)
             c->rip = nr;
             c->flags = nf | 2;
             c->sel[1] = (u16)ncs;
+            if (ncs & 3)
+                g_m.user_entries++;
             c->r[4] = nrsp;
             c->sel[2] = (u16)nss;
             break;
