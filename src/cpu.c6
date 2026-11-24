@@ -785,7 +785,13 @@ int step(struct CPUState *c)
             u8 mod = m1 >> 6;
             u8 regf = (m1 >> 3) & 7;
             if (mod != 3) rm = decode_modrm(c, m1, rex, addrsz);
-            if (regf == 2 && mod == 0) {      /* lgdt */
+            if (regf == 0 && mod == 0) {      /* sgdt */
+                mem_w16(rm.addr, c->gdtr_limit);
+                mem_w64(rm.addr + 2, c->gdtr_base);
+            } else if (regf == 1 && mod == 0) { /* sidt */
+                mem_w16(rm.addr, c->idtr_limit);
+                mem_w64(rm.addr + 2, c->idtr_base);
+            } else if (regf == 2 && mod == 0) {      /* lgdt */
                 c->gdtr_base = mem_r64(rm.addr + 2);
                 c->gdtr_limit = mem_r16(rm.addr);
             } else if (regf == 3 && mod == 0) { /* lidt */
@@ -811,6 +817,12 @@ int step(struct CPUState *c)
         case 0x30:  /* wrmsr：ECX=MSR 号，EDX:EAX=值 */
             msr_write(c, (u32)c->r[1],
                       (c->r[0] & 0xffffffffu) | ((c->r[2] & 0xffffffffu) << 32));
+            break;
+        case 0x06:  /* clts：清 CR0.TS */
+            c->cr[0] &= ~((u64)8);
+            break;
+        case 0x08:  /* invd：缓存失效，按 NOP */
+        case 0x09:  /* wbinvd */
             break;
         case 0x31:  /* rdtsc */
             c->r[0] = (u32)g_m.tsc;
