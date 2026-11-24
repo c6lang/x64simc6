@@ -165,6 +165,7 @@ static void phys_w64(u64 a, u64 v)
 static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
 {
     u32 ec = (wr ? 2 : 0) | (us ? 4 : 0);
+    u32 sup0 = g_m.emu_sup;
     if (pf_ec)
         *pf_ec = ec;
     g_m.cpu.cr[2] = va;
@@ -202,8 +203,8 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
         }
         fflush(stdout);
     }
-    g_m.emu_sup = 0;
 #endif
+    g_m.emu_sup = sup0;  /* 恢复调用者状态：可能本来就在 cpu_deliver 内部 */
     raise_exception(&g_m.cpu, EXC_PF, 1, ec);
 }
 
