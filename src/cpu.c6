@@ -937,6 +937,26 @@ int step(struct CPUState *c)
                        (unsigned long long)c->r[6],
                        (unsigned long long)c->r[2],
                        (unsigned long long)c->r[10]);
+                /* write(fd, buf, len)：把内容也打出来，便于看清 initramfs 卡在哪 */
+                if (c->r[0] == 1 && c->r[2] > 0 && c->r[2] < 96) {
+                    u32 k = 0;
+                    printf("[SYST] ");
+                    for (k = 0; k < (u32)c->r[2]; k++) {
+                        u8 ch = mem_r8(c->r[6] + k);
+                        if (ch >= 32 && ch < 127) putchar((int)ch); else putchar('.');
+                    }
+                    putchar((int)'\n');
+                }
+                /* connect(fd, sockaddr, len)：打印 AF_UNIX 路径 */
+                if (c->r[0] == 42 && c->r[2] > 2 && c->r[2] < 128) {
+                    u32 k = 0;
+                    printf("[SYSC] ");
+                    for (k = 2; k < (u32)c->r[2]; k++) {
+                        u8 ch = mem_r8(c->r[6] + k);
+                        if (ch >= 32 && ch < 127) putchar((int)ch); else putchar('.');
+                    }
+                    putchar((int)'\n');
+                }
                 g_m.sys_count++;
             }
 #endif

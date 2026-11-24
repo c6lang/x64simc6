@@ -56,8 +56,18 @@ def make_initrd(tar_path):
         f.write('#!/bin/sh\n')
         f.write('mount -t proc none /proc 2>/dev/null\n')
         f.write('mount -t sysfs none /sys 2>/dev/null\n')
-        f.write('[ -r /etc/inittab ] || printf \'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\' >> /etc/inittab\n')
-        f.write('grep -q ttyS0 /etc/inittab || echo \'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\' >> /etc/inittab\n')
+        # /dev 必须是 devtmpfs，否则 getty 打不开 /dev/ttyS0、/dev/tty1..
+        f.write('mkdir -p /dev\n')
+        f.write('mount -t devtmpfs dev /dev 2>/dev/null\n')
+        # Alpine 的 inittab 里 ttyS0 那行默认是注释的；直接 grep ttyS0 会命中注释
+        # 从而什么都不写。这里先取消注释，再按「行首」判据兜底追加。
+        f.write('if [ -r /etc/inittab ]; then\n')
+        f.write('  sed -i \'s/^#\\{0,1\\}ttyS0::respawn/ttyS0::respawn/\' /etc/inittab\n')
+        f.write('  grep -q \'^ttyS0::respawn\' /etc/inittab || \\\n')
+        f.write('    echo \'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\' >> /etc/inittab\n')
+        f.write('else\n')
+        f.write('  echo \'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\' > /etc/inittab\n')
+        f.write('fi\n')
         f.write('exec /sbin/init\n')
     os.chmod(init_file, 0o755)
     out = root + '.cpio.gz'
