@@ -628,3 +628,18 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
        定位 2261778433 这条确定性停机；
     2. 检查 8250 的 TX 中断（IER bit1 / IIR=0x02 / THRE）与 IRQ4 的投递；
     3. 或用 `console=ttyS0` 下轮询模式验证串口输出是否恢复。
+
+48. **确定性停机点的现场（本轮最后一条证据）**：加 halt 诊断后拿到
+    ```
+    [HALT] rip=ffffffff81c003f0 flags=46 cr3=3eea000 insns=2261778433
+    [c6sim] halted, instructions=2261778433, exit=0
+    ```
+    - `rip=irq_entries_start+0x100`（中断入口桩），`cr3` 是某个用户进程的 mm；
+    - `RFLAGS=0x46` 表示 **IF=0**（bit1 保留位 + PF + ZF）；
+    - 指令数每次都是 2261778433，完全确定性。
+    ⇒ CPU 在「中断入口桩 + 关中断」状态下执行了 `hlt`。正常内核不会这样做，
+    最可能是某条指令把 RFLAGS 弄坏了（`popf`/`iretq`/`syscall` 的 SFMASK 路径、
+    或 ALU 的 flags 计算），也可能是 `hlt` 的 IF 判断读错了位。
+    下一步：在 `case 0xf4`（hlt）里打印 `rip/flags/CS`，并在 `iretq`/`popf` 后
+    校验 IF 是否按预期恢复，用 `tests/test_cpu.c6` 补一条 `pushfq/popfq/hlt`
+    的语义测试。
