@@ -56,18 +56,21 @@ def make_initrd(tar_path):
         f.write('#!/bin/sh\n')
         f.write('mount -t proc none /proc 2>/dev/null\n')
         f.write('mount -t sysfs none /sys 2>/dev/null\n')
-        # /dev 必须是 devtmpfs，否则 getty 打不开 /dev/ttyS0、/dev/tty1..
+        # /dev 必须是 devtmpfs，否则 getty/login 打不开 /dev/ttyS0
         f.write('mkdir -p /dev\n')
         f.write('mount -t devtmpfs dev /dev 2>/dev/null\n')
-        # Alpine 的 inittab 里 ttyS0 那行默认是注释的；直接 grep ttyS0 会命中注释
-        # 从而什么都不写。这里先取消注释，再按「行首」判据兜底追加。
+        # minirootfs 里没有 /sbin/getty、也没有 /sbin/openrc，只有 /bin/login；
+        # 而且 Alpine 的 inittab 里 ttyS0 那行默认是注释的。这里直接改写成 login。
+        f.write('L=\'ttyS0::respawn:-/bin/login\'\n')
         f.write('if [ -r /etc/inittab ]; then\n')
-        f.write('  sed -i \'s/^#\\{0,1\\}ttyS0::respawn/ttyS0::respawn/\' /etc/inittab\n')
-        f.write('  grep -q \'^ttyS0::respawn\' /etc/inittab || \\\n')
-        f.write('    echo \'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\' >> /etc/inittab\n')
+        f.write('  sed -i \'/ttyS0::respawn/d\' /etc/inittab\n')
+        f.write('  echo "$L" >> /etc/inittab\n')
         f.write('else\n')
-        f.write('  echo \'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\' > /etc/inittab\n')
+        f.write('  echo "$L" > /etc/inittab\n')
         f.write('fi\n')
+        # root 无密码，方便自动登录验收
+        f.write('sed -i \'s/^root:[^:]*:/root::/\' /etc/passwd 2>/dev/null\n')
+        f.write('sed -i \'s/^root:[^:]*:/root::/\' /etc/shadow 2>/dev/null\n')
         f.write('exec /sbin/init\n')
     os.chmod(init_file, 0o755)
     out = root + '.cpio.gz'
