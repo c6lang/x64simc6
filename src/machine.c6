@@ -68,6 +68,14 @@ static int machine_step_loop(u64 count)
         if (g_m.cpu.halted) {
             /* HLT 状态：IF=1 时等待设备中断唤醒，IF=0 则永久停机 */
             if (!(g_m.cpu.flags & RF_IF)) {
+#if !defined(C6_WASM)
+                printf("[HALT] rip=%llx flags=%llx cr3=%llx insns=%llu\n",
+                       (unsigned long long)g_m.cpu.rip,
+                       (unsigned long long)g_m.cpu.flags,
+                       (unsigned long long)g_m.cpu.cr[3],
+                       (unsigned long long)g_m.instructions);
+                fflush(stdout);
+#endif
                 g_m.halted = 1;
                 break;
             }
