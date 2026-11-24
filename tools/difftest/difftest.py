@@ -237,11 +237,83 @@ def gen_fuzz(seed=777, count=800):
     return tests
 
 
+def gen_sse():
+    """SSE2 子集：传送/逻辑/比较/交织/移位/加减。结果写回数据页，用内存哈希比对。"""
+    tests = []
+    A = 0x200000                       # 数据页基址（本机与模拟器都映射，哈希覆盖）
+
+    def ld(x, disp):                   # movdqu xmm[x], [rax+disp]
+        return [0xf3, rex(0, x, 0, 0), 0x0f, 0x6f, modrm(1, x, 0), disp & 0xff]
+    def st(x, disp):                   # movdqu [rax+disp], xmm[x]
+        return [0xf3, rex(0, x, 0, 0), 0x0f, 0x7f, modrm(1, x, 0), disp & 0xff]
+    def rr(prefix, op, d, s):          # 两操作数：<prefix> 0f <op> /r（寄存器形式）
+        code = list(prefix)
+        code += [rex(0, d, 0, s), 0x0f, op, modrm(3, d, s)]
+        return code
+
+    def seq(name, body, x=0, y=1, extra=None):
+        code = [0x48, 0xb8] + list((A + 0x00).to_bytes(8, "little"))   # mov rax, A
+        code += ld(x, 0x00) + ld(y, 0x10)
+        code += body
+        code += st(x, 0x20)
+        over = {0: A}
+        if extra:
+            over.update(extra)
+        tests.append((name, code, 0x8D5, over))
+
+    seq("sse pxor", rr([0x66], 0xef, 0, 1))
+    seq("sse pand", rr([0x66], 0xdb, 0, 1))
+    seq("sse por", rr([0x66], 0xeb, 0, 1))
+    seq("sse andps", rr([], 0x54, 0, 1))
+    seq("sse andnps", rr([], 0x55, 0, 1))
+    seq("sse orps", rr([], 0x56, 0, 1))
+    seq("sse xorps", rr([], 0x57, 0, 1))
+    seq("sse pcmpeqb", rr([0x66], 0x74, 0, 1))
+    seq("sse pcmpeqw", rr([0x66], 0x75, 0, 1))
+    seq("sse pcmpeqd", rr([0x66], 0x76, 0, 1))
+    seq("sse paddb", rr([0x66], 0xfc, 0, 1))
+    seq("sse paddw", rr([0x66], 0xfd, 0, 1))
+    seq("sse paddd", rr([0x66], 0xfe, 0, 1))
+    seq("sse paddq", rr([0x66], 0xd4, 0, 1))
+    seq("sse psubb", rr([0x66], 0xf8, 0, 1))
+    seq("sse psubw", rr([0x66], 0xf9, 0, 1))
+    seq("sse psubd", rr([0x66], 0xfa, 0, 1))
+    seq("sse psubq", rr([0x66], 0xfb, 0, 1))
+    seq("sse punpcklbw", rr([0x66], 0x60, 0, 1))
+    seq("sse punpcklwd", rr([0x66], 0x61, 0, 1))
+    seq("sse punpckldq", rr([0x66], 0x62, 0, 1))
+    seq("sse punpcklqdq", rr([0x66], 0x6c, 0, 1))
+    seq("sse punpckhbw", rr([0x66], 0x68, 0, 1))
+    seq("sse punpckhwd", rr([0x66], 0x69, 0, 1))
+    seq("sse punpckhdq", rr([0x66], 0x6a, 0, 1))
+    seq("sse psrlw imm", [0x66, rex(0, 0, 0, 0), 0x0f, 0x71, modrm(3, 2, 0), 3])
+    seq("sse psraw imm", [0x66, 0x0f, 0x71, modrm(3, 4, 0), 3])
+    seq("sse psllw imm", [0x66, 0x0f, 0x71, modrm(3, 6, 0), 3])
+    seq("sse psrld imm", [0x66, 0x0f, 0x72, modrm(3, 2, 0), 3])
+    seq("sse psrad imm", [0x66, 0x0f, 0x72, modrm(3, 4, 0), 3])
+    seq("sse pslld imm", [0x66, 0x0f, 0x72, modrm(3, 6, 0), 3])
+    seq("sse psrlq imm", [0x66, 0x0f, 0x73, modrm(3, 2, 0), 3])
+    seq("sse psllq imm", [0x66, 0x0f, 0x73, modrm(3, 6, 0), 3])
+    seq("sse pshufd", [0x66, 0x0f, 0x70, modrm(3, 0, 1), 0x1b])
+    seq("sse pshuflw", [0xf2, 0x0f, 0x70, modrm(3, 0, 1), 0x1b])
+    seq("sse pshufhw", [0xf3, 0x0f, 0x70, modrm(3, 0, 1), 0x1b])
+    tests.append(("sse pmovmskb",
+                  [0x48, 0xb8] + list((A + 0x00).to_bytes(8, "little")) +
+                  ld(0, 0) + [0x66, 0x0f, 0xd7, modrm(3, 1, 0)],
+                  0x8D5, {0: A}))
+    tests.append(("sse movq gpr",
+                  [0x48, 0xb8] + list((A + 0x00).to_bytes(8, "little")) +
+                  [0x66, 0x48, 0x0f, 0x6e, modrm(3, 0, 3)] +
+                  [0x66, 0x48, 0x0f, 0x7e, modrm(3, 2, 0)],
+                  0x8D5, {0: A, 3: 0x0123456789abcdef}))
+    return tests
+
+
 def main():
     if not os.path.exists(SIM) or not os.path.exists(NATIVE):
         print("build/sim 或 build/native_run 不存在")
         return 2
-    tests = gen_basic() + gen_mem() + gen_fuzz()
+    tests = gen_basic() + gen_mem() + gen_sse() + gen_fuzz()
     rng = random.Random(12345)
     fails = 0
     total = 0

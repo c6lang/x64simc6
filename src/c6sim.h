@@ -180,6 +180,7 @@ struct Machine {
     u32 rip_ring_i;
     u8 rip_dumped;
     u8 rip_dump_en;
+    u32 ppt_count;
     u8 ram[RAM_SIZE];
 };
 

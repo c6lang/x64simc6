@@ -169,17 +169,19 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
         *pf_ec = ec;
     g_m.cpu.cr[2] = va;
 #if !defined(C6_WASM)
-    if (g_m.rip_dump_en && !g_m.rip_dumped && va < 0x8000000000000000ull) {
-        u32 k = 0;
-        g_m.rip_dumped = 1;
-        printf("[PPT] va=%llx wr=%u us=%u rip=%llx n=%llu\n",
+    if (g_m.rip_dump_en && va < 0x8000000000000000ull && g_m.ppt_count < 400) {
+        g_m.ppt_count++;
+        printf("[PPT] va=%llx wr=%u us=%u rip=%llx\n",
                (unsigned long long)va, wr, us,
-               (unsigned long long)g_m.cpu.rip,
-               (unsigned long long)g_m.instructions);
-        for (k = 0; k < 64; k++) {
-            u32 idx = (g_m.rip_ring_i + k) & 63;
-            printf("[PPT] %2u %llx\n", k,
-                   (unsigned long long)g_m.rip_ring[idx]);
+               (unsigned long long)g_m.cpu.rip);
+        if (!g_m.rip_dumped && va >= 0x000000e000000000ull) {
+            u32 k = 0;
+            g_m.rip_dumped = 1;
+            for (k = 0; k < 64; k++) {
+                u32 idx = (g_m.rip_ring_i + k) & 63;
+                printf("[PPR] %2u %llx\n", k,
+                       (unsigned long long)g_m.rip_ring[idx]);
+            }
         }
         fflush(stdout);
     }

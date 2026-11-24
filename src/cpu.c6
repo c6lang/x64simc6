@@ -403,6 +403,143 @@ void cpu_deliver(struct CPUState *c)
     (void)type;
 }
 
+/* ---------------- SSE2 子集 ---------------- */
+
+/* 读 128 位源操作数：寄存器取 xmm[rm][0..1]，内存按小端读 16 字节 */
+static void sse_rd128(struct CPUState *c, struct Operand *rm, u64 *lo, u64 *hi)
+{
+    if (rm->is_reg) {
+        u32 sx = rm->rm & 15;
+        *lo = c->xmm[sx][0];
+        *hi = c->xmm[sx][1];
+    } else {
+        *lo = mem_r64(rm->addr);
+        *hi = mem_r64(rm->addr + 8);
+    }
+}
+
+static u64 sse_lmask(u32 bytes)
+{
+    u32 bits = bytes * 8;
+    if (bits >= 64)
+        return ~((u64)0);
+    return ((u64)1 << bits) - 1;
+}
+
+/* 逐通道加减：bytes=1/2/4/8 */
+static u64 sse_lane_add(u64 a, u64 b, u32 bytes, u32 sub)
+{
+    u64 r = 0;
+    u64 mask = sse_lmask(bytes);
+    u32 bits = bytes * 8;
+    u32 i = 0;
+    for (i = 0; i < 64; i += bits) {
+        u64 x = (a >> i) & mask;
+        u64 y = (b >> i) & mask;
+        r |= ((sub ? (x - y) : (x + y)) & mask) << i;
+    }
+    return r;
+}
+
+/* 逐通道比较相等：相等通道全 1，不等全 0 */
+static u64 sse_lane_eq(u64 a, u64 b, u32 bytes)
+{
+    u64 r = 0;
+    u64 mask = sse_lmask(bytes);
+    u32 bits = bytes * 8;
+    u32 i = 0;
+    for (i = 0; i < 64; i += bits) {
+        if (((a >> i) & mask) == ((b >> i) & mask))
+            r |= mask << i;
+    }
+    return r;
+}
+
+/* 逐通道移位：dir=0 右移，1 左移；bits 为通道宽度 */
+static u64 sse_lane_shift(u64 a, u32 n, u32 bits, u32 dir)
+{
+    u64 r = 0;
+    u64 mask = (bits >= 64) ? ~((u64)0) : (((u64)1 << bits) - 1);
+    u32 i = 0;
+    if (n >= bits) {
+        if (dir == 0 && bits == 64 && (a >> 63))
+            return ~((u64)0);          /* psrlq 不会算术右移，这里 dir=0 仅逻辑 */
+        return 0;
+    }
+    for (i = 0; i < 64; i += bits) {
+        u64 x = (a >> i) & mask;
+        u64 y = 0;
+        if (dir)
+            y = (x << n) & mask;
+        else
+            y = x >> n;
+        r |= (y & mask) << i;
+    }
+    return r;
+}
+
+/* punpck：取 dst/src 的低（或高）64 位元素交织成 128 位结果 */
+static void sse_unpack128(u64 a, u64 b, u32 bytes, u64 *lo, u64 *hi)
+{
+    u64 r0 = 0;
+    u64 r1 = 0;
+    u64 mask = sse_lmask(bytes);
+    u32 bits = bytes * 8;
+    u32 n = 64 / bits;
+    u32 i = 0;
+    for (i = 0; i < n; i++) {
+        u64 x = (a >> (i * bits)) & mask;
+        u64 y = (b >> (i * bits)) & mask;
+        u32 pos = i * 2 * bits;
+        if (pos < 64) r0 |= (x & mask) << pos;
+        else r1 |= (x & mask) << (pos - 64);
+        pos += bits;
+        if (pos < 64) r0 |= (y & mask) << pos;
+        else r1 |= (y & mask) << (pos - 64);
+    }
+    *lo = r0;
+    *hi = r1;
+}
+
+/* 取 128 位里第 i 个 32 位通道 */
+static u64 sse_dw(u64 lo, u64 hi, u32 i)
+{
+    if (i < 2)
+        return (lo >> (i * 32)) & 0xffffffffull;
+    return (hi >> ((i - 2) * 32)) & 0xffffffffull;
+}
+
+static u32 sse_pmovmskb(u64 lo, u64 hi)
+{
+    u32 r = 0;
+    u32 i = 0;
+    for (i = 0; i < 8; i++) {
+        if (lo & ((u64)0x80 << (i * 8)))
+            r |= 1u << i;
+        if (hi & ((u64)0x80 << (i * 8)))
+            r |= 1u << (i + 8);
+    }
+    return r;
+}
+
+/* 128 位整体右移/左移 n 字节（psrldq/pslldq） */
+static void sse_shift_bytes(u64 *lo, u64 *hi, u32 n, u32 left)
+{
+    u64 l = *lo, h = *hi;
+    if (n >= 16) {
+        *lo = 0;
+        *hi = 0;
+    } else if (n == 0) {
+        return;
+    } else if (!left) {
+        *lo = (n >= 8) ? (h >> ((n - 8) * 8)) : ((l >> (n * 8)) | (h << (64 - n * 8)));
+        *hi = (n >= 8) ? 0 : (h >> (n * 8));
+    } else {
+        *hi = (n >= 8) ? (l << ((n - 8) * 8)) : ((h << (n * 8)) | (l >> (64 - n * 8)));
+        *lo = (n >= 8) ? 0 : (l << (n * 8));
+    }
+}
+
 /* ---------------- MSR / CPUID ---------------- */
 
 static u64 msr_read(struct CPUState *c, u32 n)
@@ -1111,56 +1248,390 @@ int step(struct CPUState *c)
             break;
         }
         case 0x10: case 0x11: case 0x28: case 0x29: case 0x6f: case 0x7f: { /* SSE 128 位传送 */
+            u64 lo = 0;
+            u64 hi = 0;
+            u32 x = 0;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            u32 x = rm.reg & 15;
-            u32 i2 = 0;
+            x = rm.reg & 15;
             if (op2 == 0x11 || op2 == 0x29 || op2 == 0x7f) {
-                for (i2 = 0; i2 < 2; i2++) mem_w64(rm.addr + i2 * 8, c->xmm[x][i2]);
+                /* 存：源是 xmm[reg]，目标是 r/m */
+                lo = c->xmm[x][0];
+                hi = c->xmm[x][1];
+                if (rm.is_reg) {
+                    u32 d = rm.rm & 15;
+                    c->xmm[d][0] = lo;
+                    c->xmm[d][1] = hi;
+                } else {
+                    mem_w64(rm.addr, lo);
+                    mem_w64(rm.addr + 8, hi);
+                }
             } else {
-                for (i2 = 0; i2 < 2; i2++) c->xmm[x][i2] = mem_r64(rm.addr + i2 * 8);
+                if (rm.is_reg) {
+                    u32 sx = rm.rm & 15;
+                    c->xmm[x][0] = c->xmm[sx][0];
+                    c->xmm[x][1] = c->xmm[sx][1];
+                } else {
+                    c->xmm[x][0] = mem_r64(rm.addr);
+                    c->xmm[x][1] = mem_r64(rm.addr + 8);
+                }
             }
             break;
         }
         case 0x6e: {  /* movd/movq：GPR/内存 → xmm（REX.W 时 64 位） */
+            u32 x = 0;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            u32 x = rm.reg & 15;
+            x = rm.reg & 15;
             c->xmm[x][0] = op_read(c, &rm, (rex & 8) ? 8 : 4);
             c->xmm[x][1] = 0;
             break;
         }
         case 0x7e: {  /* movd/movq：xmm → GPR/内存 */
+            u32 x = 0;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            u32 x = rm.reg & 15;
+            x = rm.reg & 15;
             op_write(c, &rm, (rex & 8) ? 8 : 4, c->xmm[x][0]);
             break;
         }
-        case 0x57: case 0xef: case 0xeb: case 0xdb: { /* xorps/pxor/por/pand */
+        case 0x54: case 0x55: case 0x56:
+        case 0x57: case 0xef: case 0xeb: case 0xdb: { /* andps/andnps/orps/xorps/pxor/por/pand */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u64 blo = 0;
+            u64 bhi = 0;
+            u32 x = 0;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            u32 x = rm.reg & 15;
-            {
-                u32 sreg = rm.rm & 15;
-                u64 alo = op_read(c, &rm, 8);
-                u64 ahi = rm.is_reg ? ((pre & PRE_66) ? c->xmm[sreg][1] : 0)
-                                    : mem_r64(rm.addr + 8);
-                u64 blo = c->xmm[x][0], bhi = c->xmm[x][1];
-                if (op2 == 0x57 || op2 == 0xef) {
-                    c->xmm[x][0] = alo ^ blo;
-                    c->xmm[x][1] = ahi ^ bhi;
-                } else if (op2 == 0xeb) {
-                    c->xmm[x][0] = alo | blo;
-                    c->xmm[x][1] = ahi | bhi;
-                } else {
-                    c->xmm[x][0] = alo & blo;
-                    c->xmm[x][1] = ahi & bhi;
-                }
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            blo = c->xmm[x][0];
+            bhi = c->xmm[x][1];
+            if (op2 == 0x57 || op2 == 0xef) {
+                c->xmm[x][0] = alo ^ blo;
+                c->xmm[x][1] = ahi ^ bhi;
+            } else if (op2 == 0xeb || op2 == 0x56) {
+                c->xmm[x][0] = alo | blo;
+                c->xmm[x][1] = ahi | bhi;
+            } else if (op2 == 0x55) {
+                /* ANDNPS dst,src: dst = ~dst & src */
+                c->xmm[x][0] = (~blo) & alo;
+                c->xmm[x][1] = (~bhi) & ahi;
+            } else {
+                c->xmm[x][0] = alo & blo;
+                c->xmm[x][1] = ahi & bhi;
             }
             break;
         }
-        case 0x71: case 0x72: case 0x73: { /* MMX/SSE 移位组 */
-            u8 m1 = fetch8(c);
-            u8 imm = fetch8(c);
-            u32 x = ((m1 >> 3) & 7) + ((rex & 4) ? 8 : 0);
-            if (((m1 >> 6) == 3) && ((m1 & 7) == 6)) c->xmm[x][0] ^= imm;
+        case 0x60: case 0x61: case 0x62:
+        case 0x6c: case 0x6d: case 0x68: case 0x69: case 0x6a: { /* punpck l/h bw wd dq qdq */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u64 dlo = 0;
+            u64 slo = 0;
+            u64 r0 = 0;
+            u64 r1 = 0;
+            u32 bytes = 1;
+            u32 high = 0;
+            u32 x = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            if (op2 == 0x60 || op2 == 0x68) bytes = 1;
+            else if (op2 == 0x61 || op2 == 0x69) bytes = 2;
+            else if (op2 == 0x62 || op2 == 0x6a) bytes = 4;
+            else bytes = 8;
+            high = (op2 == 0x68 || op2 == 0x69 || op2 == 0x6a || op2 == 0x6d);
+            dlo = high ? c->xmm[x][1] : c->xmm[x][0];
+            slo = high ? ahi : alo;
+            sse_unpack128(dlo, slo, bytes, &r0, &r1);
+            c->xmm[x][0] = r0;
+            c->xmm[x][1] = r1;
+            break;
+        }
+        case 0x63: case 0x67: case 0x6b: { /* packsswb / packuswb / packssdw（简化为饱和） */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 to16 = 0;
+            u32 x = 0;
+            u32 k = 0;
+            u64 r = 0;
+            u64 v = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            to16 = (op2 == 0x63 || op2 == 0x67);
+            for (k = 0; k < 4; k++) {
+                if (to16) {
+                    v = (c->xmm[x][0] >> (k * 16)) & 0xffff;
+                    if (op2 == 0x63 && (v & 0x8000)) v = 0xffff;
+                    r |= (v & 0xffff) << (k * 16);
+                    v = (c->xmm[x][1] >> (k * 16)) & 0xffff;
+                    if (op2 == 0x63 && (v & 0x8000)) v = 0xffff;
+                    r |= (v & 0xffff) << ((k + 4) * 16);
+                } else {
+                    v = (c->xmm[x][0] >> (k * 32)) & 0xffffffffull;
+                    r |= (v & 0xffffffffull) << (k * 32);
+                }
+            }
+            if (to16) {
+                c->xmm[x][0] = r;
+                c->xmm[x][1] = 0;
+            } else {
+                c->xmm[x][0] = r;
+                c->xmm[x][1] = 0;
+            }
+            break;
+        }
+        case 0x74: case 0x75: case 0x76: { /* pcmpeqb/w/d */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 bytes = 1;
+            u32 x = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            if (op2 == 0x74) bytes = 1;
+            else if (op2 == 0x75) bytes = 2;
+            else bytes = 4;
+            c->xmm[x][0] = sse_lane_eq(c->xmm[x][0], alo, bytes);
+            c->xmm[x][1] = sse_lane_eq(c->xmm[x][1], ahi, bytes);
+            break;
+        }
+        case 0xfc: case 0xfd: case 0xfe: { /* paddb/w/d */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 bytes = 1;
+            u32 x = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            if (op2 == 0xfc) bytes = 1;
+            else if (op2 == 0xfd) bytes = 2;
+            else bytes = 4;
+            c->xmm[x][0] = sse_lane_add(c->xmm[x][0], alo, bytes, 0);
+            c->xmm[x][1] = sse_lane_add(c->xmm[x][1], ahi, bytes, 0);
+            break;
+        }
+        case 0xd4: { /* paddq */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 x = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            c->xmm[x][0] += alo;
+            c->xmm[x][1] += ahi;
+            break;
+        }
+        case 0xf8: case 0xf9: case 0xfa: { /* psubb/w/d */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 bytes = 1;
+            u32 x = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            if (op2 == 0xf8) bytes = 1;
+            else if (op2 == 0xf9) bytes = 2;
+            else bytes = 4;
+            c->xmm[x][0] = sse_lane_add(c->xmm[x][0], alo, bytes, 1);
+            c->xmm[x][1] = sse_lane_add(c->xmm[x][1], ahi, bytes, 1);
+            break;
+        }
+        case 0xfb: { /* psubq */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 x = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            c->xmm[x][0] -= alo;
+            c->xmm[x][1] -= ahi;
+            break;
+        }
+        case 0xd1: case 0xd2: case 0xd3:
+        case 0xe1: case 0xe2:
+        case 0xf1: case 0xf2: case 0xf3: { /* psrlw/d/q、psraw/d、psllw/d/q（按 xmm 计数） */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 bits = 16;
+            u32 dir = 0;
+            u32 x = 0;
+            u32 n0 = 0;
+            u32 n1 = 0;
+            u64 r0 = 0;
+            u64 r1 = 0;
+            u32 k = 0;
+            u64 mask = 0;
+            u64 sbit = 0;
+            u64 v = 0;
+            u64 n = 0;
+            u64 y = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            sse_rd128(c, &rm, &alo, &ahi);
+            if (op2 == 0xd1 || op2 == 0xe1 || op2 == 0xf1) bits = 16;
+            else if (op2 == 0xd2 || op2 == 0xe2 || op2 == 0xf2) bits = 32;
+            else bits = 64;
+            dir = (op2 == 0xf1 || op2 == 0xf2 || op2 == 0xf3) ? 1 : 0;
+            if (op2 == 0xe1 || op2 == 0xe2) {
+                mask = (bits >= 64) ? ~((u64)0) : (((u64)1 << bits) - 1);
+                sbit = (u64)1 << (bits - 1);
+                for (k = 0; k < 64; k += bits) {
+                    v = (c->xmm[x][0] >> k) & mask;
+                    n = alo & mask;
+                    y = 0;
+                    if (n >= bits) y = (v & sbit) ? mask : 0;
+                    else if (v & sbit)
+                        y = (v >> n) | (mask & ~((((u64)1) << (bits - n)) - 1));
+                    else
+                        y = v >> n;
+                    r0 |= (y & mask) << k;
+                    v = (c->xmm[x][1] >> k) & mask;
+                    n = ahi & mask;
+                    y = 0;
+                    if (n >= bits) y = (v & sbit) ? mask : 0;
+                    else if (v & sbit)
+                        y = (v >> n) | (mask & ~((((u64)1) << (bits - n)) - 1));
+                    else
+                        y = v >> n;
+                    r1 |= (y & mask) << k;
+                }
+                c->xmm[x][0] = r0;
+                c->xmm[x][1] = r1;
+            } else {
+                n0 = (u32)(alo & 0xffffffffu);
+                n1 = (u32)(ahi & 0xffffffffu);
+                c->xmm[x][0] = sse_lane_shift(c->xmm[x][0], n0, bits, dir);
+                c->xmm[x][1] = sse_lane_shift(c->xmm[x][1], n1, bits, dir);
+            }
+            break;
+        }
+        case 0xd7: { /* pmovmskb */
+            u64 alo = 0;
+            u64 ahi = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            sse_rd128(c, &rm, &alo, &ahi);
+            reg_write(c, rm.reg & 15, 4, (u64)sse_pmovmskb(alo, ahi));
+            break;
+        }
+        case 0xd6: { /* movq：xmm -> xmm/m64 */
+            u64 lo = 0;
+            u32 x = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            lo = c->xmm[x][0];
+            if (rm.is_reg) c->xmm[rm.rm & 15][0] = lo;
+            else mem_w64(rm.addr, lo);
+            break;
+        }
+        case 0x70: { /* pshufd / pshufhw / pshuflw */
+            u64 alo = 0;
+            u64 ahi = 0;
+            u32 imm = 0;
+            u32 x = 0;
+            u32 k = 0;
+            u64 r = 0;
+            u64 r0 = 0;
+            u64 r1 = 0;
+            u32 sel = 0;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            x = rm.reg & 15;
+            imm = (u32)fetch_n(c, 1);
+            sse_rd128(c, &rm, &alo, &ahi);
+            if (pre & PRE_REP) {
+                r = 0;
+                for (k = 0; k < 4; k++) {
+                    sel = (imm >> (k * 2)) & 3;
+                    r |= ((ahi >> (sel * 16)) & 0xffff) << (k * 16);
+                }
+                c->xmm[x][0] = alo;
+                c->xmm[x][1] = r;
+            } else if (pre & PRE_REPNE) {
+                r = 0;
+                for (k = 0; k < 4; k++) {
+                    sel = (imm >> (k * 2)) & 3;
+                    r |= ((alo >> (sel * 16)) & 0xffff) << (k * 16);
+                }
+                c->xmm[x][0] = r;
+                c->xmm[x][1] = ahi;
+            } else {
+                /* pshufd：四个 32 位通道跨 128 位任意重排 */
+                r0 = 0;
+                r1 = 0;
+                for (k = 0; k < 4; k++) {
+                    u64 v = 0;
+                    sel = (imm >> (k * 2)) & 3;
+                    v = sse_dw(alo, ahi, sel);
+                    if (k < 2) r0 |= v << (k * 32);
+                    else r1 |= v << ((k - 2) * 32);
+                }
+                c->xmm[x][0] = r0;
+                c->xmm[x][1] = r1;
+            }
+            break;
+        }
+        case 0x71: case 0x72: case 0x73: { /* 立即数移位组：psrl/psra/psll + psrldq/pslldq */
+            u32 m1 = (u32)fetch8(c);
+            u32 imm = (u32)fetch8(c);
+            u32 sub = (m1 >> 3) & 7;
+            u32 x = (m1 & 7) + ((rex & 4) ? 8 : 0);
+            u32 bits = 16;
+            u64 lo = 0;
+            u64 hi = 0;
+            u64 mask = 0;
+            u64 sbit = 0;
+            u32 k = 0;
+            u64 v = 0;
+            u64 y = 0;
+            u64 r0 = 0;
+            u64 r1 = 0;
+            if ((m1 & 0xc0) != 0xc0)
+                break;                    /* MMX 形式暂不支持 */
+            lo = c->xmm[x][0];
+            hi = c->xmm[x][1];
+            if (op2 == 0x71) bits = 16;
+            else if (op2 == 0x72) bits = 32;
+            else bits = 64;
+            if (op2 == 0x73 && (sub == 3 || sub == 7)) {
+                /* psrldq / pslldq：整 128 位按字节移位 */
+                u64 sl = lo;
+                u64 sh = hi;
+                sse_shift_bytes(&sl, &sh, imm & 15, (sub == 7) ? 1 : 0);
+                c->xmm[x][0] = sl;
+                c->xmm[x][1] = sh;
+                break;
+            }
+            mask = (bits >= 64) ? ~((u64)0) : (((u64)1 << bits) - 1);
+            sbit = (u64)1 << (bits - 1);
+            for (k = 0; k < 64; k += bits) {
+                v = (lo >> k) & mask;
+                if (sub == 2) {                       /* 逻辑右移 */
+                    y = (imm >= bits) ? 0 : (v >> imm);
+                } else if (sub == 4) {                /* 算术右移 */
+                    if (imm >= bits) y = (v & sbit) ? mask : 0;
+                    else if (v & sbit)
+                        y = (v >> imm) | (mask & ~((((u64)1) << (bits - imm)) - 1));
+                    else
+                        y = v >> imm;
+                } else {                              /* sub==6 逻辑左移 */
+                    y = (imm >= bits) ? 0 : ((v << imm) & mask);
+                }
+                r0 |= (y & mask) << k;
+                v = (hi >> k) & mask;
+                if (sub == 2) {
+                    y = (imm >= bits) ? 0 : (v >> imm);
+                } else if (sub == 4) {
+                    if (imm >= bits) y = (v & sbit) ? mask : 0;
+                    else if (v & sbit)
+                        y = (v >> imm) | (mask & ~((((u64)1) << (bits - imm)) - 1));
+                    else
+                        y = v >> imm;
+                } else {
+                    y = (imm >= bits) ? 0 : ((v << imm) & mask);
+                }
+                r1 |= (y & mask) << k;
+            }
+            c->xmm[x][0] = r0;
+            c->xmm[x][1] = r1;
             break;
         }
         case 0x77: /* emms */
