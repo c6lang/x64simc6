@@ -549,3 +549,16 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     的 movd 读写），1236/1236 全过。
     教训：**SSE 指令的方向/宽度由前缀决定**（66/F2/F3 各不同），写处理器时必须
     先看前缀再决定读写方向；差分测试要覆盖内存形式，只测寄存器形式会漏。
+
+43. **Alpine 现在稳定停在 initramfs 的 idle（本轮结论 + 下一步）**：修完 §40/§42 后，
+    完整固件跑到 32.8 亿条指令仍然**没有 panic/segfault**，但采样恒定在
+    ```
+    [SMP] n=3280366589 rip=ffffffff81c003f0 cpl=0 cr3=2434000 ue=535
+    ```
+    `cr3=0x2434000` 还是 initramfs 阶段 PID 1 的 mm，说明**没到 `switch_root`**；
+    `ue` 只有 535 且 CPU 在 `irq_entries_start`/`arch_cpu_idle_exit` 之间打转，
+    即所有任务都在等事件（idle）。`loglevel=7` 的长跑显示 6.24s 时 `grep` 因
+    `f3 0f 7e` 方向 bug 踩坏内存而崩（§42 已修），64s 时 `crng init done`，之后静默。
+    下一步：加一个**系统调用跟踪器**（PID 1 的前 N 个 syscall 号 + 参数 + 返回值），
+    直接看 `/init` 卡在哪个 syscall（很可能是 mount/mdev/wait4/vfork 之一），
+    比继续猜快得多。
