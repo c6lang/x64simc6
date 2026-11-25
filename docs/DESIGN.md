@@ -1069,3 +1069,32 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     另外确认了固件本身没问题：`/tmp/fw_raw.bin` 和新打的 `build/firmware.bin`
     都带 `ttyS0::respawn:-/bin/login` 注入（mkfw.py 的 make_initrd 会改写
     inittab），initrd 是合法 cpio.gz。
+
+76. **回归：`/init` 之后用户态写不到串口（15–22 亿条区间）**。
+    证据链（native `--stopt=1.6e9/2.2e9`）：
+    * `ser_out=133, irq4=0`：开机后**只有内核 printk** 的 133 字节进过 UART，
+      用户态一个字节都没进，串口中断一次都没发。
+    * 早前 `--sys` 尾迹：`execve(sh) → ioctl(0,TCGETS/TCSETS) → writev(1,2) →
+      read(0,0x400)`，且 1.5B→1.6B **无新 syscall**：进程卡在 read，说明
+      writev 已经返回（syscall 序列继续了），只是那 2 字节没到 UART。
+    * `loglevel=7` 到 6.29s：`Run /init as init process` ✓、`serial8250: ttyS0
+      at I/O 0x3f8 (irq = 4) is a 8250` ✓（ttyS0 驱动注册成功）。
+    * 自造 `/init` 变体（raw-initrd 打包）：
+      - 首句 `exec >/dev/ttyS0` → PID1 退出 → `Kernel panic: Attempted to
+        kill init!`（说明脚本确实在跑，且 `/dev/ttyS0` 那时还不存在）；
+      - 首句改成 `echo INIT-START > /dev/console`（内核会给 rootfs 建
+        /dev/console 5:1）→ 22 亿条内**标记一个都没出现**，也无 panic。
+    对照 `build/login.log`（11-25 09:55 的旧构建，同一固件）：
+    ```
+    [ 5.979744] X.509 ...
+    can't run '/sbin/openrc' ×3
+    (none) login: root
+    ```
+    可见旧构建里 `/init` 的 mount + inittab 改写 + `exec /sbin/init` 全都正常。
+    **结论：这是 11-25 之后模拟器的回归**，最可疑的是中断/HLT/idle 那批改动
+    （`c4e956c` hlt 投递清 halted、`1b0e6e0` idle 跳 PIT、`8290901` dev 重构），
+    而不是固件或内核。
+    下一步定位手段（按代价排序）：
+    a. 给 `--sys` 加**返回值**打印，看 `mount`/`write` 是否返回、返回什么；
+    b. 统计 8250 **所有寄存器**的读写次数（尤其 THR 之外的 `start_tx` 触发点）；
+    c. 用 git 历史重建旧构建做二分（每次约 25 分钟）。
