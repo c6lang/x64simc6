@@ -799,3 +799,17 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     下一步：把 native 侧 `--dumpmem` 的打印修好（现在 dump 循环要求 len>=16 且
     判定用的 `dumpmem_len` 解析有坑），直接对比 0x7000 起 16 字节；再用
     `sim_ram_byte(pa)` 在 wasm 侧确认该字节的值。
+
+60. **哈希反解出差异字节：0x7005 处 native=0x9b、wasm=0x00**：区域哈希是
+    FNV-1a，单字节可穷举反解。知道 `H(0..28685)` 和 `H(0..28686)` 就能算出
+    第 28685 字节：
+    ```
+    native byte@28685 = 0x9b    （代码段的 access byte）
+    wasm   byte@28685 = 0x00
+    ```
+    也就是说 wasm 在启动后 1000 条指令内，把 GDT 页（0x7000 起）里本该是 0x9b
+    的那个字节写成了 0（或根本没写）。这类“写 u8/写描述符”的差异正是前面
+    一系列 wasm 后端 bug 的同类，下一步查这一笔写入是谁做的（大概率是内核
+    早期 `lgdt` 前后的 GDT 描述符写入，或我们 `build_gdt_idt` 的等价路径）。
+    工具已经齐了：`tests/wasm_cmp.js`（寄存器 + 区域哈希 + 单字节反解），
+    每次验证都是秒级。
