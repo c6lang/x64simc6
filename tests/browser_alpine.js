@@ -105,6 +105,7 @@ async function main() {
         const n = w.sim_rip_trace_n();
         const a = new Array(n);
         for (let i = 0; i < n; i++) a[i] = Number(w.sim_rip_trace(i));
+        for (let i = 0; i < n; i++) a[n + i] = Number(w.sim_rsp_trace(i));
         return a;
       };
       window.__info = () => ({ hi: Number(w.sim_halt_info()),
@@ -134,7 +135,8 @@ async function main() {
                     `(${rate.toFixed(2)}M/s) text=${r.len}B`);
         if (tail && tail.trim()) console.log('   …' + tail.replace(/\s+/g, ' ').slice(-160));
       }
-      if (r.ret === 0 || insns >= 3000000) {
+      if (!global.__dumped && (r.ret === 0 || insns >= 3000000)) {
+        global.__dumped = true;
         const tr = await evaluate(`window.__riptrace()`);
         if (tr && tr.length) {
           require('fs').writeFileSync('build/wasm_rip.json', JSON.stringify(tr));

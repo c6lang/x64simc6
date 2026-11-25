@@ -304,14 +304,20 @@ static int cond(struct CPUState *c, u32 n)
 static void push64(struct CPUState *c, u64 v)
 {
     if (c->fault_abort) return;
-    c->r[4] -= 8;
+    /* 用全局 g_m.cpu 访问 r[]：c6 wasm 后端在「通过指针访问结构体里的 u64
+     * 数组」上有代码生成问题（call/ret 的 RSP 会读错），走全局可绕开。 */
+    g_m.cpu.r[4] -= 8;
+    c->r[4] = g_m.cpu.r[4];
     mem_w64(c->r[4], v);
 }
 
 static u64 pop64(struct CPUState *c)
 {
-    u64 v = mem_r64(c->r[4]);
-    c->r[4] += 8;
+    u64 v = 0;
+    u64 sp = g_m.cpu.r[4];
+    v = mem_r64(sp);
+    g_m.cpu.r[4] = sp + 8;
+    c->r[4] = g_m.cpu.r[4];
     return v;
 }
 

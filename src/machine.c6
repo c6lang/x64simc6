@@ -98,11 +98,20 @@ static int machine_step_loop(u64 count)
             g_m.ram[off + 1] = (u8)((rv >> 8) & 0xff);
             g_m.ram[off + 2] = (u8)((rv >> 16) & 0xff);
             g_m.ram[off + 3] = (u8)((rv >> 24) & 0xff);
+            /* RSP 紧跟在 RIP 记录后面（每 8 字节一条：rip@0, rsp@20000*4） */
+            off = 0x07ff0000u + 80000u + g_m.rip_trace_n * 4u;
+            rv = (u32)g_m.cpu.r[4];
+            g_m.ram[off + 0] = (u8)(rv & 0xff);
+            g_m.ram[off + 1] = (u8)((rv >> 8) & 0xff);
+            g_m.ram[off + 2] = (u8)((rv >> 16) & 0xff);
+            g_m.ram[off + 3] = (u8)((rv >> 24) & 0xff);
             g_m.rip_trace_n++;
 #if !defined(C6_WASM)
             if (g_m.watch_fd >= 0) {
-                u64 qv = (u64)g_m.cpu.rip;
-                write(g_m.watch_fd, &qv, 8);
+                u64 qv[2] = {0, 0};
+                qv[0] = g_m.cpu.rip;
+                qv[1] = g_m.cpu.r[4];
+                write(g_m.watch_fd, qv, 16);
             }
 #endif
         }
