@@ -276,9 +276,16 @@ int main(int argc, char **argv)
         printf("[REG] rip %llx\n", (unsigned long long)g_m.cpu.rip);
         printf("[REG] flags %llx\n", (unsigned long long)g_m.cpu.flags);
         printf("[REG] insns %llu\n", (unsigned long long)g_m.instructions);
-        printf("[BYTE] 7004=%02x 7005=%02x 7006=%02x 7007=%02x\n",
-               (u32)g_m.ram[0x7004], (u32)g_m.ram[0x7005],
-               (u32)g_m.ram[0x7006], (u32)g_m.ram[0x7007]);
+        {
+            u32 i6 = 0;
+            printf("[BYTE] ");
+            for (i6 = 0; i6 < 24; i6++)
+                printf("%02x", (u32)g_m.ram[0x7000 + i6]);
+            printf(" | ");
+            for (i6 = 0; i6 < 32; i6++)
+                printf("%02x", (u32)g_m.ram[0x9200 + i6]);
+            printf("\n");
+        }
         if (dumpmem_len > 0) {
             u64 o = 0;
             for (o = 0; o + 16 <= dumpmem_len; o += 16) {

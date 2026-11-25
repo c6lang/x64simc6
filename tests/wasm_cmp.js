@@ -139,7 +139,10 @@ async function wasmSnapshot() {
     console.log(`  mem   ${memDiff ? 'DIFF first chunk ' + memFirst + ' (0x' + (memFirst*0x100000).toString(16) + ')'
                                               : 'MATCH'} `);
   }
-  const same = first < 0 && !ripDiff && !flagsDiff && !memDiff && !regionDiff;
+  // 指定 REGION 时只看该区域（整机 128 分块哈希在调试期噪声太大）
+  const same = process.env.REGION
+    ? (first < 0 && !ripDiff && !flagsDiff && !regionDiff)
+    : (first < 0 && !ripDiff && !flagsDiff && !memDiff);
   console.log(same ? `MATCH at ${N}` : `DIVERGE at ${N} (first reg r${first})`);
   process.exitCode = same ? 0 : 1;
 })().catch(e => { console.error('failed:', e.message); process.exit(1); });

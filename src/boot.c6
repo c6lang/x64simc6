@@ -145,8 +145,12 @@ static void build_gdt_idt(void)
     u32 i = 0;
     for (i = 0; i < 8; i++)
         mem_w64(GDT_PA + i * 8, 0);
-    mem_w64(GDT_PA + 8,  0x00af9b000000ffffu); /* 64-bit code */
-    mem_w64(GDT_PA + 16, 0x00cf93000000ffffu); /* 64-bit data */
+    /* 不用 u64 常量直接 mem_w64：c6 的 wasm 后端会把这种字面量截断成低 32 位，
+     * 导致 GDT 描述符的 access/flags 字节全变 0。显式写两半最稳。 */
+    mem_w32(GDT_PA + 8,  0x0000ffffu);           /* 64-bit code: limit */
+    mem_w32(GDT_PA + 12, 0x00af9b00u);           /* 64-bit code: base/flags */
+    mem_w32(GDT_PA + 16, 0x0000ffffu);           /* 64-bit data: limit */
+    mem_w32(GDT_PA + 20, 0x00cf9300u);           /* 64-bit data: base/flags */
     for (i = 0; i < 256; i++) {
         mem_w64(IDT_PA + i * 16, 0);
         mem_w64(IDT_PA + i * 16 + 8, 0);
@@ -248,7 +252,7 @@ int machine_boot(void)
     mem_w16(BOOTPARAMS_PA + BP_HDR_OFF + H_SETUP_MOVE, 0x9000);
     mem_w32(BOOTPARAMS_PA + BP_HDR_OFF + H_CODE32_START, KERNEL_PA);
     mem_w32(BOOTPARAMS_PA + BP_HDR_OFF + H_RAMDISK_IMAGE, INITRD_PA);
-    mem_w32(BOOTPARAMS_PA + BP_HDR_OFF + H_RAMDISK_SIZE, m->fw_initrd_len);
+    mem_w32(BOOTPARAMS_PA + BP_HDR_OFF + H_RAMDISK_SIZE, g_fw_ilen);
     mem_w16(BOOTPARAMS_PA + BP_HDR_OFF + H_HEAP_END, 0xdf00);
     mem_w32(BOOTPARAMS_PA + BP_HDR_OFF + H_CMDLINE_PTR, CMDLINE_PA);
     mem_w32(BOOTPARAMS_PA + BP_HDR_OFF + H_INITRD_MAX, RAM_TOP - 1);
