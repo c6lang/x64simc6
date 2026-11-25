@@ -326,7 +326,9 @@ int main(int argc, char **argv)
         fflush(stdout);
     }
 #endif
-    printf("\n[c6sim] halted, instructions=%llu, exit=%d\n",
-           g_m.instructions, g_m.exit_code);
+    printf("\n[c6sim] halted, instructions=%llu, exit=%d ser_out=%llu irq4=%llu\n",
+           g_m.instructions, g_m.exit_code,
+           (unsigned long long)g_ser_out_bytes,
+           (unsigned long long)g_irq4_raises);
     return g_m.exit_code & 0xff;
 }

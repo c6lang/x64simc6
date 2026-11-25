@@ -1054,3 +1054,18 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     等于把引导拉长。已完整回滚（`git status` 只剩未跟踪的 `build`）。
     结论：**不要再动 tick 频率**，提速要看别处（例如减少每条指令的解释开销、
     或对 wasm 侧做同样的时间跳进）。§73 的 idle 跳进保留。
+
+75. **用户态 tty 写不到串口：先加计数器定位**。
+    15 亿条处的 syscall 尾迹已经很像 getty/login：
+    ```
+    nr=59 execve … nr=158 arch_prctl … nr=16 ioctl(0, TCGETS/TCSETS/TCFLSH/TCSETSW)
+    nr=20 writev(1, buf, 2)   nr=0 read(0, buf, 0x400)   ← 阻塞等输入
+    ```
+    但串口只出到 133B（内核早期那两行），而且 1.5B→1.6B 之间**没有任何新
+    syscall**，说明进程卡在读 stdin。为了判断「用户态写 tty 到底有没有到达
+    UART」，在 dev.c6 加了两个全局计数器（`g_ser_out_bytes`、`g_irq4_raises`），
+    并在 native 的收尾行打印：
+    `[c6sim] halted, instructions=… ser_out=… irq4=…`
+    另外确认了固件本身没问题：`/tmp/fw_raw.bin` 和新打的 `build/firmware.bin`
+    都带 `ttyS0::respawn:-/bin/login` 注入（mkfw.py 的 make_initrd 会改写
+    inittab），initrd 是合法 cpio.gz。
