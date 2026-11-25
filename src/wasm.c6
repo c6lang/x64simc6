@@ -81,6 +81,26 @@ u64 sim_insns(void)
     return g_m.instructions;
 }
 
+void sim_riptrace_start(void)
+{
+    g_m.rip_trace_n = 0;
+    g_m.rip_trace_on = 1;
+}
+
+u32 sim_rip_trace(int i)
+{
+    u32 off = 0;
+    if (i < 0 || (u32)i >= g_m.rip_trace_n) return 0;
+    off = 0x07ff0000u + (u32)i * 4u;
+    return (u32)g_m.ram[off] | ((u32)g_m.ram[off + 1] << 8) |
+           ((u32)g_m.ram[off + 2] << 16) | ((u32)g_m.ram[off + 3] << 24);
+}
+
+int sim_rip_trace_n(void)
+{
+    return (int)g_m.rip_trace_n;
+}
+
 int sim_status(void)
 {
     return (g_m.halted || g_m.cpu.halted) ? 1 : 0;

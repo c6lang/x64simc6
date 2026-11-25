@@ -90,6 +90,22 @@ static int machine_step_loop(u64 count)
         }
         g_m.instructions++;
         g_m.tsc++;
+        if (g_m.rip_trace_on && g_m.rip_trace_n < 20000u) {
+            /* 写进 g_m.ram（u8 数组）：跨 TU 的 u32/u64 数组下标在 wasm 上不可靠 */
+            u32 off = 0x07ff0000u + g_m.rip_trace_n * 4u;
+            u32 rv = (u32)g_m.cpu.rip;
+            g_m.ram[off + 0] = (u8)(rv & 0xff);
+            g_m.ram[off + 1] = (u8)((rv >> 8) & 0xff);
+            g_m.ram[off + 2] = (u8)((rv >> 16) & 0xff);
+            g_m.ram[off + 3] = (u8)((rv >> 24) & 0xff);
+            g_m.rip_trace_n++;
+#if !defined(C6_WASM)
+            if (g_m.watch_fd >= 0) {
+                u64 qv = (u64)g_m.cpu.rip;
+                write(g_m.watch_fd, &qv, 8);
+            }
+#endif
+        }
 #if !defined(C6_WASM)
         if (g_m.sample_on && g_m.instructions - g_m.sample_marks >= 20000000ull) {
             g_m.sample_marks = g_m.instructions;

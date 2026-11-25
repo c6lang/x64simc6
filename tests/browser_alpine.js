@@ -91,6 +91,7 @@ async function main() {
       mem.set(fw, STAGE);
       w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off');
       const rc = w.sim_init(STAGE, fw.length);
+      w.sim_riptrace_start();
       window.__w = w;
       window.__out = new Uint8Array(65536);
       window.__text = '';
@@ -100,6 +101,12 @@ async function main() {
         return n;
       };
       window.__step = (n) => { const r = w.sim_run(n); window.__drain(); return r; };
+      window.__riptrace = () => {
+        const n = w.sim_rip_trace_n();
+        const a = new Array(n);
+        for (let i = 0; i < n; i++) a[i] = Number(w.sim_rip_trace(i));
+        return a;
+      };
       window.__info = () => ({ hi: Number(w.sim_halt_info()),
                                rip: Number(w.sim_last_rip()),
                                fl: Number(w.sim_cpu_flags()),
@@ -126,6 +133,13 @@ async function main() {
         console.log(`[alpine] ${secs.toFixed(0)}s insns=${(insns / 1e6).toFixed(0)}M ` +
                     `(${rate.toFixed(2)}M/s) text=${r.len}B`);
         if (tail && tail.trim()) console.log('   …' + tail.replace(/\s+/g, ' ').slice(-160));
+      }
+      if (r.ret === 0 || insns >= 3000000) {
+        const tr = await evaluate(`window.__riptrace()`);
+        if (tr && tr.length) {
+          require('fs').writeFileSync('build/wasm_rip.json', JSON.stringify(tr));
+          console.log(`[alpine] RIP trace ${tr.length} 条 -> build/wasm_rip.json`);
+        }
       }
       if (r.ret === 0) {
         const info = await evaluate(`window.__info()`);
