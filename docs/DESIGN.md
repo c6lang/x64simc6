@@ -826,3 +826,20 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     串口全空」：wasm 在 1.5 亿～2 亿条之间失步，而内核第一次 printk 在那之后，
     所以永远看不到输出。下一步就在 150M→200M 之间二分（这区间每步 wasm 约
     2～3 分钟），拿到分叉指令后按同样的方式修。
+
+62. **检查点快照对拍（`tests/wasm_snap.js`）——一次跑完整个区间**：逐点二分每一步
+    都要重跑 native + wasm（各几分钟），太慢。改成：
+    - native：`--stopt=END --snap=START,STEP`，在 `machine_step_loop` 里每到检查点
+      打印一行 `[SNAP] <insns> <rip> <flags> r0..r15`；
+    - wasm：循环 `sim_set_stopt(k)` + `sim_run(k+STEP)`，每次都**精确停在**第 k 条，
+      再读 `sim_cpu_reg(i)` / `sim_last_rip()` / `sim_cpu_flags()`；
+    - 两边按指令数配对比较，第一个不一致的检查点即分叉区间（精度 = STEP）。
+    调试过程中踩到的三个坑（都已修）：
+    1. `sim_run(STEP)` 会因 idle 路径一次 `instructions += 0x2000` 冲过头，
+       必须用 `sim_set_stopt(k)` 精确停点；
+    2. `sim_run` 的返回值 0 表示「停在 stopt」，不是停机，不能当 halt 处理；
+    3. **快照时机差一条指令**：native 原来在 `step()` 之前打快照（`instructions++
+       之后、执行之前`），wasm 是执行完 N 条之后读，两者差一条指令，于是每个
+       检查点都出现 1～4 字节的 RIP 差和“看起来像寄存器分叉”的假象。把 native
+       的快照移到 `cpu_step()` + `cpu_deliver()` 之后，1500000..1500100 的
+       101 个检查点全部 MATCH。

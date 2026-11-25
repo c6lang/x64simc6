@@ -59,7 +59,7 @@
 - [x] wasm-ld 参数：`--no-entry --export-all`，initial 256 MiB / max 512 MiB；`web/sim.wasm` 无 import
 - [x] node 冒烟 `tests/wasm_smoke.js`：实例化 → 写 payload → 运行 → 读串口，输出 `C6SIM64 OK`，26 条指令后停机
 - [x] `web/index.html` + `web/style.css` + `web/app.js`：固件/网络下载、Cache Storage 缓存、IndexedDB 文件表与串口快照持久化、bridge 事件注入；headless Chromium 端到端验证通过
-- [ ] 浏览器验证 Alpine 登录提示与 root 输入（`tests/wasm_cmp.js` 秒级对拍已推进到 **150M 条指令 MATCH**；本轮又修掉两处 wasm 后端截断：GDT 描述符 u64 字面量、`boot params` 的 `m->fw_initrd_len`，见 DESIGN §58/§61。目前 200M 处仍 DIVERGE，浏览器串口 0 字节即由此导致，下一步在 150M–200M 间二分）
+- [ ] 浏览器验证 Alpine 登录提示与 root 输入（`tests/wasm_cmp.js` 秒级对拍已推进到 **150M 条指令 MATCH**；本轮又修掉两处 wasm 后端截断：GDT 描述符 u64 字面量、`boot params` 的 `m->fw_initrd_len`，见 DESIGN §58/§61。另新增 `tests/wasm_snap.js` 检查点快照对拍（一次跑完整个区间，精度=步长），下一步用它扫 150M–200M）
 
 ## 阶段 7 —— wasm 网络与页面存储（用户新增硬性需求，DESIGN.md §10.1）
 

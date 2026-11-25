@@ -133,6 +133,20 @@ static int machine_step_loop(u64 count)
         cpu_step(&g_m.cpu);
         if (g_m.cpu.exc_pending)
             cpu_deliver(&g_m.cpu);
+#if !defined(C6_WASM)
+        if (g_m.snap_step != 0 && g_m.instructions >= g_m.snap_start &&
+            (g_m.stopt == 0 || g_m.instructions <= g_m.stopt) &&
+            (g_m.instructions % g_m.snap_step) == 0) {
+            u32 si = 0;
+            printf("[SNAP] %llu %llx %llx",
+                   (unsigned long long)g_m.instructions,
+                   (unsigned long long)g_m.cpu.rip,  /* 执行完第 N 条之后的下一条指令 */
+                   (unsigned long long)g_m.cpu.flags);
+            for (si = 0; si < 16; si++)
+                printf(" %llx", (unsigned long long)g_m.cpu.r[si]);
+            printf("\n");
+            fflush(stdout);
+        }
         if (g_m.halted)
             break;
         if ((g_m.instructions & 0x3ffffu) == 0)
