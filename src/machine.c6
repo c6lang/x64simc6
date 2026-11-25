@@ -107,8 +107,10 @@ static int machine_step_loop(u64 count)
         }
         g_m.instructions++;
         g_m.tsc++;
-        g_ring[g_ring_i & 15] = g_m.cpu.rip;
-        g_ring_i = g_ring_i + 1;
+        if (g_m.sample_on) {   /* 只在 --sample 时记录，避免每指令两次写 */
+            g_ring[g_ring_i & 15] = g_m.cpu.rip;
+            g_ring_i = g_ring_i + 1;
+        }
 #if !defined(C6_WASM)
         if (g_m.sample_on && g_m.instructions - g_m.sample_marks >= 20000000ull) {
             g_m.sample_marks = g_m.instructions;
