@@ -18,15 +18,16 @@ const FW = process.env.FW || 'build/firmware.bin';
 function nativeSnapshot() {
   let out = '';
   try {
-    out = execFileSync(SIM, ['--stopt=' + N, '--dumpregs',
-                             '--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off',
-                             FW], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    const args = ['--stopt=' + N, '--dumpregs'];
+    if (process.env.REGION) args.push('--memhash=' + process.env.REGION);
+    args.push('--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off', FW);
+    out = execFileSync(SIM, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
                                    timeout: 600000 });
   } catch (e) {
     out = (e.stdout || '').toString();
   }
   const regs = new Array(16).fill(null);
-  let rip = null, flags = null, insns = null, memhash = null;
+  let rip = null, flags = null, insns = null, memregion = null; const memhash = [];
   for (const line of out.split('\n')) {
     const m = line.match(/^\[REG\] (\d+) ([0-9a-f]+)$/);
     if (m) { regs[Number(m[1])] = m[2]; continue; }
@@ -36,10 +37,16 @@ function nativeSnapshot() {
     if (f) { flags = f[1]; continue; }
     const i = line.match(/^\[REG\] insns (\d+)$/);
     if (i) { insns = Number(i[1]); continue; }
-    const h = line.match(/^\[REG\] memhash ([0-9a-f]+)$/);
-    if (h) { memhash = h[1]; }
+    const h = line.match(/^\[MEMH\] (\d+) ([0-9a-f]+)$/);
+    if (h) { memhash[Number(h[1])] = h[2]; }
+    const mr = line.match(/^\[MEMR\] ([0-9a-f]+)$/);
+    if (mr) { memregion = mr[1]; }
   }
-  return { regs, rip, flags, insns, memhash };
+  const bytes = {};
+  if (process.env.BYTES) {
+    for (const a of process.env.BYTES.split(',').map(Number)) bytes[a] = nat.regs ? null : null;
+  }
+  return { regs, rip, flags, insns, memhash, memregion, bytes };
 }
 
 async function wasmSnapshot() {
@@ -59,13 +66,42 @@ async function wasmSnapshot() {
   // 一次跑够；里面会在 stopt 处自己停
   let guard = 0;
   while (Number(w.sim_insns()) < N && guard++ < 40) w.sim_run(2000000);
+  const ramBase = Number(w.sim_ram_base());
+  let ramView = new Uint8Array(w.memory.buffer, ramBase, 128 * 1024 * 1024);
+  const memhash = [];
+  for (let c = 0; c < 128; c++) {
+    let h = 0xcbf29ce484222325n;
+    const base = c * 0x100000;
+    for (let i = 0; i < 0x100000; i++) {
+      h = ((h ^ BigInt(ramView[base + i])) * 0x100000001b3n) & 0xffffffffffffffffn;
+    }
+    memhash.push(h.toString(16));
+  }
+  ramView = new Uint8Array(w.memory.buffer, ramBase, 128 * 1024 * 1024);
+  if (process.env.DUMPMEM) {
+    const [ds, dl] = process.env.DUMPMEM.split(',').map(Number);
+    let outN = '';
+    for (let o = 0; o + 16 <= dl; o += 16) {
+      let line = (ds + o).toString(16) + ' ';
+      for (let j = 0; j < 16; j++)
+        line += ramView[ds + o + j].toString(16).padStart(2, '0');
+      outN += line + '\n';
+    }
+    fs.writeFileSync(process.env.DUMP_OUT || '/tmp/wasm_mem.txt', outN);
+    console.log('wasm mem dump ->', process.env.DUMP_OUT || '/tmp/wasm_mem.txt');
+  }
   const regs = [];
   for (let i = 0; i < 16; i++)
     regs.push(BigInt.asUintN(64, w.sim_cpu_reg(i)).toString(16));
   return { regs, rip: BigInt.asUintN(64, w.sim_last_rip()).toString(16),
            flags: BigInt.asUintN(64, w.sim_cpu_flags()).toString(16),
            insns: Number(w.sim_insns()),
-           memhash: BigInt.asUintN(64, w.sim_mem_hash()).toString(16) };
+           memhash,
+           memregion: (() => {
+             if (!process.env.REGION) return null;
+             const [rs, rl] = process.env.REGION.split(',').map(Number);
+             return BigInt.asUintN(64, w.sim_mem_hash_region(BigInt(rs), BigInt(rl))).toString(16);
+           })() };
 }
 
 (async () => {
@@ -76,7 +112,13 @@ async function wasmSnapshot() {
     if ((nat.regs[i] || '') !== (was.regs[i] || '')) { first = i; break; }
   }
   const ripDiff = nat.rip !== was.rip;
-  const memDiff = nat.memhash !== was.memhash;
+  let regionDiff = false;
+  if (process.env.REGION) regionDiff = nat.memregion !== was.memregion;
+  let memDiff = false;
+  let memFirst = -1;
+  for (let c = 0; c < 128; c++) {
+    if (nat.memhash[c] !== was.memhash[c]) { memDiff = true; if (memFirst < 0) memFirst = c; }
+  }
   const flagsDiff = nat.flags !== was.flags;
   if (!QUIET) {
     console.log('N =', N, 'insns nat/wasm =', nat.insns, '/', was.insns);
@@ -86,9 +128,18 @@ async function wasmSnapshot() {
     }
     console.log(`  rip   nat=${nat.rip}  wasm=${was.rip}${ripDiff ? '   <-- DIFF' : ''}`);
     console.log(`  flags nat=${nat.flags}  wasm=${was.flags}${flagsDiff ? '   <-- DIFF' : ''}`);
-    console.log(`  mem   nat=${nat.memhash}  wasm=${was.memhash}${memDiff ? '   <-- DIFF' : ''}`);
+    if (process.env.REGION)
+      console.log(`  region nat=${nat.memregion} wasm=${was.memregion}${regionDiff ? '   <-- DIFF' : ''}`);
+    if (process.env.BYTES) {
+      const addrs = process.env.BYTES.split(',').map(Number);
+      const nb = addrs.map(a => nat.bytes[a]).join(' ');
+      const wb = addrs.map(a => was.bytes[a]).join(' ');
+      console.log(`  bytes  0x${'?'} nat=[${nb}] wasm=[${wb}]`);
+    }
+    console.log(`  mem   ${memDiff ? 'DIFF first chunk ' + memFirst + ' (0x' + (memFirst*0x100000).toString(16) + ')'
+                                              : 'MATCH'} `);
   }
-  const same = first < 0 && !ripDiff && !flagsDiff && !memDiff;
+  const same = first < 0 && !ripDiff && !flagsDiff && !memDiff && !regionDiff;
   console.log(same ? `MATCH at ${N}` : `DIVERGE at ${N} (first reg r${first})`);
   process.exitCode = same ? 0 : 1;
 })().catch(e => { console.error('failed:', e.message); process.exit(1); });

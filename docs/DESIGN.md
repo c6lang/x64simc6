@@ -788,3 +788,14 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     并把 `sim_mem_hash(start,len)` 做成带参数版本，逐步缩小到具体页，
     再用 `sim_read_pa()` 做逐字节确认。
     当前状态：`build.sh test` 与 difftest 1236/1236 全绿；native 阶段 5 验收仍 PASS。
+
+59. **内存差异定位到字节 0x7005（本轮结束点）**：用区域哈希二分（native `--memhash=S,L`
+    vs wasm `sim_mem_hash_region(S,L)`，都不走指针），在 1000 条指令处逐步缩小：
+    - `0..0x1000` MATCH；
+    - `0..0x8000` DIFF ⇒ 二分到 `(28685, 28686]`，也就是 **字节 0x7005 是第一个
+      不同的字节**（0x7000 起是我们 `GDT_PA` 的 GDT 页，0x7005 是第一个描述符的
+      access byte）。
+    也就是说 wasm 在启动后 1000 条指令内，就写坏/漏写了 GDT 里的一个字节。
+    下一步：把 native 侧 `--dumpmem` 的打印修好（现在 dump 循环要求 len>=16 且
+    判定用的 `dumpmem_len` 解析有坑），直接对比 0x7000 起 16 字节；再用
+    `sim_ram_byte(pa)` 在 wasm 侧确认该字节的值。

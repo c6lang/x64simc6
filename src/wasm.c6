@@ -123,12 +123,20 @@ u64 sim_cpu_reg(int i)
     return g_m.cpu.r[i];
 }
 
-u64 sim_mem_hash(void)
+u32 sim_ram_byte(u32 pa)
+{
+    if (pa >= (u32)RAM_SIZE) return 0;
+    return (u32)g_m.ram[pa];
+}
+
+u64 sim_mem_hash_region(u64 start, u64 len)
 {
     u64 h = 0xcbf29ce484222325ull;
-    u32 i = 0;
-    for (i = 0; i < (u32)RAM_SIZE; i++)
-        h = (h ^ (u64)g_m.ram[i]) * 0x100000001b3ull;
+    u64 i = 0;
+    if (len > (u64)RAM_SIZE || start >= (u64)RAM_SIZE) return h;
+    if (start + len > (u64)RAM_SIZE) len = (u64)RAM_SIZE - start;
+    for (i = 0; i < len; i++)
+        h = (h ^ (u64)g_m.ram[start + i]) * 0x100000001b3ull;
     return h;
 }
 
