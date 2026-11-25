@@ -96,8 +96,18 @@ static int machine_step_loop(u64 count)
                 g_m.halted = 1;
                 break;
             }
-            g_m.tsc += 0x2000;
-            g_m.instructions += 0x2000;
+            /* idle 快进：直接跳到下一次 PIT 到期，而不是固定 0x2000。
+             * 每次跳进只相当于「原本要跑 32 次 idle 迭代」的同一段 guest 时间，
+             * 语义不变，但 guest 时间推进快一个数量级。 */
+            {
+                u64 step = 0x2000;
+                if (g_m.pit.reload[0] > 0 &&
+                    (g_m.pit.mode[0] == 2 || g_m.pit.mode[0] == 3) &&
+                    g_m.pit.count[0] > 0x2000)
+                    step = (u64)g_m.pit.count[0];
+                g_m.tsc += step;
+                g_m.instructions += step;
+            }
             dev_tick();
             if (g_m.cpu.exc_pending) {
                 g_m.cpu.halted = 0;
