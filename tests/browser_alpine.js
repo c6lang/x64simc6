@@ -100,6 +100,10 @@ async function main() {
         return n;
       };
       window.__step = (n) => { const r = w.sim_run(n); window.__drain(); return r; };
+      window.__info = () => ({ hi: Number(w.sim_halt_info()),
+                               rip: Number(w.sim_last_rip()),
+                               fl: Number(w.sim_cpu_flags()),
+                               n: Number(w.sim_insns()) });
       return { rc, fwlen: fw.length, memlen: mem.length, stage: STAGE };
     })()`);
     console.log('[alpine] wasm 装载完成:',
@@ -122,6 +126,10 @@ async function main() {
         console.log(`[alpine] ${secs.toFixed(0)}s insns=${(insns / 1e6).toFixed(0)}M ` +
                     `(${rate.toFixed(2)}M/s) text=${r.len}B`);
         if (tail && tail.trim()) console.log('   …' + tail.replace(/\s+/g, ' ').slice(-160));
+      }
+      if (r.ret === 0) {
+        const info = await evaluate(`window.__info()`);
+        console.log('[alpine] halt info:', JSON.stringify(info));
       }
       const has = await evaluate(`window.__text.includes(${JSON.stringify(TARGET)})`);
       if (has) { hit = true; break; }
