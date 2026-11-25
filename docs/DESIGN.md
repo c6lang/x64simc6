@@ -685,3 +685,22 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     偶发延迟，脚本容易错过提示符而超时；手工定时喂输入（先 root、隔几分钟
     再发命令）能稳定进 shell。下一步把 `boot_login.py` 改成“轮询发送 + 重试”，
     并把 `uname -m` 的 `x86_64` 输出作为最终判据。
+
+52. **阶段 5 正式验收通过**：`tools/boot_login.py`（盲发输入版）输出
+    ```
+    [boot_login] shell prompt seen, sent 'uname -m'
+    PASS: Alpine booted to login and ran 'uname -m' (log: build/login.log)
+    ```
+    串口日志结尾：
+    ```
+    (none):~# uname -m; echo MARK-OK
+    x86_64
+    MARK-OK
+    (none):~#
+    ```
+    也就是说：官方 Alpine 固件在模拟器里完成 initramfs → `/sbin/init` →
+    inittab → `/bin/login` → root 登录 → busybox shell，并且**真的执行了
+    用户命令并返回 `x86_64`**。阶段 5 完成。
+    剩下阶段 6 的「浏览器里跑同一固件到 login」：`sim_init` 已返回 0（§50），
+    但 wasm 里内核在约 100 万条指令处就 halt，需要继续查（大概率是另一个
+    wasm 后端代码生成问题，而不是逻辑问题）。
