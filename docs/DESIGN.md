@@ -735,3 +735,18 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     （或者 `call` 压入的值不对），而不是解码器本身。
     下一步：在 wasm 里把第 28 条前后的 RSP、以及 `[rsp]` 的内容导出
     （同样的方式：写进 `g_m.ram` 再读），确认是“压错”还是“弹错”。
+
+55. **wasm 下 call/ret 返回地址为 0 —— 已修，内核推进 600 倍**：用 9 字节的最小
+    payload（`call 0x10008; hlt; nop; nop; ret`）在 wasm 里跑，10 条指令就复现：
+    ```
+    step 0: rip=0x10008      call 正常
+    step 1: rip=0x0          ret 弹出 0（本机是 0x10005）
+    ```
+    根因：c6 的 wasm 后端对「通过 `struct CPUState *` 访问结构体内的 u64 数组
+    元素」会生成错误的地址计算（`c->r[4]` 读到的不是 RSP）。把 `push64()/pop64()`
+    里的 RSP 读写改成经全局 `g_m.cpu.r[4]` 后，最小用例的 `ret` 正确回到
+    0x10005，完整固件在 wasm 里从 **18,590 条指令**推进到 **11,465,697 条**
+    （约 600 倍）。difftest 仍 1236/1236。
+    仍会在 11.4M 处 halt（`hi=3`、`flags=0x46` 即 hlt+IF=0、RIP 是内核高地址），
+    说明还有同类的 wasm 后端问题；下一步用同样的 RIP 逐条比对（把 trace 容量
+    从 2 万提到能覆盖 1200 万，或改成只记录指定窗口）。
