@@ -643,3 +643,19 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     下一步：在 `case 0xf4`（hlt）里打印 `rip/flags/CS`，并在 `iretq`/`popf` 后
     校验 IF 是否按预期恢复，用 `tests/test_cpu.c6` 补一条 `pushfq/popfq/hlt`
     的语义测试。
+
+49. **Alpine 原生引导到登录 + root shell（里程碑达成）**：把 `boot_login.py` 的输入
+    时机提前（在 login 就绪前就把 `root\n` 写进串口输入环）后，串口日志出现
+    ```
+    See <https://wiki.alpinelinux.org/>.
+    You can setup the system with the command: setup-alpine
+    login[443]: root login on 'ttyS0'
+    (none):~#
+    ```
+    也就是 **Alpine 的 /sbin/init → inittab → /bin/login → root 登录 → shell**
+    全链路在模拟器里真实跑通。之前"卡住/无输出"的两个真因都已修掉：
+    §44 的 devtmpfs + inittab 注入、§45 的 /bin/getty→/bin/login 替换；
+    而 §47/§48 记录的"确定性停机"其实是 **guest 主动关机**——
+    `dev.c6` 把 I/O 端口 `0xf4` 当成 QEMU 关机端口，内核在 init 退出时会写它，
+    所以登录超时后进程退出 → 内核关机 → 模拟器 halt。给 0xf4 加了
+    `[OFF] port/val/rip/insns` 诊断确认了这一点。
