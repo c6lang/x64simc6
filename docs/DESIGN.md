@@ -1040,3 +1040,17 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     下一步（下一轮）：把 PIT 的 tick 周期按「每条指令 = 1ns」折算到真实节拍
     （或反过来把 tsc 的推进速率按 HZ 校准），再跑 login；同时用
     `user_entries`/`cr3` 采样确认时间校准后 guest 是否真的继续推进。
+
+74. **PIT 节拍实验：按真实 8254 时钟折算反而更慢，已撤回**。
+    `sim_pit_phase()` 量到 tick 实际是「每 262144 条指令一次」（被 dev_tick 的
+    调用周期量化），如果按「1 条指令 = 1 ns、8254 输入 1.193182 MHz
+    ⇒ 1 PIT 时钟 ≈ 838 ns」折算，100Hz 应该约 1000 万条指令一次，现在的
+    节拍快 ~38 倍。于是试了一版 `sub = delta / 838`（idle 跳进同步改成
+    `count * 838`），结果同样跑 15 亿条：
+    - 折算前：1452 次系统调用（nr 分布：close 139、ioctl 113、mmap 100、
+      connect 80、socket 61 …）→ guest 已经在 userspace 跑 init 脚本；
+    - 折算后：1236 次系统调用，反而更慢。
+    说明 guest 的推进主要吃「tick 数」（超时/调度都按 jiffies），把 tick 拉慢
+    等于把引导拉长。已完整回滚（`git status` 只剩未跟踪的 `build`）。
+    结论：**不要再动 tick 频率**，提速要看别处（例如减少每条指令的解释开销、
+    或对 wasm 侧做同样的时间跳进）。§73 的 idle 跳进保留。
