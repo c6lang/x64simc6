@@ -669,3 +669,19 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     改完后 headless Chromium 里 `sim_init(固件 32.7 MiB)` **返回 0**，
     wasm 已经能装载并启动完整 Alpine 固件；但内核在 ~100 万条指令的早期就
     halt（另一个 wasm 侧问题），浏览器里跑到 login 仍未打通。
+
+51. **阶段 5 达成证据（native Alpine → login → root shell）**：`build/alpine15.out`
+    里的串口内容（无任何 patch 的 `build/sim30`、官方 Alpine 固件）：
+    ```
+    Welcome to Alpine!
+    The Alpine Wiki contains a large amount of how-to guides ...
+    login[445]: root login on 'ttyS0'
+    (none):~#
+    ```
+    这是 `/sbin/init` → `/etc/inittab` → `ttyS0::respawn:-/bin/login` →
+    root（空密码）→ `-sh` 的完整链路，运行在模拟器里。
+    注意 `boot_login.py` 的自动验收还差一步：它按 “等 `login:` → 发 root →
+    等 `# ` → 发 `uname -m`” 的顺序驱动，但本模拟器的串口输出在 idle 时
+    偶发延迟，脚本容易错过提示符而超时；手工定时喂输入（先 root、隔几分钟
+    再发命令）能稳定进 shell。下一步把 `boot_login.py` 改成“轮询发送 + 重试”，
+    并把 `uname -m` 的 `x86_64` 输出作为最终判据。
