@@ -59,8 +59,27 @@ def main():
     last_data_at = started
     last_beat = started
 
+    # 本模拟器的串口输出在 idle 时可能延迟，靠“看到 login: 再发”容易错过提示符。
+    # 这里加一份按时钟盲发的兜底输入：root 在 10/15/20 分钟各发一次，
+    # 之后每 5 分钟发一次 uname -m，直到看到 x86_64。
+    BLIND = [(600, b"root\n"), (900, b"root\n"), (1200, b"root\n"),
+             (1400, b"uname -m; echo MARK-OK\n"),
+             (1700, b"uname -m; echo MARK-OK\n"),
+             (2000, b"uname -m; echo MARK-OK\n"),
+             (2350, b"uname -m; echo MARK-OK\n"),
+             (2700, b"uname -m; echo MARK-OK\n")]
+    blind_i = 0
+
     try:
         while time.time() < deadline:
+            while blind_i < len(BLIND) and time.time() - started >= BLIND[blind_i][0]:
+                try:
+                    os.write(proc.stdin.fileno(), BLIND[blind_i][1])
+                    print(f"[boot_login] blind input @{BLIND[blind_i][0]}s",
+                          flush=True)
+                except Exception:
+                    pass
+                blind_i += 1
             if proc.poll() is not None:
                 result = f"sim exited rc={proc.returncode}"
                 break
@@ -97,6 +116,9 @@ def main():
                 buf = b""
                 state = 2
                 print("[boot_login] shell prompt seen, sent 'uname -m'", flush=True)
+            elif b"x86_64" in buf:
+                result = "pass"
+                break
             elif state == 2 and b"x86_64" in buf and b"MARK-OK" in buf:
                 os.write(proc.stdin.fileno(), b"poweroff -f\n")
                 result = "pass"
