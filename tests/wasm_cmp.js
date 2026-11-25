@@ -65,7 +65,7 @@ async function wasmSnapshot() {
   w.sim_set_stopt(BigInt(N));
   // 一次跑够；里面会在 stopt 处自己停
   let guard = 0;
-  while (Number(w.sim_insns()) < N && guard++ < 40) w.sim_run(2000000);
+  while (Number(w.sim_insns()) < N && guard++ < 2000) w.sim_run(2000000);
   const ramBase = Number(w.sim_ram_base());
   let ramView = new Uint8Array(w.memory.buffer, ramBase, 128 * 1024 * 1024);
   const memhash = [];

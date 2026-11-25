@@ -813,3 +813,16 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     早期 `lgdt` 前后的 GDT 描述符写入，或我们 `build_gdt_idt` 的等价路径）。
     工具已经齐了：`tests/wasm_cmp.js`（寄存器 + 区域哈希 + 单字节反解），
     每次验证都是秒级。
+
+61. **`tests/wasm_boot_smoke.js`：秒级判断 wasm 串口通道通不通**：浏览器跑 1742M 条
+    指令、串口 0 字节。为了不用几十分钟的完整引导排查，新增这个冒烟脚本：
+    装载固件 → 分块 `sim_run` → 每块 `sim_serial_out(SCRATCH, 64K)` 取字节，
+    默认跑 8M 条指令（几秒钟），看到 `Linux version` / `Run /init` 即 PASS。
+    实测（8M 条指令）：`serial=0B halt_info=0`，而**同一指令数下 native 也没有
+    任何串口输出**（`--stopt=8000000` 只打印 halt 行）——说明 8M 太早，
+    内核还没开始 printk，脚本阈值需要抬高才有意义。
+    结合 `tests/wasm_cmp.js` 的二分结果（**150M 条指令 MATCH、200M 条指令
+    DIVERGE**，且这只是寄存器+内存的状态对比），可以解释浏览器里「跑了很多、
+    串口全空」：wasm 在 1.5 亿～2 亿条之间失步，而内核第一次 printk 在那之后，
+    所以永远看不到输出。下一步就在 150M→200M 之间二分（这区间每步 wasm 约
+    2～3 分钟），拿到分叉指令后按同样的方式修。
