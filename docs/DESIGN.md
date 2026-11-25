@@ -983,3 +983,27 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     会误报「wasm 缺检查点」。现在自动对齐到 `ceil(START/STEP)*STEP`。
     剩下的事就是把 wasm 跑完剩下的约 20 亿条指令（到 userspace 的 `Run /init`
     和登录提示）；native 全程约 2100–2500 秒，wasm 同量级。
+
+71. **卡了整轮的真凶：`hlt` 之后投递挂起中断没清 `halted`**。
+    加 halt 诊断（最近 16 条 guest RIP 的环形缓冲）后，一次 native 长跑就看清了：
+    ```
+    [HALT] rip=ffffffff81c003f0 flags=46 cr3=3eea000 insns=2261778433 rsp=... exc=0 vec=48
+    [RING] ... ffffffff81bb9ff4 ffffffff81bb9ffd ffffffff81bb9ffe
+    ```
+    对应的代码是内核 idle 的经典两指令：
+    ```
+    ffffffff81bb9ffd: fb    sti
+    ffffffff81bb9ffe: f4    hlt
+    ```
+    而 `rip=ffffffff81c003f0` 正是 x86_64 Linux 的 IRQ0 入口桩
+    （`endbr64; push 0x30; jmp common_interrupt`，`0x30 = IRQ0_VECTOR`），
+    `flags=0x46` 说明 IF 已被中断投递清掉。还原出来的顺序是：
+    1. `sti` 把 IF 置 1；`hlt` 让 `cpu_step` 置 `cpu.halted = 1`；
+    2. 机器循环紧接着 `if (exc_pending) cpu_deliver()` 投递了这个挂起中断，
+       中断帧压好、`rip` 指向 IRQ0 入口桩、IF 清 0；
+    3. 但 **`halted` 没清**，下一轮循环看到「halted 且 IF=0」，按「永久停机」处理
+       —— 于是整机停在 2,261,778,433 条指令处（这正好是旧日志 alpine12/13 里
+       停住的同一个指令数）。
+    修复只要一行：投递挂起中断时把 `g_m.cpu.halted = 0`（CPU 被中断唤醒了）。
+    修完 native 一路跑过 2.26B 到 3.5B 不再停（输出仍是内核早期那两行，说明
+    还在 boot/init 阶段）。

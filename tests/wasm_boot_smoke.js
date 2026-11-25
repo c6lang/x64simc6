@@ -42,7 +42,8 @@ const CAP = 1 << 16;
       bytes += n;
       text += dec.decode(new Uint8Array(w.memory.buffer, SCRATCH, n));
     }
-    if (text.indexOf('Linux version') >= 0 || text.indexOf('Run /init') >= 0) break;
+    if (text.indexOf('Linux version') >= 0 || text.indexOf('Run /init') >= 0 ||
+        text.indexOf('login:') >= 0 || text.indexOf('Welcome to Alpine') >= 0) break;
     if (alive === 0) break;
   }
 
@@ -54,7 +55,9 @@ const CAP = 1 << 16;
   } else {
     console.log('串口为空（wasm 的串口输出通道没有产出任何字节）');
   }
-  const ok = bytes > 0 && (text.indexOf('Linux version') >= 0 || text.indexOf('Run /init') >= 0);
+  if (process.env.SERIAL_OUT) fs.writeFileSync(process.env.SERIAL_OUT, text);
+  const ok = bytes > 0 && (text.indexOf('Linux version') >= 0 || text.indexOf('Run /init') >= 0 ||
+                           text.indexOf('login:') >= 0 || text.indexOf('Welcome to Alpine') >= 0);
   console.log(ok ? 'BOOT SMOKE OK' : (bytes > 0 ? 'BOOT SMOKE PARTIAL（有串口字节但没看到内核版本行）' : 'BOOT SMOKE FAIL'));
   process.exit(ok || bytes > 0 ? 0 : 1);
 })().catch(e => { console.log('failed:', e.message); process.exit(1); });

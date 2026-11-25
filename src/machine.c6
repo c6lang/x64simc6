@@ -1,6 +1,9 @@
 /* machine.c6 —— 整机组装与运行循环（c6 方法：m->run()） */
 #include "c6sim.h"
 
+static u64 g_ring[16] = {0};
+static u32 g_ring_i = 0;
+
 struct Machine g_m = {0};
 
 static const char default_cmdline[] =
@@ -61,6 +64,7 @@ void machine_init(void)
 static int machine_step_loop(u64 count)
 {
     u32 n = (u32)count;
+    u32 ri = 0;
     while (n > 0) {
         n--;
         if (g_m.halted)
@@ -73,11 +77,20 @@ static int machine_step_loop(u64 count)
             /* HLT 状态：IF=1 时等待设备中断唤醒，IF=0 则永久停机 */
             if (!cpu_if_enabled()) {
 #if !defined(C6_WASM)
-                printf("[HALT] rip=%llx flags=%llx cr3=%llx insns=%llu\n",
+                printf("[HALT] rip=%llx flags=%llx cr3=%llx insns=%llu rsp=%llx"
+                       " exc=%d vec=%d abort=%d\n",
                        (unsigned long long)g_m.cpu.rip,
                        (unsigned long long)g_m.cpu.flags,
                        (unsigned long long)g_m.cpu.cr[3],
-                       (unsigned long long)g_m.instructions);
+                       (unsigned long long)g_m.instructions,
+                       (unsigned long long)g_m.cpu.r[4],
+                       (int)g_m.cpu.exc_pending, (int)g_m.cpu.exc_vec,
+                       (int)g_m.cpu.fault_abort);
+                printf("[RING]");
+                for (ri = 0; ri < 16; ri++)
+                    printf(" %llx",
+                           (unsigned long long)g_ring[(g_ring_i + ri) & 15]);
+                printf("\n");
                 fflush(stdout);
 #endif
                 g_m.halted = 1;
@@ -94,6 +107,8 @@ static int machine_step_loop(u64 count)
         }
         g_m.instructions++;
         g_m.tsc++;
+        g_ring[g_ring_i & 15] = g_m.cpu.rip;
+        g_ring_i = g_ring_i + 1;
 #if !defined(C6_WASM)
         if (g_m.sample_on && g_m.instructions - g_m.sample_marks >= 20000000ull) {
             g_m.sample_marks = g_m.instructions;
@@ -131,8 +146,13 @@ static int machine_step_loop(u64 count)
         }
 #endif
         cpu_step(&g_m.cpu);
-        if (g_m.cpu.exc_pending)
+        if (g_m.cpu.exc_pending) {
+            /* HLT 之后立刻投递挂起中断：CPU 被唤醒，必须清 halted，
+             * 否则下一轮会被「halted 且 IF=0」误判成永久停机
+             * （实测 2261778433 条处 idle 的 sti;hlt 就撞在这条路径上）。 */
+            g_m.cpu.halted = 0;
             cpu_deliver(&g_m.cpu);
+        }
 #if !defined(C6_WASM)
         if (g_m.snap_step != 0 && g_m.instructions >= g_m.snap_start &&
             (g_m.stopt == 0 || g_m.instructions <= g_m.stopt) &&
