@@ -1134,7 +1134,10 @@ int step(struct CPUState *c)
         case 0xa4: case 0xa5: case 0xac: case 0xad: { /* shld/shrd */
             int shl = (op2 == 0xa4 || op2 == 0xa5);
             u64 cnt = 0, w = 0;
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            u8 md = fetch8(c);
+            u8 sreg = 0;
+            rm = decode_modrm(c, md, rex, addrsz);
+            sreg = (u8)(((md >> 3) & 7) | ((rex & 4) ? 8 : 0));
             if (op2 == 0xa4 || op2 == 0xac) {
                 cnt = fetch_n(c, 1);
                 op_fix_rip(&rm, 1);
@@ -1142,23 +1145,36 @@ int step(struct CPUState *c)
                 cnt = reg_read(c, 1, 1);
             }
             cnt &= (s == 8) ? 63 : 31;
+            /* 先取源寄存器再读目标：op_read 传 &rm，wasm 后端在这之后再读
+             * rm.reg 会读回 0（结构体指针 bug 家族）。 */
+            b = reg_read(c, sreg, s);
             a = op_read(c, &rm, s);
-            b = reg_read(c, rm.reg, s);
-            w = (u64)s * 8;
+            /* 不要写 (u64)s * 8：c6 的 wasm 后端会把结果算大（实测 8→72），
+             * 导致 shrd/shrd 的另一半位移是 0。逐档显式赋值。 */
+            if (s == 8) w = 64;
+            else if (s == 4) w = 32;
+            else if (s == 2) w = 16;
+            else w = 8;
             if (cnt != 0) {
                 if (shl) {
                     if (cnt < w) {
                         c->flags = (c->flags & ~RF_CF) |
-                                   (((a >> (w - cnt)) & 1) ? RF_CF : 0);
-                        a = ((a << cnt) | (b >> (w - cnt))) & sz_mask(s);
+                                   (((a >> (u32)(w - cnt)) & 1) ? RF_CF : 0);
+                        u64 lo2 = a << (u32)cnt;
+                        u64 hi2 = b >> (u32)(w - cnt);
+                        a = (lo2 | hi2) & sz_mask(s);
                     } else {
                         a = 0;
                     }
                 } else {
                     if (cnt < w) {
                         c->flags = (c->flags & ~RF_CF) |
-                                   (((a >> (cnt - 1)) & 1) ? RF_CF : 0);
-                        a = ((a >> cnt) | (b << (w - cnt))) & sz_mask(s);
+                                   (((a >> (u32)(cnt - 1)) & 1) ? RF_CF : 0);
+                        /* c6 wasm 后端对「移位计数是 u64」的 64 位移位会算成 0，
+                         * 计数显式转 u32 后才正确（shrd/shrd 32 位计数同此）。 */
+                        u64 lo2 = a >> (u32)cnt;
+                        u64 hi2 = b << (u32)(w - cnt);
+                        a = (lo2 | hi2) & sz_mask(s);
                     } else {
                         a = 0;
                     }

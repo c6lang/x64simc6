@@ -922,3 +922,26 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     操作数 + shrd + hlt，读 RDX 对比），确认后端在 `b << (w - cnt)` 这种
     「变量位移」上的行为，再决定是改实现（例如 cnt==32 时走专门分支）还是
     绕开后端。
+
+68. **`tests/wasm_shrd.js`：秒级复现 SHRD/SHLD 的 wasm 分歧**。
+    用户要求「wasm 慢，TDD，用最快的方式验证修改」，所以把 §67 的分歧做成了
+    秒级 wasm 单测（`node tests/wasm_shrd.js`，3 个用例，各 4~5 条指令）：
+    ```
+    FAIL shrd rdx,rdi,32: got=0x0              expect=0x000b3ca800000000
+    FAIL shrd rdx,rdi,1 : got=0x1              expect=0x8000000000000001
+    FAIL shld rdx,rdi,32: got=0x1f479acffffc900 expect=0x1cf479ac000b3ca8
+    ```
+    已排除的因素（都是秒级验证）：
+    - `movabs rdi, imm64` 正常（读回 `0xffffc900000b3ca8`）；
+    - 模拟器自己的 `shl rax,cl` 正常（63 → `0x8000000000000000`，32 → `0x100000000`）；
+    - 把 `sreg` 从原始 modrm 字节算、把 `op_read` 提前到 `reg_read` 之前、
+      把位移拆成独立语句、把 `w = (u64)s * 8` 改成逐档显式赋值 —— 都没修好。
+    由此可以断定：分歧出在 **`b << (w - cnt)` / `b >> (w - cnt)` 这一半**
+    （`a >> cnt` / `a << cnt` 是对的），即 wasm 后端对「移位计数来自另一个
+    运算结果」的 64 位左/右移处理错误。下一步可以：
+    - 用 `tests/wasm_shrd.js` 做二分（每次改完 10 秒出结果）；
+    - 试把 `b << n` 换成 `b * (1ull << n)`（乘法一般不走移位路径），
+      或对 `cnt == 32` 用两个 32 位字重新拼装；
+    - 也可以让 SHRD/SHLD 走「结果由两次 32 位操作拼」的实现，完全避开变量移位。
+    注意：`./build.sh test` 和 difftest 1236/1236 都是绿的 —— native 一直正确，
+    只有 wasm 构建受影响，所以这条不会影响阶段 5 的验收。
