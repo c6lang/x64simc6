@@ -902,3 +902,23 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     的那些行，wasm 到 600M 还只有 66 字节 ⇒ 分叉早于 600M）。下一步：
     `node tests/wasm_snap.js 200000000 50000000 600000000`（约 15～20 分钟）
     定位到 50M 窗口后继续用 1M/10k/1 收缩；这已经是最后一段。
+
+67. **钉到单条指令：第 229,031,550 条处 RDX 丢 bit 33，代码是 `shrd rdx,rdi,0x20`**。
+    逐步收缩过程（都用 `tests/wasm_snap.js`，一次扫描一份 native 输出）：
+    - 229M..230M 步长 1万 → 229,040,000 处 r0（RAX）native `ffffffff821bfa19` vs 0；
+    - 229.030M..229.040M 步长 100 → 229,031,600 处 flags `246` vs `202`；
+    - 229,031,500..229,031,600 步长 1 → **229,031,550**，RDX `21cf479ac` vs `1cf479ac`。
+    该处反汇编（0xffffffff813f850a）：
+    ```
+    shrd rdx, rdi, 0x20    ; 双精度右移 32 位
+    cmp  BYTE PTR [rbx], 0x2e
+    ```
+    `shrd` 的实现在 cpu.c6 的 `case 0xa4/0xa5/0xac/0xad`：
+    `a = ((a >> cnt) | (b << (w - cnt))) & sz_mask(s);` —— 当 `cnt == 32`、`w == 64`
+    时依赖 `b << 32`，而 wasm 里出现的症状正是「高 32 位里的一位丢失」。
+    下一步（很短）：在快照里再加一个 `cur_rip`（当前执行的指令地址，native 用
+    `g_m.cur_rip`），就能把「快照是执行前还是执行后」彻底对齐；然后给
+    `shrd/shrd 32 位计数` 写一个几秒钟的 payload 单测（在 wasm 里 movabs 两个
+    操作数 + shrd + hlt，读 RDX 对比），确认后端在 `b << (w - cnt)` 这种
+    「变量位移」上的行为，再决定是改实现（例如 cnt==32 时走专门分支）还是
+    绕开后端。
