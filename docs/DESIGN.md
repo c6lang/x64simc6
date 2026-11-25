@@ -759,3 +759,22 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     `g_m.stopt`（跑到指定指令数就停）保留，因为它只影响调试运行。
     结论：wasm 的第二处问题需要换一种更稳的定位方式（例如在 wasm 侧用
     `printf` 走串口输出把关键 RIP 打出来），而不是内存环形缓冲。
+
+57. **秒级 native/wasm 对拍（本轮最有效的手段）**：不再跑几十分钟的浏览器引导，
+    改成 `tests/wasm_cmp.js <指令数>`：
+    - native：`--stopt=N --dumpregs` 打印 16 个 GPR/RIP/RFLAGS；
+    - wasm：`sim_set_stopt(N)` 跑到同一指令数，再用 `sim_cpu_reg(i)` 读；
+    - 对比同一指令数下的寄存器快照，几秒钟一次，二分找第一条分叉。
+    据此连修两个 **c6 wasm 后端的代码生成 bug**（都是“通过指针访问结构体成员/
+    数组”这一类）：
+    1. `push64/pop64` 里的 `c->r[4]`：wasm 读到的不是 RSP，导致 `ret` 弹出 0
+       （9 字节 payload 即可复现）；改成经全局 `g_m.cpu.r[4]` 后正常。
+    2. `dev_tick()` 里的 `struct PicState *p = &m->pic; p->irr[...]` 写法：
+       每 262144 条指令（正好是 `dev_tick` 的调用周期）就会把 RDX/clobber 成 0；
+       改成直接用 `g_m.pic.` 后，262144 处对拍 MATCH。
+    修完后 wasm 的确定性分叉点从 **18,590** 条推进到 **874,905** 条（约 47 倍）。
+    最新分叉点（874,905→874,906）的指令是
+    `mov ecx, [rip+0x314e47]`（读 0xffffffff82d6bcfc）——寄存器别的都对、只有
+    RCX 本应是 0x3525e9 却读到 0，说明这是**内存状态**的差异（不是寄存器/解码），
+    下一步给 `tests/wasm_cmp.js` 加内存哈希对比（例如 `sim_read_pa()` 读几个
+    关键地址），继续二分。

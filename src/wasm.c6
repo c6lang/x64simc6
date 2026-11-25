@@ -96,6 +96,13 @@ u32 sim_rip_trace(int i)
            ((u32)g_m.ram[off + 2] << 16) | ((u32)g_m.ram[off + 3] << 24);
 }
 
+void sim_set_stopt(u64 n)
+{
+    g_m.stopt = n;
+    g_m.halted = 0;
+    g_m.cpu.halted = 0;
+}
+
 u32 sim_rsp_trace(int i)
 {
     u32 off = 0;
@@ -108,6 +115,12 @@ u32 sim_rsp_trace(int i)
 int sim_rip_trace_n(void)
 {
     return (int)g_m.rip_trace_n;
+}
+
+u64 sim_cpu_reg(int i)
+{
+    if (i < 0 || i > 15) return 0;
+    return g_m.cpu.r[i];
 }
 
 int sim_status(void)
