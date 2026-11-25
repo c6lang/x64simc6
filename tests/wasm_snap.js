@@ -33,9 +33,9 @@ function nativeSnaps() {
   }
   const map = new Map();
   for (const line of out.split('\n')) {
-    const m = line.match(/^\[SNAP\] (\d+) ([0-9a-f]+) ([0-9a-f]+)((?: [0-9a-f]+){16})(?: pic=([0-9a-f]+))?$/);
+    const m = line.match(/^\[SNAP\] (\d+) ([0-9a-f]+) ([0-9a-f]+)((?: [0-9a-f]+){16})(?: clk=([0-9a-f]+) rsn=([0-9a-f]+) pit=([0-9a-f]+))?(?: pic=([0-9a-f]+))?$/);
     if (!m) continue;
-    map.set(Number(m[1]), { rip: m[2], flags: m[3], regs: m[4].trim().split(' '), pic: m[5] || null });
+    map.set(Number(m[1]), { rip: m[2], flags: m[3], regs: m[4].trim().split(' '), clk: m[5] || null, rsn: m[6] || null, pit: m[7] || null, pic: m[8] || null });
   }
   return map;
 }
@@ -59,7 +59,7 @@ async function wasmSnaps() {
     if (Number(w.sim_insns()) !== k) { console.log('检查点', k, '未精确命中:', Number(w.sim_insns())); break; }
     const regs = [];
     for (let i = 0; i < 16; i++) regs.push(hex64(w.sim_cpu_reg(i)));
-    map.set(k, { rip: hex64(w.sim_last_rip()), flags: hex64(w.sim_cpu_flags()), regs, pic: hex64(w.sim_pic_state()) });
+    map.set(k, { rip: hex64(w.sim_last_rip()), flags: hex64(w.sim_cpu_flags()), regs, clk: hex64(w.sim_clock_state()), rsn: hex64(w.sim_raise_state()), pit: hex64(w.sim_pit_phase()), pic: hex64(w.sim_pic_state()) });
   }
   return map;
 }
@@ -73,6 +73,7 @@ async function wasmSnaps() {
 
   const keys = [...nat.keys()].sort((a, b) => a - b);
   let bad = null, ripSkew = null;
+  const diffs = [];
   for (const k of keys) {
     const a = nat.get(k);
     const b = was.get(k);
@@ -80,6 +81,9 @@ async function wasmSnaps() {
     /* RIP 单独看：native 在 instructions++ 之后、step() 之前快照，wasm 在 stopt
        处返回，两者可能差一条指令；寄存器/flags 相同就认为状态一致。 */
     if (a.rip !== b.rip && !ripSkew) ripSkew = { k, nat: a.rip, was: b.rip };
+    if (a.rsn && b.rsn && a.rsn !== b.rsn) { bad = bad || { k, why: `rsn ${a.rsn} vs ${b.rsn}` }; diffs.push({ k, why: 'rsn' }); continue; }
+    if (a.pit && b.pit && a.pit !== b.pit) { bad = bad || { k, why: `pit ${a.pit} vs ${b.pit}` }; diffs.push({ k, why: 'pit' }); continue; }
+    if (a.clk && b.clk && a.clk !== b.clk) { bad = bad || { k, why: `clk ${a.clk} vs ${b.clk}` }; diffs.push({ k, why: 'clk' }); continue; }
     if (a.pic && b.pic && a.pic !== b.pic) { bad = { k, why: `pic ${a.pic} vs ${b.pic}` }; break; }
     if (a.flags !== b.flags) { bad = { k, why: `flags ${a.flags} vs ${b.flags}` }; break; }
     for (let i = 0; i < 16; i++) {

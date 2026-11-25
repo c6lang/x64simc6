@@ -8,6 +8,8 @@
 u8 g_pic_irr[2] = {0, 0};
 u8 g_pic_isr[2] = {0, 0};
 u8 g_pic_imr[2] = {0, 0};
+u32 g_raise_cnt[2] = {0, 0};   /* 调试：pic_raise 的调用次数（主片/从片） */
+u32 g_tick_cnt = 0;            /* 调试：dev_tick 实际推进 PIT 的次数 */
 int serial_take_output(u8 *dst, int cap)
 {
     int n = 0;
@@ -94,6 +96,11 @@ void pic_raise(struct Machine *m, u8 irq)
     u8 bit = (u8)(1 << (irq & 7));
     (void)m;
     if (irq > 15) return;
+    if (irq < 8) {
+        g_raise_cnt[0] = g_raise_cnt[0] + 1;
+    } else {
+        g_raise_cnt[1] = g_raise_cnt[1] + 1;
+    }
     if (irq < 8) {
         if (!(g_pic_imr[0] & bit)) {
             u8 t0 = g_pic_irr[0];
@@ -389,6 +396,35 @@ void dev_init(void)
 }
 
 /* 每个 run slice 末尾调用：推进 PIT，投递最高优先级的未屏蔽中断 */
+u64 raise_state_pack(void)
+{
+    u64 v = 0;
+    v |= (u64)(g_raise_cnt[0] & 0xffffffffu);
+    v |= (u64)(g_raise_cnt[1] & 0xffffffffu) << 32;
+    v |= (u64)(g_tick_cnt & 0xffffu) << 48;   /* 可能回绕，够用 */
+    return v;
+}
+
+u64 pit_phase_pack(void)
+{
+    u64 v = 0;
+    v |= (g_m.last_pit_tsc & 0xffffffffull);
+    v |= (u64)(g_m.pit.mode[0] & 0x7u) << 32;
+    v |= (u64)(g_m.pit.access[0] & 0x3u) << 35;
+    v |= (u64)(g_m.pit.count[0] & 0xffffu) << 40;
+    v |= (u64)(g_m.pit.reload[0] & 0xffffu) << 56;
+    return v;
+}
+
+u64 clock_state_pack(void)
+{
+    u64 v = 0;
+    v |= (g_m.tsc & 0xffffffffull);
+    v |= (u64)(g_m.pit.count[0] & 0xffffu) << 32;
+    v |= (u64)(g_m.pit.reload[0] & 0xffffu) << 48;
+    return v;
+}
+
 u64 pic_state_pack(void)
 {
     u64 v = 0;
@@ -409,6 +445,7 @@ void dev_tick(void)
     u8 found = 0;
 
     if (delta > 0) {
+        g_tick_cnt = g_tick_cnt + 1;
         /* mode 2 = 频率发生器，mode 3 = 方波，两者都是周期性中断 */
         if (g_m.pit.reload[0] > 0 && (g_m.pit.mode[0] == 2 || g_m.pit.mode[0] == 3)) {
             u64 sub = delta;

@@ -123,6 +123,21 @@ u64 sim_cpu_reg(int i)
     return g_m.cpu.r[i];
 }
 
+u64 sim_clock_state(void)
+{
+    return clock_state_pack();
+}
+
+u64 sim_raise_state(void)
+{
+    return raise_state_pack();
+}
+
+u64 sim_pit_phase(void)
+{
+    return pit_phase_pack();
+}
+
 u64 sim_pic_state(void)
 {
     return pic_state_pack() | ((u64)(g_m.cpu.exc_pending & 0xff) << 48);

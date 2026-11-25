@@ -869,3 +869,19 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     另外：native 到 1 亿 5 千万条指令都还没有任何串口输出，内核第一次 printk
     在这之后，所以 `tests/wasm_boot_smoke.js` 的默认 8M 阈值太早，需按
     实际首次 printk 的位置调整（或直接跑 6 亿条对比）。
+
+65. **本轮的关键根因：`dev_tick()` 被 `#if !defined(C6_WASM)` 圈掉了**。
+    上面第 63 条为了补一个缺失的 `#endif`，把 `#endif` 写在了
+    `if (g_m.halted) break;` 和 `if ((g_m.instructions & 0x3ffffu) == 0) dev_tick();`
+    **之后**，于是这两句只存在于 native 构建里 —— wasm 的 PIT 从来不走、定时器
+    中断从来不发。症状：wasm 一路跑（浏览器里到 1742M 条）却永远没有串口输出，
+    而且所有寄存器/内存都对得上（因为 guest 只是拿不到中断）。
+    发现方式：给 `pic_raise` 和 `dev_tick` 加独立全局计数器（`g_raise_cnt`、
+    `g_tick_cnt`），打包进快照一起比对 —— native 是 585/585，wasm 是 **0/0**，
+    一眼看出「根本没调用」。把 `#endif` 移回快照块之后（halted 判断和 dev_tick
+    都在通用代码里），wasm 立刻开始正常工作：
+    - 200M 条指令处 RIP 与 native 完全相同（`ffffffff81bb3ab5`）；
+    - 600M 条指令处串口开始有输出：
+      `[    0.693333] PCI: Fatal: No config space access function found`（66 字节）。
+    这也说明前面为了定位而做的那些 wasm 结构体修复（§63）本身是对的，但
+    真正让 wasm 停摆的是这一个预处理块的范围错误。

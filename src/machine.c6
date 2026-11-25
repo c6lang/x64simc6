@@ -144,16 +144,20 @@ static int machine_step_loop(u64 count)
                    (unsigned long long)g_m.cpu.flags);
             for (si = 0; si < 16; si++)
                 printf(" %llx", (unsigned long long)g_m.cpu.r[si]);
+            printf(" clk=%llx rsn=%llx pit=%llx",
+                   (unsigned long long)clock_state_pack(),
+                   (unsigned long long)raise_state_pack(),
+                   (unsigned long long)pit_phase_pack());
             printf(" pic=%llx\n",
                    (unsigned long long)(pic_state_pack() |
                                         ((u64)(g_m.cpu.exc_pending & 0xff) << 48)));
             fflush(stdout);
         }
+#endif
         if (g_m.halted)
             break;
         if ((g_m.instructions & 0x3ffffu) == 0)
             dev_tick();
-#endif
     }
     return g_m.halted ? 0 : 1;
 }
