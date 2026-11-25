@@ -62,12 +62,14 @@ def main():
     # 本模拟器的串口输出在 idle 时可能延迟，靠“看到 login: 再发”容易错过提示符。
     # 这里加一份按时钟盲发的兜底输入：root 在 10/15/20 分钟各发一次，
     # 之后每 5 分钟发一次 uname -m，直到看到 x86_64。
-    BLIND = [(600, b"root\n"), (900, b"root\n"), (1200, b"root\n"),
-             (1400, b"uname -m; echo MARK-OK\n"),
-             (1700, b"uname -m; echo MARK-OK\n"),
-             (2000, b"uname -m; echo MARK-OK\n"),
-             (2350, b"uname -m; echo MARK-OK\n"),
-             (2700, b"uname -m; echo MARK-OK\n")]
+    # 本模拟器里 login 大约在 18~20 分钟墙钟时就绪，而且没有输入会超时退出，
+    # 所以从 15 分钟起每 3 分钟发一次，root 和命令交替，覆盖整段窗口。
+    BLIND = []
+    _t = 900
+    while _t <= 3000:
+        BLIND.append((_t, b"root\n"))
+        BLIND.append((_t + 90, b"uname -m; echo MARK-OK\n"))
+        _t += 180
     blind_i = 0
 
     try:
