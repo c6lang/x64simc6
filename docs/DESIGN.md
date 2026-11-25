@@ -704,3 +704,20 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     剩下阶段 6 的「浏览器里跑同一固件到 login」：`sim_init` 已返回 0（§50），
     但 wasm 里内核在约 100 万条指令处就 halt，需要继续查（大概率是另一个
     wasm 后端代码生成问题，而不是逻辑问题）。
+
+53. **wasm 里内核早期 halt 的现场（剩余唯一 TODO）**：加了 `sim_halt_info()`
+    （1=machine halted，2=cpu halted，4=pending 异常，8=fault_abort）导出后，
+    headless Chromium 里读到的状态是：
+    ```
+    halt info: {"hi":3,"rip":37378,"fl":70,"n":18590}
+    rc=0（sim_init 成功装载 32.7 MiB 固件）
+    ```
+    - `hi=3` = `g_m.halted`(**hlt 时 IF=0** 这条分支) + `cpu.halted`；
+    - `rip=0x9202`（内核早期低地址）、`flags=0x46`（**IF=0**）、
+      只有 **18590** 条指令就停了，完全确定性。
+    native 同一固件能跑到 login，所以这是 **c6 wasm 后端**在这条路径上的代码
+    生成问题（同一份源码、同一份数据，只有 wasm 目标异常），不是模拟器逻辑
+    问题。已做的缓解：wasm 侧忽略 0xf4/0xfe 关机端口（`#if !defined(C6_WASM)`）。
+    下一步建议：把内核早期那 18.6k 条指令的 RIP 序列 dump 出来，与本机 native
+    跑同一固件的前 18.6k 条 RIP 序列逐条比对，第一条不同的指令就是后端 bug
+    的现场（可以用同一套 `rip_ring`，只是把记录条件换成“前 20000 条”）。

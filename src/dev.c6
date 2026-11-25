@@ -248,6 +248,9 @@ void io_w8(u32 port, u8 v)
             g_m.pci.config[a & 0xfc] = v;
         return;
     }
+#if !defined(C6_WASM)
+    /* 0xf4/0xfe 是 QEMU 风格的关机端口，只有 native 的验收脚本需要；
+     * wasm 里内核早期偶发误写这个端口会把整机停掉，这里在 wasm 侧忽略。 */
     if (port == 0xf4 || port == 0xfe) {
 #if !defined(C6_WASM)
         printf("[OFF] port=%x val=%x rip=%llx insns=%llu\n",
@@ -259,6 +262,7 @@ void io_w8(u32 port, u8 v)
         g_m.exit_code = (u32)v;
         g_m.cpu.halted = 1;
     }
+#endif
 }
 
 void io_w16(u32 port, u16 v)

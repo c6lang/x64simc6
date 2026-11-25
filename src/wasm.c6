@@ -54,6 +54,33 @@ int sim_run(int n)
     return machine_run((u64)n);
 }
 
+/* 诊断用：1=machine halted（0xf4 关机口），2=cpu halted（hlt），
+ * 4=有 pending 异常，8=被 fault_abort 打断过 */
+int sim_halt_info(void)
+{
+    int r = 0;
+    if (g_m.halted) r |= 1;
+    if (g_m.cpu.halted) r |= 2;
+    if (g_m.cpu.exc_pending) r |= 4;
+    if (g_m.cpu.fault_abort) r |= 8;
+    return r;
+}
+
+u64 sim_last_rip(void)
+{
+    return g_m.cpu.rip;
+}
+
+u64 sim_cpu_flags(void)
+{
+    return g_m.cpu.flags;
+}
+
+u64 sim_insns(void)
+{
+    return g_m.instructions;
+}
+
 int sim_status(void)
 {
     return (g_m.halted || g_m.cpu.halted) ? 1 : 0;
