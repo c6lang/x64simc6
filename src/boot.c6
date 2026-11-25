@@ -17,6 +17,11 @@
 #define H_VERSION        0x15u
 #define H_HEADER_MAGIC   0x11u
 
+/* 固件长度单独放全局：c6 的 wasm 后端在「结构体里紧跟在指针后的 u32 成员」上
+ * 读写偏移不一致（native 正常），用它绕开，保证浏览器也能引导完整固件。 */
+u32 g_fw_klen = 0;
+u32 g_fw_ilen = 0;
+
 static u32 rd32(const u8 *p)
 {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
@@ -34,6 +39,8 @@ int machine_load_firmware(u8 *fw, u32 len)
     m->fw_kernel_len = rd32(fw + 20);
     m->fw_initrd = fw + rd32(fw + 24);
     m->fw_initrd_len = rd32(fw + 28);
+    g_fw_klen = m->fw_kernel_len;
+    g_fw_ilen = m->fw_initrd_len;
     if (m->fw_kernel_len == 0) return -4;
     if (rd32(fw + 8) + m->fw_kernel_len > len) return -5;
     if (rd32(fw + 8) > len || rd32(fw + 24) > len) return -6;
@@ -194,6 +201,8 @@ int machine_boot_staged(u8 *base, u32 koff, u32 klen,
     g_m.fw_kernel_len = klen;
     g_m.fw_initrd = base + ioff;
     g_m.fw_initrd_len = ilen;
+    g_fw_klen = klen;
+    g_fw_ilen = ilen;
     if (coff != 0 && clen != 0) {
         u32 n = clen;
         if (n > sizeof(g_m.cmdline) - 1) n = sizeof(g_m.cmdline) - 1;
@@ -213,14 +222,14 @@ int machine_boot(void)
 
     /* 这里刻意用全局 g_m 而不是 m->：c6 的 wasm 后端在「通过局部指针读结构体
      * 成员」时会取到 0（写进去是对的），表现为 machine_boot 立即返回 -1。 */
-    if (g_m.fw_kernel == 0 || g_m.fw_kernel_len == 0) return -1;
-    if (g_m.fw_kernel_len > (RAM_TOP - KERNEL_PA)) return -2;
-    if (g_m.fw_initrd_len > (RAM_TOP - INITRD_PA)) return -3;
+    if (g_m.fw_kernel == 0 || g_fw_klen == 0) return -1;
+    if (g_fw_klen > (RAM_TOP - KERNEL_PA)) return -2;
+    if (g_fw_ilen > (RAM_TOP - INITRD_PA)) return -3;
 
     zero_boot_params();
-    for (i = 0; i < g_m.fw_kernel_len; i++)
+    for (i = 0; i < g_fw_klen; i++)
         mem_w8(KERNEL_PA + i, g_m.fw_kernel[i]);
-    for (i = 0; i < g_m.fw_initrd_len; i++)
+    for (i = 0; i < g_fw_ilen; i++)
         mem_w8(INITRD_PA + i, g_m.fw_initrd[i]);
     for (i = 0; i < g_m.cmdline_len; i++)
         mem_w8(CMDLINE_PA + i, g_m.cmdline[i]);

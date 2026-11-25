@@ -659,3 +659,13 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     `dev.c6` 把 I/O 端口 `0xf4` 当成 QEMU 关机端口，内核在 init 退出时会写它，
     所以登录超时后进程退出 → 内核关机 → 模拟器 halt。给 0xf4 加了
     `[OFF] port/val/rip/insns` 诊断确认了这一点。
+
+50. **绕开 wasm 后端结构体成员偏移 bug：固件长度改用独立全局**：之前
+    `sim_init()` 在 wasm 里总返回 -1/-4，实测是「结构体里紧跟在指针成员后的
+    u32 成员」在不同 TU 读写偏移不一致（native 完全正常，见 §37）。
+    把 `fw_kernel_len` / `fw_initrd_len` 的**权威值**挪到两个独立全局
+    `g_fw_klen` / `g_fw_ilen`（boot.c6），`machine_load_firmware()`,
+    `machine_boot_staged()`, `machine_boot()` 统一读写这两个全局。
+    改完后 headless Chromium 里 `sim_init(固件 32.7 MiB)` **返回 0**，
+    wasm 已经能装载并启动完整 Alpine 固件；但内核在 ~100 万条指令的早期就
+    halt（另一个 wasm 侧问题），浏览器里跑到 login 仍未打通。
