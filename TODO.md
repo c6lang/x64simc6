@@ -59,7 +59,7 @@
 - [x] wasm-ld 参数：`--no-entry --export-all`，initial 256 MiB / max 512 MiB；`web/sim.wasm` 无 import
 - [x] node 冒烟 `tests/wasm_smoke.js`：实例化 → 写 payload → 运行 → 读串口，输出 `C6SIM64 OK`，26 条指令后停机
 - [x] `web/index.html` + `web/style.css` + `web/app.js`：固件/网络下载、Cache Storage 缓存、IndexedDB 文件表与串口快照持久化、bridge 事件注入；headless Chromium 端到端验证通过
-- [ ] 浏览器验证 Alpine 登录提示与 root 输入（`tests/wasm_cmp.js` 秒级对拍已推进到 **150M 条指令 MATCH**；本轮又修掉两处 wasm 后端截断：GDT 描述符 u64 字面量、`boot params` 的 `m->fw_initrd_len`，见 DESIGN §58/§61。本轮再修 6 处 wasm 结构体读写问题（dev_init/dev_tick/pic/pit 直连全局、PIC 位图独立全局、RMW 拆分、状态访问器），PIC 状态已一致；关键根因已找到：`dev_tick()` 曾被 `#if !defined(C6_WASM)` 圈掉，wasm 里 PIT 从不触发；修正后 wasm 在 200M 处与 native RIP 完全一致、600M 处已开始 printk，见 DESIGN §65。wasm 现已跑内核到 5.9 秒并开始串口输出，但仍在 VFS 挂载处 panic；boot params/initrd 本体/PIC 时钟均已比对一致，差异在 200M–600M 之间，下一步扫这一段，见 DESIGN §66）
+- [ ] 浏览器验证 Alpine 登录提示与 root 输入（`tests/wasm_cmp.js` 秒级对拍已推进到 **150M 条指令 MATCH**；本轮又修掉两处 wasm 后端截断：GDT 描述符 u64 字面量、`boot params` 的 `m->fw_initrd_len`，见 DESIGN §58/§61。本轮再修 6 处 wasm 结构体读写问题（dev_init/dev_tick/pic/pit 直连全局、PIC 位图独立全局、RMW 拆分、状态访问器），PIC 状态已一致；关键根因已找到：`dev_tick()` 曾被 `#if !defined(C6_WASM)` 圈掉，wasm 里 PIT 从不触发；修正后 wasm 在 200M 处与 native RIP 完全一致、600M 处已开始 printk，见 DESIGN §65。wasm 现已跑内核到 5.9 秒并开始串口输出，但仍在 VFS 挂载处 panic；boot params/initrd 本体/PIC 时钟均已比对一致，SHRD/SHLD 的 wasm 分歧已修（局部 u64 跨语句低 32 位被清零，内联 reg_read 解决，见 DESIGN §69），229M–245M 快照已全部对齐；下一步继续向 600M/900M 扫）
 
 ## 阶段 7 —— wasm 网络与页面存储（用户新增硬性需求，DESIGN.md §10.1）
 

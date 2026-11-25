@@ -1145,9 +1145,9 @@ int step(struct CPUState *c)
                 cnt = reg_read(c, 1, 1);
             }
             cnt &= (s == 8) ? 63 : 31;
-            /* 先取源寄存器再读目标：op_read 传 &rm，wasm 后端在这之后再读
-             * rm.reg 会读回 0（结构体指针 bug 家族）。 */
-            b = reg_read(c, sreg, s);
+            /* 源寄存器值不能先存进局部变量再用于移位：c6 的 wasm 后端会把
+             * 这个局部 u64 的低 32 位清零（实测 b=0x99aabbccddeeff00 用出来
+             * 是 0x99aabbcc00000000），所以 hi/lo 两半都直接内联 reg_read。 */
             a = op_read(c, &rm, s);
             /* 不要写 (u64)s * 8：c6 的 wasm 后端会把结果算大（实测 8→72），
              * 导致 shrd/shrd 的另一半位移是 0。逐档显式赋值。 */
@@ -1161,7 +1161,7 @@ int step(struct CPUState *c)
                         c->flags = (c->flags & ~RF_CF) |
                                    (((a >> (u32)(w - cnt)) & 1) ? RF_CF : 0);
                         u64 lo2 = a << (u32)cnt;
-                        u64 hi2 = b >> (u32)(w - cnt);
+                        u64 hi2 = reg_read(c, sreg, s) >> (u32)(w - cnt);
                         a = (lo2 | hi2) & sz_mask(s);
                     } else {
                         a = 0;
@@ -1173,7 +1173,7 @@ int step(struct CPUState *c)
                         /* c6 wasm 后端对「移位计数是 u64」的 64 位移位会算成 0，
                          * 计数显式转 u32 后才正确（shrd/shrd 32 位计数同此）。 */
                         u64 lo2 = a >> (u32)cnt;
-                        u64 hi2 = b << (u32)(w - cnt);
+                        u64 hi2 = reg_read(c, sreg, s) << (u32)(w - cnt);
                         a = (lo2 | hi2) & sz_mask(s);
                     } else {
                         a = 0;

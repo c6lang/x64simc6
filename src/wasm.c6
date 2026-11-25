@@ -191,3 +191,37 @@ u8 *sim_ram_base(void)
 {
     return g_m.ram;
 }
+
+/* 临时调试用：验证 wasm 后端上各种移位原语的正确性（DESIGN §69） */
+u64 sim_dbg_shl(u64 v, u64 n)
+{
+    return v << (u32)n;
+}
+
+u64 sim_dbg_shr(u64 v, u64 n)
+{
+    return v >> (u32)n;
+}
+
+u64 sim_dbg_bitshl(u64 v, u64 cnt, u64 w)
+{
+    return v << (u32)(w - cnt);
+}
+
+u64 sim_dbg_bitshr(u64 v, u64 cnt, u64 w)
+{
+    return v >> (u32)(w - cnt);
+}
+
+u64 sim_dbg_loopshl(u64 v, u64 n)
+{
+    u64 r = 0;
+    u64 i = 0;
+    r = v;
+    i = n;
+    while (i > 0) {
+        r = r * 2u;
+        i = i - 1;
+    }
+    return r;
+}

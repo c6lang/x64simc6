@@ -945,3 +945,25 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     - 也可以让 SHRD/SHLD 走「结果由两次 32 位操作拼」的实现，完全避开变量移位。
     注意：`./build.sh test` 和 difftest 1236/1236 都是绿的 —— native 一直正确，
     只有 wasm 构建受影响，所以这条不会影响阶段 5 的验收。
+
+69. **SHRD/SHLD 的 wasm 分歧根因（已修）：局部 u64 跨语句后低 32 位被清零**。
+    用 §68 的秒级单测 + 新加的 `tests/wasm_payload_cmp.js`（同一段 payload 分别
+    在 native 和 wasm 跑 N 条，比对 16 个寄存器/RIP/flags），做了系统探针
+    （`/tmp/sh_*.bin`：shrd/shld 各取 cnt=0/1/31/32/33/63）：
+    ```
+    shrd c=32  native=0xddeeff0011223344  wasm=0x11223344          # b<<32 丢失
+    shld c=63  native=0x4cd55de66ef77f80  wasm=0x4cd55de600000000  # b>>1 低 32 位丢失
+    ```
+    由反推可知 handler 里拿到的 `b` 是 `0x99aabbcc00000000` 而不是
+    `0x99aabbccddeeff00` —— **低 32 位被清零**。进一步用临时导出
+    `sim_dbg_shl/shr/bitshl/bitshr/loopshl` 验证：wasm 的移位原语本身完全正确
+    （0..63 全部正确，只有 UB 的 64 位计数按 x86 掩码），所以问题不在移位，
+    而在「`b = reg_read(...)` 存进局部 u64，之后跨语句使用」这个模式。
+    修复：把 `reg_read(c, sreg, s)` **内联进 hi 半部分的表达式**，不再让源寄存器
+    值跨语句存活。修完 13 个 shrd/shld 用例（`tests/wasm_shrd.js`）全过，
+    快照扫描 229M–245M 的 17 个检查点全部 MATCH（修之前 229,031,550 处 RDX
+    丢 bit 33）。
+    这是 §10/§63 那类「c6 wasm 后端在跨语句存活和结构体指针上有问题」的又一例，
+    规律补充为：**从函数调用拿到的 u64 不许存进局部变量后跨语句使用，要么当场
+    用完，要么内联重调**。新增的 `tests/wasm_payload_cmp.js` 让这类问题可以在
+    几秒内复现和验证。
