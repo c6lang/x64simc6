@@ -885,3 +885,20 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
       `[    0.693333] PCI: Fatal: No config space access function found`（66 字节）。
     这也说明前面为了定位而做的那些 wasm 结构体修复（§63）本身是对的，但
     真正让 wasm 停摆的是这一个预处理块的范围错误。
+
+66. **wasm 已能跑内核到 5.9 秒，但还没走完 initramfs**。修掉 §65 之后：
+    - 200M 条指令：RIP 与 native 完全相同（`ffffffff81bb3ab5`）；
+    - 600M 条指令：串口 66 字节（只有 `PCI: Fatal: No config space access
+      function found`）；
+    - 900M 条指令：串口 924 字节，最后是
+      `[5.903082] Warning: unable to open an initial console.` /
+      `Failed to create /dev/root: -2` /
+      `Kernel panic - not syncing: VFS: Unable to mount root fs`。
+    已经排除的因素：
+    - boot params 页（0x9000 起 256 字节）在 1000 条指令处 **完全一致**；
+    - initrd 本体（0x06000000 起 3483113 字节）哈希一致（`760ac20854cfe6e4`）；
+    - PIC/时钟状态一致。
+    所以差异出现在 **200M～600M 之间**（native 在 560M 之前就已经打印了 5.7～5.9 秒
+    的那些行，wasm 到 600M 还只有 66 字节 ⇒ 分叉早于 600M）。下一步：
+    `node tests/wasm_snap.js 200000000 50000000 600000000`（约 15～20 分钟）
+    定位到 50M 窗口后继续用 1M/10k/1 收缩；这已经是最后一段。

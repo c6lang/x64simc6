@@ -290,6 +290,9 @@ int main(int argc, char **argv)
             printf(" | ");
             for (i6 = 0; i6 < 32; i6++)
                 printf("%02x", (u32)g_m.ram[0x9200 + i6]);
+            printf(" | ");
+            for (i6 = 0; i6 < 256; i6++)
+                printf("%02x", (u32)g_m.ram[0x9000 + i6]);
             printf("\n");
         }
         if (dumpmem_len > 0) {
