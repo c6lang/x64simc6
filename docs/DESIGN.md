@@ -967,3 +967,19 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     规律补充为：**从函数调用拿到的 u64 不许存进局部变量后跨语句使用，要么当场
     用完，要么内联重调**。新增的 `tests/wasm_payload_cmp.js` 让这类问题可以在
     几秒内复现和验证。
+
+70. **SHRD 修好后 wasm 与 native 一路同步到 9 亿条，VFS panic 消失**。
+    - 快照扫描 245M–500M（26 个检查点，步长 10M）**全部 MATCH**；
+    - `MAX_INSNS=900000000 node tests/wasm_boot_smoke.js`：
+      ```
+      insns=904917123 serial=133B
+      [    0.696666] PCI: Fatal: No config space access function found
+      [    5.979744] Problem loading in-kernel X.509 certificate (-129)
+      ```
+      与 native 在 900M 条处的输出**逐字相同**（连时间戳都一样），
+      之前的 `VFS: Unable to mount root fs` panic 不再出现。
+    另外修了 `tests/wasm_snap.js` 的一个工具 bug：检查点必须是步长的整数倍
+    （native 的 `--snap` 按这个条件打印），起始点不是倍数时两边 key 集合不同，
+    会误报「wasm 缺检查点」。现在自动对齐到 `ceil(START/STEP)*STEP`。
+    剩下的事就是把 wasm 跑完剩下的约 20 亿条指令（到 userspace 的 `Run /init`
+    和登录提示）；native 全程约 2100–2500 秒，wasm 同量级。

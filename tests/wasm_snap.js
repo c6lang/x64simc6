@@ -53,7 +53,10 @@ async function wasmSnaps() {
   const map = new Map();
   const hex64 = v => BigInt.asUintN(64, v).toString(16);
   /* 必须精确停在每个检查点：sim_run 的 idle 路径一次加 0x2000，直接跑会冲过头。 */
-  for (let k = START; k <= END; k += STEP) {
+  /* 检查点必须是 STEP 的整数倍（native 端的 --snap 也按这个条件打印），
+   * 否则两边 key 集合不同，会被误报成「wasm 缺检查点」。 */
+  const k0 = Math.ceil(START / STEP) * STEP;
+  for (let k = k0; k <= END; k += STEP) {
     w.sim_set_stopt(BigInt(k));
     w.sim_run(k + STEP);  /* 从当前位置一直跑到 stopt=k；返回 0 只是停在那里 */
     if (Number(w.sim_insns()) !== k) { console.log('检查点', k, '未精确命中:', Number(w.sim_insns())); break; }
