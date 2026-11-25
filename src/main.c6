@@ -257,6 +257,14 @@ int main(int argc, char **argv)
         printf("[REG] rip %llx\n", (unsigned long long)g_m.cpu.rip);
         printf("[REG] flags %llx\n", (unsigned long long)g_m.cpu.flags);
         printf("[REG] insns %llu\n", (unsigned long long)g_m.instructions);
+        {
+            u64 h = 0xcbf29ce484222325ull;
+            u32 i4 = 0;
+            for (i4 = 0; i4 < (u32)RAM_SIZE; i4++) {
+                h = (h ^ (u64)g_m.ram[i4]) * 0x100000001b3ull;
+            }
+            printf("[REG] memhash %llx\n", (unsigned long long)h);
+        }
         fflush(stdout);
     }
 #endif

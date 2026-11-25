@@ -26,7 +26,7 @@ function nativeSnapshot() {
     out = (e.stdout || '').toString();
   }
   const regs = new Array(16).fill(null);
-  let rip = null, flags = null, insns = null;
+  let rip = null, flags = null, insns = null, memhash = null;
   for (const line of out.split('\n')) {
     const m = line.match(/^\[REG\] (\d+) ([0-9a-f]+)$/);
     if (m) { regs[Number(m[1])] = m[2]; continue; }
@@ -35,9 +35,11 @@ function nativeSnapshot() {
     const f = line.match(/^\[REG\] flags ([0-9a-f]+)$/);
     if (f) { flags = f[1]; continue; }
     const i = line.match(/^\[REG\] insns (\d+)$/);
-    if (i) { insns = Number(i[1]); }
+    if (i) { insns = Number(i[1]); continue; }
+    const h = line.match(/^\[REG\] memhash ([0-9a-f]+)$/);
+    if (h) { memhash = h[1]; }
   }
-  return { regs, rip, flags, insns };
+  return { regs, rip, flags, insns, memhash };
 }
 
 async function wasmSnapshot() {
@@ -62,7 +64,8 @@ async function wasmSnapshot() {
     regs.push(BigInt.asUintN(64, w.sim_cpu_reg(i)).toString(16));
   return { regs, rip: BigInt.asUintN(64, w.sim_last_rip()).toString(16),
            flags: BigInt.asUintN(64, w.sim_cpu_flags()).toString(16),
-           insns: Number(w.sim_insns()) };
+           insns: Number(w.sim_insns()),
+           memhash: BigInt.asUintN(64, w.sim_mem_hash()).toString(16) };
 }
 
 (async () => {
@@ -73,6 +76,7 @@ async function wasmSnapshot() {
     if ((nat.regs[i] || '') !== (was.regs[i] || '')) { first = i; break; }
   }
   const ripDiff = nat.rip !== was.rip;
+  const memDiff = nat.memhash !== was.memhash;
   const flagsDiff = nat.flags !== was.flags;
   if (!QUIET) {
     console.log('N =', N, 'insns nat/wasm =', nat.insns, '/', was.insns);
@@ -82,8 +86,9 @@ async function wasmSnapshot() {
     }
     console.log(`  rip   nat=${nat.rip}  wasm=${was.rip}${ripDiff ? '   <-- DIFF' : ''}`);
     console.log(`  flags nat=${nat.flags}  wasm=${was.flags}${flagsDiff ? '   <-- DIFF' : ''}`);
+    console.log(`  mem   nat=${nat.memhash}  wasm=${was.memhash}${memDiff ? '   <-- DIFF' : ''}`);
   }
-  const same = first < 0 && !ripDiff && !flagsDiff;
+  const same = first < 0 && !ripDiff && !flagsDiff && !memDiff;
   console.log(same ? `MATCH at ${N}` : `DIVERGE at ${N} (first reg r${first})`);
   process.exitCode = same ? 0 : 1;
 })().catch(e => { console.error('failed:', e.message); process.exit(1); });

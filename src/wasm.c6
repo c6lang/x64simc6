@@ -123,6 +123,15 @@ u64 sim_cpu_reg(int i)
     return g_m.cpu.r[i];
 }
 
+u64 sim_mem_hash(void)
+{
+    u64 h = 0xcbf29ce484222325ull;
+    u32 i = 0;
+    for (i = 0; i < (u32)RAM_SIZE; i++)
+        h = (h ^ (u64)g_m.ram[i]) * 0x100000001b3ull;
+    return h;
+}
+
 int sim_status(void)
 {
     return (g_m.halted || g_m.cpu.halted) ? 1 : 0;

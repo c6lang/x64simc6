@@ -778,3 +778,13 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     RCX 本应是 0x3525e9 却读到 0，说明这是**内存状态**的差异（不是寄存器/解码），
     下一步给 `tests/wasm_cmp.js` 加内存哈希对比（例如 `sim_read_pa()` 读几个
     关键地址），继续二分。
+
+58. **对拍加入内存哈希后：连最早 1000 条指令都不一致**：给 `tests/wasm_cmp.js`
+    加了全 RAM（128 MiB）的 FNV 哈希（native 侧 `[REG] memhash`，wasm 侧
+    `sim_mem_hash()`）之后，**1000 条指令时内存哈希就已经不同**，而寄存器一致。
+    这说明前面的“寄存器一致”只覆盖了架构可见状态，内存里早就有差异（很可能是
+    固件装载/早期页表写入路径上的另一个 wasm 后端问题）。
+    下一步：把哈希改成**按区域**（先只哈希内核映像 0x01000000..0x03000000），
+    并把 `sim_mem_hash(start,len)` 做成带参数版本，逐步缩小到具体页，
+    再用 `sim_read_pa()` 做逐字节确认。
+    当前状态：`build.sh test` 与 difftest 1236/1236 全绿；native 阶段 5 验收仍 PASS。
