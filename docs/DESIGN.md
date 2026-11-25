@@ -750,3 +750,12 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     仍会在 11.4M 处 halt（`hi=3`、`flags=0x46` 即 hlt+IF=0、RIP 是内核高地址），
     说明还有同类的 wasm 后端问题；下一步用同样的 RIP 逐条比对（把 trace 容量
     从 2 万提到能覆盖 1200 万，或改成只记录指定窗口）。
+
+56. **RIP 逐条比对工具的现状（已撤回）**：为了定位 wasm 第二个分叉点，试过把
+    前 N 条 / 环形 2 万条 RIP+RSP 写进 `g_m.ram` 再导出，并加 `--stopt=N` 让
+    native 停在同一个指令数上对比。但加上环形写之后 `--riptrace` 路径本身
+    会在启动十几秒内崩溃（默认路径不受影响，`build.sh test` 与 difftest 全绿），
+    为避免把不稳定的调试代码留在树里，**已把循环内 trace 写入和 ring dump 删掉**；
+    `g_m.stopt`（跑到指定指令数就停）保留，因为它只影响调试运行。
+    结论：wasm 的第二处问题需要换一种更稳的定位方式（例如在 wasm 侧用
+    `printf` 走串口输出把关键 RIP 打出来），而不是内存环形缓冲。

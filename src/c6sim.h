@@ -188,6 +188,7 @@ struct Machine {
     u32 sys_trace;               /* 1 = 记录每次 syscall 到 watch_fd */
     u64 sysrec[8];
     u64 sys_count;
+    u64 stopt;                   /* >0: 跑到这么多条指令就停（调试） */
     u32 rip_trace_on;            /* 1 = 记录前 RIP_TRACE_N 条 RIP */
     u32 rip_trace_n;
     u32 rip_trace[20000];               /* syscall 记录缓冲：cr3,nr,rdi,rsi,rdx,r10,r8,r9 */               /* CPL3 首次进入后的逐步记录窗口 */                 /* 1 = 模拟器自身代访（分页遍历/门读取/压帧），按内核权限 */
