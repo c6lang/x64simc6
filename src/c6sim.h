@@ -234,6 +234,9 @@ void raise_irq(struct CPUState *c, u32 vec);
 
 /* cpu.c6 */
 int cpu_step(struct CPUState *c);
+int cpu_if_enabled(void);
+int cpu_exc_pending(void);
+u64 pic_state_pack(void);
 void raise_exception(struct CPUState *c, u32 vec, u8 has_ec, u64 ec);
 extern u64 g_rip_ring[256];
 extern u32 g_rip_i;

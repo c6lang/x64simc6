@@ -843,3 +843,29 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
        检查点都出现 1～4 字节的 RIP 差和“看起来像寄存器分叉”的假象。把 native
        的快照移到 `cpu_step()` + `cpu_deliver()` 之后，1500000..1500100 的
        101 个检查点全部 MATCH。
+
+63. **本轮修掉的 6 个 wasm 后端问题（都属同一类：结构体内数组/成员的读写）**：
+    1. `dev_tick()` 的 `struct Machine *m = &g_m; m->...` → 改用 `g_m.`；
+    2. `dev_init()` 里 `struct Machine *m` + `struct SerialState *s = &m->serial`
+       → 全部改直连（否则 wasm 里 PIC/串口初始化整个写偏，`imr` 一直是 0）；
+    3. `pic_read/pic_write/pit_read/pit_write` 的 `struct PicState *p = &g_m.pic`
+       形式的 `p->x[i]`（含动态下标）→ 全部改 `g_m.pic.`/`g_m.pit.`（本轮对
+       dev.c6 做了函数作用域内的机械替换，共 77 处）；
+    4. PIC 的 `irr/isr/imr` 三组**结构体内数组**整体挪成独立全局
+       `g_pic_irr/g_pic_isr/g_pic_imr`（平坦地址读写），ISR 位置丢失的问题消失；
+    5. `dev_tick`/`pic_raise` 里的 `|=`、`&=` 复合赋值一律拆成「读 → 改 → 写」；
+    6. `cpu_if_enabled()` / `cpu_exc_pending()` / `pic_state_pack()` 三个访问器
+       放进**拥有该状态的 TU**（cpu.c6 / dev.c6），跨 TU 只传值不传结构体指针。
+    另外把 native 的 `[SNAP]` 挪到 `cpu_step()+cpu_deliver()` 之后（之前快照比
+    wasm 早一条指令，导致大量假分叉）。
+
+64. **当前 wasm 与 native 的对齐状态**：检查点快照对拍（`tests/wasm_snap.js`）
+    - `150000000` 处 MATCH；
+    - `154000000` 处 DIVERGE，首个差异是 **r0(RAX)**：native `fffea072` vs
+      wasm `fffea070`（差 2 = 一条指令），PIC 状态已经一致；
+    - 粗扫（步长 50M）显示 150M MATCH、200M 起 DIVERGE（flags 0x202 vs 0x246）。
+    所以下一个待定位窗口是 **153M～154M**，下一步用步长 100k/1k 收缩即可
+    （`node tests/wasm_snap.js 153000000 100000 154000000`）。
+    另外：native 到 1 亿 5 千万条指令都还没有任何串口输出，内核第一次 printk
+    在这之后，所以 `tests/wasm_boot_smoke.js` 的默认 8M 阈值太早，需按
+    实际首次 printk 的位置调整（或直接跑 6 亿条对比）。

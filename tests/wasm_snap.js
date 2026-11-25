@@ -33,9 +33,9 @@ function nativeSnaps() {
   }
   const map = new Map();
   for (const line of out.split('\n')) {
-    const m = line.match(/^\[SNAP\] (\d+) ([0-9a-f]+) ([0-9a-f]+)((?: [0-9a-f]+){16})$/);
+    const m = line.match(/^\[SNAP\] (\d+) ([0-9a-f]+) ([0-9a-f]+)((?: [0-9a-f]+){16})(?: pic=([0-9a-f]+))?$/);
     if (!m) continue;
-    map.set(Number(m[1]), { rip: m[2], flags: m[3], regs: m[4].trim().split(' ') });
+    map.set(Number(m[1]), { rip: m[2], flags: m[3], regs: m[4].trim().split(' '), pic: m[5] || null });
   }
   return map;
 }
@@ -59,7 +59,7 @@ async function wasmSnaps() {
     if (Number(w.sim_insns()) !== k) { console.log('检查点', k, '未精确命中:', Number(w.sim_insns())); break; }
     const regs = [];
     for (let i = 0; i < 16; i++) regs.push(hex64(w.sim_cpu_reg(i)));
-    map.set(k, { rip: hex64(w.sim_last_rip()), flags: hex64(w.sim_cpu_flags()), regs });
+    map.set(k, { rip: hex64(w.sim_last_rip()), flags: hex64(w.sim_cpu_flags()), regs, pic: hex64(w.sim_pic_state()) });
   }
   return map;
 }
@@ -80,6 +80,7 @@ async function wasmSnaps() {
     /* RIP 单独看：native 在 instructions++ 之后、step() 之前快照，wasm 在 stopt
        处返回，两者可能差一条指令；寄存器/flags 相同就认为状态一致。 */
     if (a.rip !== b.rip && !ripSkew) ripSkew = { k, nat: a.rip, was: b.rip };
+    if (a.pic && b.pic && a.pic !== b.pic) { bad = { k, why: `pic ${a.pic} vs ${b.pic}` }; break; }
     if (a.flags !== b.flags) { bad = { k, why: `flags ${a.flags} vs ${b.flags}` }; break; }
     for (let i = 0; i < 16; i++) {
       if (a.regs[i] !== b.regs[i]) { bad = { k, why: `r${i} ${a.regs[i]} vs ${b.regs[i]}` }; break; }

@@ -3,6 +3,11 @@
 
 /* ---------------- 串口环形缓冲 ---------------- */
 
+/* c6 wasm 后端对「结构体内的数组元素」读写会出错（isr/irr/imr 位丢失），
+ * 这三组 PIC 位图改用独立全局，读写都走平坦地址。 */
+u8 g_pic_irr[2] = {0, 0};
+u8 g_pic_isr[2] = {0, 0};
+u8 g_pic_imr[2] = {0, 0};
 int serial_take_output(u8 *dst, int cap)
 {
     int n = 0;
@@ -86,65 +91,71 @@ static void serial_write(u32 port, u8 v)
 
 void pic_raise(struct Machine *m, u8 irq)
 {
-    struct PicState *p = &m->pic;
     u8 bit = (u8)(1 << (irq & 7));
+    (void)m;
     if (irq > 15) return;
     if (irq < 8) {
-        if (!(p->imr[0] & bit)) p->irr[0] |= bit;
+        if (!(g_pic_imr[0] & bit)) {
+            u8 t0 = g_pic_irr[0];
+            t0 = (u8)(t0 | bit);
+            g_pic_irr[0] = t0;
+        }
     } else {
-        if (!(p->imr[1] & bit)) p->irr[1] |= bit;
+        if (!(g_pic_imr[1] & bit)) {
+            u8 t1 = g_pic_irr[1];
+            t1 = (u8)(t1 | bit);
+            g_pic_irr[1] = t1;
+        }
     }
 }
 
 static u8 pic_read(u32 port)
 {
-    struct PicState *p = &g_m.pic;
     if (port == 0x20 || port == 0xa0) {
         u32 i = (port == 0xa0) ? 1 : 0;
-        return p->read_isr ? p->isr[i] : p->irr[i];
+        return g_m.pic.read_isr ? g_pic_isr[i] : g_pic_irr[i];
     }
-    if (port == 0x21) return p->imr[0];
-    if (port == 0xa1) return p->imr[1];
+    if (port == 0x21) return g_pic_imr[0];
+    if (port == 0xa1) return g_pic_imr[1];
     return 0xff;
 }
 
 static void pic_write(u32 port, u8 v)
 {
-    struct PicState *p = &g_m.pic;
     u32 slave = (port >= 0xa0) ? 1 : 0;
     u32 cmd_port = slave ? 0xa0 : 0x20;
     u32 data_port = slave ? 0xa1 : 0x21;
     /* 初始化序列期间，数据口上的写是 ICW2/ICW3/ICW4，不是 IMR */
-    if (port == data_port && p->init_state[slave] != 0) {
-        if (p->init_state[slave] == 1) { p->icw2[slave] = v; p->init_state[slave] = 2; return; }
-        if (p->init_state[slave] == 2) { p->icw3[slave] = v; p->init_state[slave] = 3; return; }
-        p->icw4[slave] = v;
-        p->init_state[slave] = 0;
+    if (port == data_port && g_m.pic.init_state[slave] != 0) {
+        if (g_m.pic.init_state[slave] == 1) { g_m.pic.icw2[slave] = v; g_m.pic.init_state[slave] = 2; return; }
+        if (g_m.pic.init_state[slave] == 2) { g_m.pic.icw3[slave] = v; g_m.pic.init_state[slave] = 3; return; }
+        g_m.pic.icw4[slave] = v;
+        g_m.pic.init_state[slave] = 0;
         return;
     }
-    if (port == data_port) { p->imr[slave] = v; return; }
+    if (port == data_port) { g_pic_imr[slave] = v; return; }
     if (port != cmd_port) return;
 
     if (v & 0x10) {                    /* ICW1 */
-        p->icw1 = v;
-        p->init_state[slave] = ((v & 1) != 0) ? 2 : 3;   /* 是否需要 ICW4 */
-        p->icw4[slave] = 0;
-        if (v & 1) p->init_state[slave] = 1;
-        p->imr[slave] = 0xff;
-        p->irr[slave] = 0;
-        p->isr[slave] = 0;
-        p->icw2[slave] = slave ? 0x28 : 0x20;
+        g_m.pic.icw1 = v;
+        g_m.pic.init_state[slave] = ((v & 1) != 0) ? 2 : 3;   /* 是否需要 ICW4 */
+        g_m.pic.icw4[slave] = 0;
+        if (v & 1) g_m.pic.init_state[slave] = 1;
+        g_pic_imr[slave] = 0xff;
+        g_pic_irr[slave] = 0;
+        g_pic_isr[slave] = 0;
+        g_m.pic.icw2[slave] = slave ? 0x28 : 0x20;
         return;
     }
-    if (v & 0x08) { p->read_isr = (v & 2) ? 1 : 0; return; }   /* OCW3 */
+    if (v & 0x08) { g_m.pic.read_isr = (v & 2) ? 1 : 0; return; }   /* OCW3 */
     if (v & 0x20) {                                            /* EOI */
         u32 i = 0;
         u8 b = 0;
-        if (v & 0x40) { p->isr[0] = 0; p->isr[1] = 0; return; }
+        if (v & 0x40) { g_pic_isr[0] = 0; g_pic_isr[1] = 0; return; }
         for (i = 0; i < 8; i++) {
             b = (u8)(1 << i);
-            if (p->isr[1] & b) { p->isr[1] &= (u8)~b; return; }
-            if (p->isr[0] & b) { p->isr[0] &= (u8)~b; return; }
+            if (g_pic_isr[1] & b) { g_pic_isr[1] = (u8)(g_pic_isr[1] & (u8)~b); return; }
+            if (g_pic_isr[0] & b) { g_pic_isr[0] = (u8)(g_pic_isr[0] & (u8)~b); return; }
         }
     }
 }
@@ -153,43 +164,41 @@ static void pic_write(u32 port, u8 v)
 
 static u8 pit_read(u32 port)
 {
-    struct PitState *p = &g_m.pit;
     u32 ch = port - 0x40;
     if (ch > 2) return 0xff;
-    if (p->rw_phase[ch] == 2) {
-        p->rw_phase[ch] = 1;
-        return (u8)(p->count[ch] >> 8);
+    if (g_m.pit.rw_phase[ch] == 2) {
+        g_m.pit.rw_phase[ch] = 1;
+        return (u8)(g_m.pit.count[ch] >> 8);
     }
-    if (p->access[ch] == 3)
-        p->rw_phase[ch] = 2;
-    return (u8)p->count[ch];
+    if (g_m.pit.access[ch] == 3)
+        g_m.pit.rw_phase[ch] = 2;
+    return (u8)g_m.pit.count[ch];
 }
 
 static void pit_write(u32 port, u8 v)
 {
-    struct PitState *p = &g_m.pit;
     if (port == 0x43) {
         u32 ch = (u32)(v >> 6);
         if (ch == 3) return;
-        p->access[ch] = (u8)((v >> 4) & 3);
-        p->mode[ch] = (u8)((v >> 1) & 7);
-        p->rw_phase[ch] = 0;
+        g_m.pit.access[ch] = (u8)((v >> 4) & 3);
+        g_m.pit.mode[ch] = (u8)((v >> 1) & 7);
+        g_m.pit.rw_phase[ch] = 0;
         return;
     }
     {
         u32 ch = port - 0x40;
         u32 hi = 0;
         if (ch > 2) return;
-        if (p->access[ch] == 1) { p->reload[ch] = v; return; }
-        if (p->access[ch] == 2) { p->reload[ch] = (u32)v << 8; return; }
-        hi = (p->rw_phase[ch] == 1) ? 1 : 0;
+        if (g_m.pit.access[ch] == 1) { g_m.pit.reload[ch] = v; return; }
+        if (g_m.pit.access[ch] == 2) { g_m.pit.reload[ch] = (u32)v << 8; return; }
+        hi = (g_m.pit.rw_phase[ch] == 1) ? 1 : 0;
         if (hi) {
-            p->reload[ch] = (p->reload[ch] & 0xff) | ((u32)v << 8);
-            p->count[ch] = p->reload[ch];
-            p->rw_phase[ch] = 0;
+            g_m.pit.reload[ch] = (g_m.pit.reload[ch] & 0xff) | ((u32)v << 8);
+            g_m.pit.count[ch] = g_m.pit.reload[ch];
+            g_m.pit.rw_phase[ch] = 0;
         } else {
-            p->reload[ch] = v;
-            p->rw_phase[ch] = 1;
+            g_m.pit.reload[ch] = v;
+            g_m.pit.rw_phase[ch] = 1;
         }
     }
 }
@@ -346,71 +355,81 @@ void mmio_w(u64 addr, u32 size, u64 val)
 
 void dev_init(void)
 {
-    struct Machine *m = &g_m;
-    struct SerialState *s = &m->serial;
+    struct SerialState *s = &g_m.serial;
     u32 i = 0;
     s->lcr = 0x03;
     s->lsr = 0x60;
     s->msr = 0xb0;
     s->iir = 1;
-    m->pic.icw2[0] = 0x20;
-    m->pic.icw2[1] = 0x28;
-    m->pic.imr[0] = 0xff;
-    m->pic.imr[1] = 0xff;
-    m->lapic_svr = 0x000001ff;
-    m->lapic_lvr = 0x00050014;
+    g_m.pic.icw2[0] = 0x20;
+    g_m.pic.icw2[1] = 0x28;
+    g_pic_imr[0] = 0xff;
+    g_pic_imr[1] = 0xff;
+    g_m.lapic_svr = 0x000001ff;
+    g_m.lapic_lvr = 0x00050014;
     for (i = 0; i < 3; i++) {
-        m->pit.access[i] = 3;
-        m->pit.mode[i] = 3;
+        g_m.pit.access[i] = 3;
+        g_m.pit.mode[i] = 3;
     }
-    m->pit.reload[0] = 11932;
-    m->pit.count[0] = 11932;
-    m->pci.config[0] = 0x86;             /* vendor 0x8086 */
-    m->pci.config[1] = 0x80;
-    m->pci.config[2] = 0x37;             /* device 0x1237 */
-    m->pci.config[3] = 0x12;
-    m->pci.config[4] = 0x07;             /* COMMAND */
-    m->pci.config[6] = 0x10;
-    m->pci.config[8] = 0x00;             /* class 0x060000 */
-    m->pci.config[9] = 0x00;
-    m->pci.config[10] = 0x00;
-    m->pci.config[12] = 0x00;            /* header type */
-    m->pci.config[15] = 0x00;
+    g_m.pit.reload[0] = 11932;
+    g_m.pit.count[0] = 11932;
+    g_m.pci.config[0] = 0x86;             /* vendor 0x8086 */
+    g_m.pci.config[1] = 0x80;
+    g_m.pci.config[2] = 0x37;             /* device 0x1237 */
+    g_m.pci.config[3] = 0x12;
+    g_m.pci.config[4] = 0x07;             /* COMMAND */
+    g_m.pci.config[6] = 0x10;
+    g_m.pci.config[8] = 0x00;             /* class 0x060000 */
+    g_m.pci.config[9] = 0x00;
+    g_m.pci.config[10] = 0x00;
+    g_m.pci.config[12] = 0x00;            /* header type */
+    g_m.pci.config[15] = 0x00;
     g_virtio_net_regs[0] = 0x74726976;  /* 'virt' */
     g_c6blk_regs[0] = 0x74726976;
 }
 
 /* 每个 run slice 末尾调用：推进 PIT，投递最高优先级的未屏蔽中断 */
+u64 pic_state_pack(void)
+{
+    u64 v = 0;
+    v |= (u64)(g_pic_irr[0] & 0xff);
+    v |= (u64)(g_pic_isr[0] & 0xff) << 8;
+    v |= (u64)(g_pic_imr[0] & 0xff) << 16;
+    v |= (u64)(g_pic_irr[1] & 0xff) << 24;
+    v |= (u64)(g_pic_isr[1] & 0xff) << 32;
+    v |= (u64)(g_pic_imr[1] & 0xff) << 40;
+    return v;
+}
+
 void dev_tick(void)
 {
-    struct Machine *m = &g_m;
-        u64 delta = m->tsc - m->last_pit_tsc;
+        u64 delta = g_m.tsc - g_m.last_pit_tsc;
     u32 i = 0;
     u8 irq = 0;
     u8 found = 0;
 
     if (delta > 0) {
         /* mode 2 = 频率发生器，mode 3 = 方波，两者都是周期性中断 */
-        if (m->pit.reload[0] > 0 && (m->pit.mode[0] == 2 || m->pit.mode[0] == 3)) {
+        if (g_m.pit.reload[0] > 0 && (g_m.pit.mode[0] == 2 || g_m.pit.mode[0] == 3)) {
             u64 sub = delta;
             if (sub > 0xffffffffu) sub = 0xffffffffu;
-            if (m->pit.count[0] > sub)
-                m->pit.count[0] -= (u32)sub;
+            if (g_m.pit.count[0] > sub)
+                g_m.pit.count[0] -= (u32)sub;
             else {
-                m->pit.count[0] = m->pit.reload[0];
-                pic_raise(m, 0);
+                g_m.pit.count[0] = g_m.pit.reload[0];
+                pic_raise(&g_m, 0);
             }
         }
-        m->last_pit_tsc = m->tsc;
+        g_m.last_pit_tsc = g_m.tsc;
     }
 
-    if (!(m->cpu.flags & RF_IF) || m->cpu.exc_pending)
+    if (!(g_m.cpu.flags & RF_IF) || g_m.cpu.exc_pending)
         return;
 
     /* 主片：最低优先级的未屏蔽、未在服务中的请求 */
     {
-        u8 pm = (u8)(g_m.pic.irr[0] & ~g_m.pic.isr[0] & ~g_m.pic.imr[0]);
-        u8 ps = (u8)(g_m.pic.irr[1] & ~g_m.pic.isr[1] & ~g_m.pic.imr[1]);
+        u8 pm = (u8)(g_pic_irr[0] & ~g_pic_isr[0] & ~g_pic_imr[0]);
+        u8 ps = (u8)(g_pic_irr[1] & ~g_pic_isr[1] & ~g_pic_imr[1]);
         u32 vec = 0;
         u32 deliver = 0;
         u32 b = 0;
@@ -420,8 +439,8 @@ void dev_tick(void)
                 if (pm & (1u << b)) break;
             }
             if (b != 2) {
-                g_m.pic.irr[0] &= (u8)~(1u << b);
-                g_m.pic.isr[0] |= (u8)(1u << b);
+                { u8 t2 = g_pic_irr[0]; t2 = (u8)(t2 & (u8)~(1u << b)); g_pic_irr[0] = t2; }
+                { u8 t3 = g_pic_isr[0]; t3 = (u8)(t3 | (u8)(1u << b)); g_pic_isr[0] = t3; }
                 vec = g_m.pic.icw2[0] + b;
                 deliver = 1;
             } else if (ps != 0) {
@@ -429,10 +448,10 @@ void dev_tick(void)
                     if (ps & (1u << c)) break;
                 }
                 /* 级联：主片 IRQ2 进入服务，从片对应位进入服务 */
-                g_m.pic.irr[0] &= (u8)~4;
-                g_m.pic.isr[0] |= 4;
-                g_m.pic.irr[1] &= (u8)~(1u << c);
-                g_m.pic.isr[1] |= (u8)(1u << c);
+                { u8 t4 = g_pic_irr[0]; t4 = (u8)(t4 & (u8)~4); g_pic_irr[0] = t4; }
+                { u8 t5 = g_pic_isr[0]; t5 = (u8)(t5 | 4); g_pic_isr[0] = t5; }
+                { u8 t6 = g_pic_irr[1]; t6 = (u8)(t6 & (u8)~(1u << c)); g_pic_irr[1] = t6; }
+                { u8 t7 = g_pic_isr[1]; t7 = (u8)(t7 | (u8)(1u << c)); g_pic_isr[1] = t7; }
                 vec = g_m.pic.icw2[1] + c;
                 deliver = 1;
             }
@@ -441,6 +460,6 @@ void dev_tick(void)
         (void)irq;
         (void)found;
         if (deliver)
-            raise_irq(&m->cpu, vec);
+            raise_irq(&g_m.cpu, vec);
     }
 }

@@ -123,6 +123,11 @@ u64 sim_cpu_reg(int i)
     return g_m.cpu.r[i];
 }
 
+u64 sim_pic_state(void)
+{
+    return pic_state_pack() | ((u64)(g_m.cpu.exc_pending & 0xff) << 48);
+}
+
 u32 sim_ram_byte(u32 pa)
 {
     if (pa >= (u32)RAM_SIZE) return 0;

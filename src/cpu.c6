@@ -2316,5 +2316,17 @@ void cpu_init(struct CPUState *c)
 }
 
 /* 兼容别名：头文件同时暴露普通函数与 c6 方法名 */
+/* 跨 TU 读 g_m.cpu.flags / exc_pending 在 wasm 后端上会读到错误的偏移；
+ * 这两个访问器放在 cpu.c6 内部（写 flags 的同一 TU），供 dev/machine 调用。 */
+int cpu_if_enabled(void)
+{
+    return (g_m.cpu.flags & RF_IF) != 0;
+}
+
+int cpu_exc_pending(void)
+{
+    return g_m.cpu.exc_pending != 0;
+}
+
 int cpu_step(struct CPUState *c) { return step(c); }
 void deliver(struct CPUState *c) { cpu_deliver(c); }
