@@ -1123,3 +1123,21 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     标准固件 26 亿条时串口上出现 **`(none) login: `**（重复是因为没喂输入，
     login 读到 EOF 就退出被 respawn，属正常）。
     回归验证：`./build.sh test` 五项全过、`difftest 1236/1236`。
+
+78. **修复后 native 登录验收重新 PASS（当前构建）**。
+    `SIM=build/sim TIMEOUT=4200 python3 tools/boot_login.py` →
+    ```
+    [boot_login] saw login: sent 'root'
+    [boot_login] shell prompt seen, sent 'uname -m'
+    PASS: Alpine booted to login and ran 'uname -m'
+    ```
+    `build/login.log` 里对应：
+    ```
+    (none) login: root
+    Welcome to Alpine!
+    login[444]: root login on 'ttyS0'
+    (none):~# uname -m; echo MARK-OK
+    x86_64
+    MARK-OK
+    ```
+    同时 `./build.sh test` 五项全过、`difftest 1236/1236`。
