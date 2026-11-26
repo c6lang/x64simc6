@@ -1,4 +1,7 @@
 /* dev.c6 —— 最小设备模型：16550A / 8259A / 8254 / CMOS / PCI / LAPIC */
+#if !defined(C6_WASM)
+#include <stdio.h>
+#endif
 #include "c6sim.h"
 
 /* ---------------- 串口环形缓冲 ---------------- */

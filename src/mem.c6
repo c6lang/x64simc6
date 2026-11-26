@@ -1,21 +1,22 @@
 /* mem.c6 —— 客户机物理内存、MMIO 分派与 4 级分页 */
 #if !defined(C6_WASM)
 #include <stdio.h>
+#include <unistd.h>
 #endif
 #include "c6sim.h"
 
 #define TLB_BITS 13
-#define TLB_SIZE (1 << TLB_BITS)
+#define TLB_SIZE 8192
 #define TLB_MASK (TLB_SIZE - 1)
 
 static u64 tlb_tag[TLB_SIZE];
 static u64 tlb_val[TLB_SIZE];
 
 /* tlb_val 位：bit0=P, bit1=W, bit2=U, bit3=X，高位是 4KiB 对齐的物理页基址 */
-#define TV_P ((u64)1 << 0)
-#define TV_W ((u64)1 << 1)
-#define TV_U ((u64)1 << 2)
-#define TV_X ((u64)1 << 3)
+#define TV_P 0x1ull
+#define TV_W 0x2ull
+#define TV_U 0x4ull
+#define TV_X 0x8ull
 
 void mem_tlb_flush(void)
 {
@@ -215,6 +216,74 @@ static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
     raise_exception(&g_m.cpu, EXC_PF, 1, ec);
 }
 
+
+/* ---- 展开式翻译快路径 ----
+ * c6c 不做内联，以前「取指/读写」每次都要经过
+ *   mem_fetch8 -> pg_check -> pg_fast -> phys_r*
+ * 四层真实函数调用。这里把与 mem_translate() **严格同序**的快路径
+ * （未开分页 -> direct map -> 高半区两窗口 -> TLB）和一个 RAM 直读
+ * 合成宏展开，只有 MMIO/缺页/调试对拍才落回函数调用。
+ * 权限语义、缺页时机、g_cc/g_no_fetch/g_no_data 开关都与慢路径一致。 */
+#define DM_BASE 0xffff888000000000ull
+
+#define TR_PA(va, wr, user, no, outpa) do { \
+    u64 _v = (u64)(va); \
+    u64 _pa = 0; \
+    if ((g_m.cpu.cr[0] & CR0_PG) != 0) { \
+        /* 三个互不重叠的线性窗口按命中率排序：direct map、内核高半区两段 */ \
+        _pa = _v - DM_BASE; \
+        if (_pa >= RAM_SIZE) { \
+            _pa = _v - 0xffffffff80000000ull; \
+            if (_pa >= RAM_SIZE) { \
+                _pa = _v - 0xffffffff00000000ull; \
+                if (_pa >= RAM_SIZE) { \
+                    _pa = PG_FAST_MISS; \
+                    if (no) { \
+                        /* 调试开关：跳过 TLB 快路径 */ \
+                    } else if (g_cc) { \
+                        _pa = pg_check(_v, (wr), (user), pg_fast(_v, (wr), (user))); \
+                    } else { \
+                        u64 _vpn = _v >> 12; \
+                        u32 _ti = (u32)(_vpn & TLB_MASK); \
+                        if (tlb_tag[_ti] == _vpn) { \
+                            u64 _tv = tlb_val[_ti]; \
+                            u32 _fl = (u32)(_tv & 15); \
+                            if ((_fl & TV_P) && (!(wr) || (_fl & TV_W)) && \
+                                (!((((g_m.cpu.sel[1] & 3) != 0) && !g_m.emu_sup) || (user) == 1) || \
+                                 (_fl & TV_U)) && \
+                                ((user) != 2 || (_fl & TV_X))) \
+                                _pa = (_tv & ~((u64)15)) | (_v & 0xfff); \
+                        } \
+                    } \
+                    if (_pa == PG_FAST_MISS) \
+                        _pa = mem_translate(_v, (wr), (user), 0); \
+                } \
+            } \
+        } \
+    } else { \
+        _pa = _v; \
+    } \
+    (outpa) = _pa; \
+} while (0)
+
+/* RAM 直读/直写（pa 已确定且不越界）：一步到 g_m.ram，不再调 phys_* */
+#define RAM_R8(pa)   ((u8)g_m.ram[(u32)(pa)])
+#define RAM_R16(pa)  ((u16)((u32)g_m.ram[(u32)(pa)] | ((u32)g_m.ram[(u32)(pa)+1] << 8)))
+#define RAM_R32(pa)  ((u32)((u32)g_m.ram[(u32)(pa)] | ((u32)g_m.ram[(u32)(pa)+1] << 8) | \
+                      ((u32)g_m.ram[(u32)(pa)+2] << 16) | ((u32)g_m.ram[(u32)(pa)+3] << 24)))
+#define RAM_R64(pa)  ((u64)RAM_R32(pa) | ((u64)RAM_R32((pa)+4) << 32))
+#define RAM_W16(pa, v) do { \
+    g_m.ram[(u32)(pa)] = (u8)(v); \
+    g_m.ram[(u32)(pa)+1] = (u8)((u64)(v) >> 8); \
+} while (0)
+#define RAM_W32(pa, v) do { \
+    g_m.ram[(u32)(pa)] = (u8)(v); \
+    g_m.ram[(u32)(pa)+1] = (u8)((u64)(v) >> 8); \
+    g_m.ram[(u32)(pa)+2] = (u8)((u64)(v) >> 16); \
+    g_m.ram[(u32)(pa)+3] = (u8)((u64)(v) >> 24); \
+} while (0)
+#define RAM_W64(pa, v) do { RAM_W32((pa), (u64)(v)); RAM_W32((pa)+4, (u64)(v) >> 32); } while (0)
+
 /* user: 0=内核数据, 1=用户数据, 2=取指 */
 u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
 {
@@ -392,43 +461,37 @@ static u64 pg_check(u64 va, u32 wr, u32 user, u64 pa_fast)
 
 u8 mem_fetch8(u64 a)
 {
-    u64 pa = PG_FAST_MISS;
-    if (!g_no_fetch)
-        pa = pg_check(a, 0, 2, pg_fast(a, 0, 2));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 0, 2, 0);
+    u64 pa = 0;
+    TR_PA(a, 0, 2, g_no_fetch, pa);
+    if (pa < RAM_SIZE)
+        return RAM_R8(pa);
     return phys_r8(pa);
 }
 
 u8 mem_r8(u64 a)
 {
-    u64 pa = PG_FAST_MISS;
-    if (!g_no_data)
-        pa = pg_check(a, 0, 0, pg_fast(a, 0, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 0, 0, 0);
+    u64 pa = 0;
+    TR_PA(a, 0, 0, g_no_data, pa);
+    if (pa < RAM_SIZE)
+        return RAM_R8(pa);
     return phys_r8(pa);
 }
 
 u16 mem_r16(u64 a)
 {
-    u64 pa = PG_FAST_MISS;
-    if (!g_no_data)
-        pa = pg_check(a, 0, 0, pg_fast(a, 0, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 0, 0, 0);
+    u64 pa = 0;
+    TR_PA(a, 0, 0, g_no_data, pa);
     if ((pa & 0xfff) > 0xffe)
         return (u16)mem_r8(a) | ((u16)mem_r8(a + 1) << 8);
+    if (pa < RAM_SIZE - 1)
+        return RAM_R16(pa);
     return phys_r16(pa);
 }
 
 u32 mem_r32(u64 a)
 {
-    u64 pa = PG_FAST_MISS;
-    if (!g_no_data)
-        pa = pg_check(a, 0, 0, pg_fast(a, 0, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 0, 0, 0);
+    u64 pa = 0;
+    TR_PA(a, 0, 0, g_no_data, pa);
     /* 跨页访问必须按字节绕行：4 个字节可能分属两个物理页 */
     if ((pa & 0xfff) > 0xffc) {
         u32 v = 0;
@@ -437,43 +500,46 @@ u32 mem_r32(u64 a)
             v |= (u32)mem_r8(a + i) << (i * 8);
         return v;
     }
+    if (pa < RAM_SIZE - 3)
+        return RAM_R32(pa);
     return phys_r32(pa);
 }
 
 u64 mem_r64(u64 a)
 {
-    u64 pa = PG_FAST_MISS;
-    if (!g_no_data)
-        pa = pg_check(a, 0, 0, pg_fast(a, 0, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 0, 0, 0);
+    u64 pa = 0;
+    TR_PA(a, 0, 0, g_no_data, pa);
     if ((pa & 0xfffull) > 0xff8ull)
         return (u64)mem_r32(a) | ((u64)mem_r32(a + 4) << 32);
+    if (pa < RAM_SIZE - 7)
+        return RAM_R64(pa);
     return phys_r64(pa);
 }
 
 void mem_w8(u64 a, u8 v)
 {
-    u64 pa = PG_FAST_MISS;
+    u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
-    if (!g_no_data)
-        pa = pg_check(a, 1, 0, pg_fast(a, 1, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 1, 0, 0);
+    TR_PA(a, 1, 0, g_no_data, pa);
+    if (pa < RAM_SIZE) {
+        g_m.ram[(u32)pa] = v;
+        return;
+    }
     phys_w8(pa, v);
 }
 
 void mem_w16(u64 a, u16 v)
 {
-    u64 pa = PG_FAST_MISS;
+    u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
-    if (!g_no_data)
-        pa = pg_check(a, 1, 0, pg_fast(a, 1, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 1, 0, 0);
+    TR_PA(a, 1, 0, g_no_data, pa);
     if ((pa & 0xfff) > 0xffe) {
         mem_w8(a, (u8)v);
         mem_w8(a + 1, (u8)(v >> 8));
+        return;
+    }
+    if (pa < RAM_SIZE - 1) {
+        RAM_W16(pa, v);
         return;
     }
     phys_w16(pa, v);
@@ -481,16 +547,17 @@ void mem_w16(u64 a, u16 v)
 
 void mem_w32(u64 a, u32 v)
 {
-    u64 pa = PG_FAST_MISS;
+    u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
-    if (!g_no_data)
-        pa = pg_check(a, 1, 0, pg_fast(a, 1, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 1, 0, 0);
+    TR_PA(a, 1, 0, g_no_data, pa);
     if ((pa & 0xfff) > 0xffc) {
         u32 i = 0;
         for (i = 0; i < 4; i++)
             mem_w8(a + i, (u8)(v >> (i * 8)));
+        return;
+    }
+    if (pa < RAM_SIZE - 3) {
+        RAM_W32(pa, v);
         return;
     }
     phys_w32(pa, v);
@@ -498,15 +565,16 @@ void mem_w32(u64 a, u32 v)
 
 void mem_w64(u64 a, u64 v)
 {
-    u64 pa = PG_FAST_MISS;
+    u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
-    if (!g_no_data)
-        pa = pg_check(a, 1, 0, pg_fast(a, 1, 0));
-    if (pa == PG_FAST_MISS)
-        pa = mem_translate(a, 1, 0, 0);
+    TR_PA(a, 1, 0, g_no_data, pa);
     if ((pa & 0xfffull) > 0xff8ull) {
         mem_w32(a, (u32)v);
         mem_w32(a + 4, (u32)(v >> 32));
+        return;
+    }
+    if (pa < RAM_SIZE - 7) {
+        RAM_W64(pa, v);
         return;
     }
     phys_w64(pa, v);

@@ -111,3 +111,26 @@
 - [x] 浏览器验收 `MARK-OK`（1062s / 874M 条 / 658B 串口）
 - [x] 文档 §82 更正 + 新增 §83（两条「快路径必须与慢路径等价」的坑）
 - [x] 发布 v1.0.2（tag v1.0.2 + src/dist/firmware 三件产物 + SHA256SUMS，源码包独立构建 `./build.sh test` 六项全过）
+
+## 性能优化（v1.1）
+
+- [x] 剖析结论：v1.0.2 之后瓶颈在 c6c 代码生成（不做内联/寄存器分配，
+      每指令几千条宿主指令），算法层已无大项
+- [x] native 默认构建改走 `c6c --emit-ctu` + 系统 `cc -O2`（`build.sh`
+      的 `native_fast()`；`C6_PURE=1` 保留 c6c 自举）
+- [x] `ctu_fixup()`：修 `(FILE *)0/1/2` 魔法指针、`<poll.h>`/`struct
+      timespec` 冲突；wasm 侧 `<stdio.h>` 一律 `#if !defined(C6_WASM)`
+- [x] `machine_reset()` 首次调用跳过 128MiB 清零（后续 reboot 4 字节块清）
+- [x] 固件加载改 4 字节块直接拷进 `g_m.ram`（原逐字节 `mem_w8`）
+- [x] `mem_fetch8/mem_r*/mem_w*` 的 `pg_check → pg_fast → phys_*` 展开成
+      `TR_PA` + `RAM_R*` / `RAM_W*` 宏（与 `mem_translate()` 同序）
+- [x] `PREFIX_TAB` / `PARITY_TAB` / `SZ_MASK_TAB` / `SIGN_BIT_TAB` 查表，
+      常量宏字面量化（含「1/2/4 以外返回全 1/bit63」的旧语义坑）
+- [x] `main.c6` 去掉 defer/errdefer/try/catch/f-string（可 `-c` / 可 `--emit-ctu`）
+- [x] 取指窗口实验（每指令一次翻译 + 16 字节缓冲）：jmp 循环 60.7G → 88.0G，
+      未采用，结论记入 DESIGN §84
+- [x] difftest 1236/1236（自举 + 默认两种构建）
+- [x] `./build.sh test` 全过（payload / 单元 / CPL3 / pcache / wasm 冒烟）
+- [x] 900M 引导：两种构建 `ser_out=309 irq4=181` 且逐字节一致
+- [x] `tools/boot_login.py`：默认构建 PASS（约 56s 到 900M）、自举构建 PASS
+- [x] 文档：README 性能表、DESIGN §84、RELEASE v1.1

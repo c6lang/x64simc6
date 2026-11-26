@@ -30,38 +30,38 @@ typedef long long i64;
 #define C6BLK_PA       0xfeb01000u
 
 /* RFLAGS */
-#define RF_CF   ((u64)1 << 0)
-#define RF_PF   ((u64)1 << 2)
-#define RF_AF   ((u64)1 << 4)
-#define RF_ZF   ((u64)1 << 6)
-#define RF_SF   ((u64)1 << 7)
-#define RF_TF   ((u64)1 << 8)
-#define RF_IF   ((u64)1 << 9)
-#define RF_DF   ((u64)1 << 10)
-#define RF_OF   ((u64)1 << 11)
+#define RF_CF 0x1ull
+#define RF_PF 0x4ull
+#define RF_AF 0x10ull
+#define RF_ZF 0x40ull
+#define RF_SF 0x80ull
+#define RF_TF 0x100ull
+#define RF_IF 0x200ull
+#define RF_DF 0x400ull
+#define RF_OF 0x800ull
 #define RF_IOPL ((u64)3 << 12)
-#define RF_NT   ((u64)1 << 14)
-#define RF_RF   ((u64)1 << 16)
-#define RF_VM   ((u64)1 << 17)
-#define RF_AC   ((u64)1 << 18)
-#define RF_ID   ((u64)1 << 21)
+#define RF_NT 0x4000ull
+#define RF_RF 0x10000ull
+#define RF_VM 0x20000ull
+#define RF_AC 0x40000ull
+#define RF_ID 0x200000ull
 
 /* CR0 / CR4 / EFER */
-#define CR0_PE ((u64)1 << 0)
-#define CR0_MP ((u64)1 << 1)
-#define CR0_EM ((u64)1 << 2)
-#define CR0_TS ((u64)1 << 3)
-#define CR0_WP ((u64)1 << 16)
-#define CR0_PG ((u64)1 << 31)
-#define CR4_PAE ((u64)1 << 5)
-#define CR4_MCE ((u64)1 << 6)
-#define CR4_PSE ((u64)1 << 4)
-#define CR4_OSFXSR ((u64)1 << 9)
-#define CR4_OSXSAVE ((u64)1 << 18)
-#define EFER_SCE ((u64)1 << 0)
-#define EFER_LME ((u64)1 << 8)
-#define EFER_LMA ((u64)1 << 10)
-#define EFER_NXE ((u64)1 << 11)
+#define CR0_PE 0x1ull
+#define CR0_MP 0x2ull
+#define CR0_EM 0x4ull
+#define CR0_TS 0x8ull
+#define CR0_WP 0x10000ull
+#define CR0_PG 0x80000000ull
+#define CR4_PAE 0x20ull
+#define CR4_MCE 0x40ull
+#define CR4_PSE 0x10ull
+#define CR4_OSFXSR 0x200ull
+#define CR4_OSXSAVE 0x40000ull
+#define EFER_SCE 0x1ull
+#define EFER_LME 0x100ull
+#define EFER_LMA 0x400ull
+#define EFER_NXE 0x800ull
 
 /* 异常向量 */
 #define EXC_DE 0
@@ -254,6 +254,13 @@ int step(struct CPUState *self);
 void deliver(struct CPUState *self);
 
 /* dev.c6 */
+extern u64 g_ser_out_bytes;
+extern u64 g_irq4_raises;
+extern u32 g_ser_rd[8];
+extern u32 g_ser_wr[8];
+extern u32 g_ser_last_ier;
+extern u32 g_ser_last_mcr;
+extern u32 g_ser_last_lsr;
 u8 io_r8(u32 port);
 u16 io_r16(u32 port);
 u32 io_r32(u32 port);

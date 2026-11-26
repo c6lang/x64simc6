@@ -1,62 +1,61 @@
-/* main.c6 —— native CLI（这里集中使用 c6 的 defer / errdefer / err/try/catch /
- * f-string / 枚举命名空间 / 方法；wasm 构建不含本文件） */
+/* main.c6 —— native CLI
+ * 注意：这里刻意只用最朴素的 C6 写法（不用 defer/errdefer/try/catch/f-string），
+ * 这样同一个文件既能被 c6c 直接编译，也能走 `c6c --emit-ctu` + 宿主 cc 的
+ * 快速构建路径（-O2 的寄存器分配对这种解释器循环有 ~10x 的差距）。 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <poll.h>
+/* 不用 <poll.h>：c6c 没有自带该头，会落到系统 glibc 头并把 struct timespec
+ * 等类型带进来，和 c6c 自带的 <sys/stat.h> 打架（--emit-ctu 路径会编不过）。
+ * 这里只用到 pollfd 和 poll()，手写声明即可。 */
+struct pollfd { int fd; short events; short revents; };
+extern int poll(struct pollfd *fds, unsigned long nfds, int timeout);
 #include <unistd.h>
+#include <fcntl.h>
 #include "c6sim.h"
 
-enum Err {
-    Err.IO = 1,
-    Err.BAD_FW = 2,
-    Err.BOOT = 3,
-    Err.USAGE = 4,
-};
-
-/* c6: 拿到资源就登记清理，错误路径单独回滚 */
-static int!error read_firmware(const char *path, u8 **out, u32 *len)
+/* 读固件到内存；失败返回非 0 并打印原因 */
+static int read_firmware(const char *path, u8 **out, u32 *len)
 {
     FILE *f = fopen(path, "rb");
-    if (!f)
-        return err(Err.IO, f"cannot open {path}");
-    defer fclose(f);
-
-    if (fseek(f, 0, SEEK_END) != 0)
-        return err(Err.IO, "seek failed");
-    long n = ftell(f);
-    if (n <= 0 || n > (64 << 20))
-        return err(Err.IO, f"bad firmware size {n}");
-    if (fseek(f, 0, SEEK_SET) != 0)
-        return err(Err.IO, "rewind failed");
-
-    u8 *buf = (u8 *)malloc((size_t)n);
-    if (!buf)
-        return err(Err.IO, "out of memory");
-    errdefer free(buf);
-
-    size_t got = fread(buf, 1, (size_t)n, f);
-    if (got != (size_t)n)
-        return err(Err.IO, "short read");
-
+    long n = 0;
+    u8 *buf = 0;
+    size_t got = 0;
+    if (!f) {
+        printf("load error: cannot open %s\n", path);
+        return 1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        printf("load error: seek failed\n");
+        return 1;
+    }
+    n = ftell(f);
+    if (n <= 0 || n > (64 << 20)) {
+        fclose(f);
+        printf("load error: bad firmware size %ld\n", n);
+        return 1;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        printf("load error: rewind failed\n");
+        return 1;
+    }
+    buf = (u8 *)malloc((size_t)n);
+    if (!buf) {
+        fclose(f);
+        printf("load error: out of memory\n");
+        return 1;
+    }
+    got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) {
+        free(buf);
+        printf("load error: short read\n");
+        return 1;
+    }
     *out = buf;
     *len = (u32)n;
-    return 0;
-}
-
-static int!error check(int rc, const char *what)
-{
-    if (rc != 0)
-        return err(Err.BAD_FW, f"{what} failed: rc={rc}");
-    return 0;
-}
-
-static int!error boot_all(u8 *fw, u32 len, const char *cmdline)
-{
-    try check(machine_load_firmware(fw, len), "load firmware");
-    if (cmdline != 0)
-        machine_set_cmdline(cmdline);
-    try check(machine_boot(), "boot kernel");
     return 0;
 }
 
@@ -85,10 +84,12 @@ static int run_blob(const char *path, u64 limit)
         printf("cannot open %s\n", path);
         return 1;
     }
-    defer fclose(f);
-    if (fread(hdr, 1, 160, f) != 160)
+    if (fread(hdr, 1, 160, f) != 160) {
+        fclose(f);
         return 1;
+    }
     n = (u32)fread(code, 1, sizeof(code), f);
+    fclose(f);
     q = (u64 *)hdr;
     machine_reset_noram();
     /* 恒等映射 0..1GiB（2MiB 大页） */
@@ -205,7 +206,7 @@ int main(int argc, char **argv)
             blob = argv[++a];
         else if (argv[a][0] == '-') {
             printf("unknown option: %s\n", argv[a]);
-            return Err.USAGE;
+            return 4;
         } else
             path = argv[a];
     }
@@ -213,18 +214,14 @@ int main(int argc, char **argv)
         return run_blob(blob, 1000);
     if (path == 0) {
         printf("usage: %s [--cmdline=...] firmware.bin\n", argv[0]);
-        return Err.USAGE;
+        return 4;
     }
 
     {
-        int rc = read_firmware(path, &fw, &len) catch e {
-            printf("load error %d: %s\n", e.id, e.msg);
-            return 1;
-        };
+        int rc = read_firmware(path, &fw, &len);
         if (rc != 0 || fw == 0)
             return 1;
     }
-    defer free(fw);
 
     machine_init();
     if (ppt)
@@ -245,12 +242,17 @@ int main(int argc, char **argv)
             return 1;
         }
     } else {
-        int rc = boot_all(fw, len, cmdline) catch e {
-            printf("boot error %d: %s\n", e.id, e.msg);
+        int rc = machine_load_firmware(fw, len);
+        if (rc == 0) {
+            if (cmdline != 0)
+                machine_set_cmdline(cmdline);
+            rc = machine_boot();
+        }
+        if (rc != 0) {
+            printf("boot error: rc=%d\n", rc);
+            free(fw);
             return 1;
-        };
-        if (rc != 0)
-            return 1;
+        }
     }
 
     g_m.watch_fd = -1;
