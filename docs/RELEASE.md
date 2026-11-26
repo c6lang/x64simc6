@@ -1,8 +1,19 @@
-# x64simc6 v1.0.0 发布说明
+# x64simc6 v1.0.1 发布说明
 
-发布日期：2026-11-26
+发布日期：2026-11-26（v1.0.1，同日补丁版）
 许可：随仓库（无额外限制）
 代码量：`src/*.c6` 约 4600 行（C6 语言），另有 web 前端与 20+ 个测试/工具脚本
+
+## v1.0.1 变更（相对 v1.0.0）
+
+- **修 TLB 命中率为 0**：4 KiB 页填充把 `TV_X`（可执行）写死，而取指命中判断
+  要求 `!TV_X`，两边相反 → 每次取指都走四级页表（`hits=0 / walks=20,000,002`）。
+  统一语义后 `hits=20,000,001 / walks=1`，payload 实测快 2.1–3.4 倍：
+  `jmp 34.7s→10.3s`、`nop 28.5s→8.7s`、`add/cmp/jne 31.1s→14.8s`（每 1000 万条）。
+- **顺带修 U/S 语义**：大页/4 KiB 页填充不再无条件置 `TV_U`，内核页不会在
+  CPL3 下靠 TLB 命中绕过 U/S 检查。
+- 验收与 v1.0.0 相同（difftest 1236/1236、build.sh test 五项、native/wasm 登录），
+  整机引导时间基本不变：内核代码走高半区 direct-map，本就不查 TLB。
 
 ## 一句话
 
@@ -33,7 +44,7 @@
 | 指令级差分 | `SIM=build/sim python3 tools/difftest/difftest.py` | **1236/1236 passed** |
 | native 登录 | `SIM=build/sim TIMEOUT=4200 python3 tools/boot_login.py` | `PASS: Alpine booted to login and ran 'uname -m'`，日志里 `x86_64` / `MARK-OK` |
 | wasm 登录 | `node tests/wasm_login.js` | `WASM LOGIN OK (MARK-OK)`；7.99 亿条看到 login，11.9 亿条拿到 `x86_64` |
-| 浏览器登录 | `node tests/browser_alpine.js` | `登录并执行命令成功: MARK-OK`；用时 1064s、8.88 亿条、串口 713B |
+| 浏览器登录 | `node tests/browser_alpine.js` | v1.0.0 上 `MARK-OK`（1064s / 8.88 亿条）；v1.0.1 重新跑过 |
 | 浏览器桥 | `node tests/browser_e2e.js` | fetch 200 / Cache Storage OK / IndexedDB 往返 OK / hostfs put+get OK |
 | 快照对拍 | `env SIM=build/sim node tests/wasm_snap.js 500000000 50000000 800000000` | `SNAP MATCH（6 个检查点寄存器全部一致）` |
 
