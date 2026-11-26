@@ -11,6 +11,11 @@ u8 g_pic_imr[2] = {0, 0};
 u32 g_raise_cnt[2] = {0, 0};   /* 调试：pic_raise 的调用次数（主片/从片） */
 u32 g_tick_cnt = 0;
 u64 g_ser_out_bytes = 0;
+u32 g_ser_rd[8] = {0};
+u32 g_ser_wr[8] = {0};
+u32 g_ser_last_ier = 0;
+u32 g_ser_last_mcr = 0;
+u32 g_ser_last_lsr = 0;
 u64 g_irq4_raises = 0;            /* 调试：dev_tick 实际推进 PIT 的次数 */
 int serial_take_output(u8 *dst, int cap)
 {
@@ -42,6 +47,7 @@ void serial_feed(const u8 *src, int len)
 static u8 serial_read(u32 port)
 {
     u32 off = port & 7;
+    g_ser_rd[off & 7] = g_ser_rd[off & 7] + 1;
     if (g_m.serial.lcr & 0x80) {
         if (off == 0) return g_m.serial.dll;
         if (off == 1) return g_m.serial.dlm;
@@ -63,7 +69,7 @@ static u8 serial_read(u32 port)
     }
     if (off == 3) return g_m.serial.lcr;
     if (off == 4) return g_m.serial.mcr;
-    if (off == 5) return g_m.serial.lsr;
+    if (off == 5) { g_ser_last_lsr = g_m.serial.lsr; return g_m.serial.lsr; }
     if (off == 6) return g_m.serial.msr;
     return g_m.serial.fcr;
 }
@@ -71,6 +77,9 @@ static u8 serial_read(u32 port)
 static void serial_write(u32 port, u8 v)
 {
     u32 off = port & 7;
+    g_ser_wr[off & 7] = g_ser_wr[off & 7] + 1;
+    if (off == 1) g_ser_last_ier = v;
+    if (off == 4) g_ser_last_mcr = v;
     if (g_m.serial.lcr & 0x80) {
         if (off == 0) { g_m.serial.dll = v; return; }
         if (off == 1) { g_m.serial.dlm = v; return; }
@@ -84,7 +93,19 @@ static void serial_write(u32 port, u8 v)
         if (g_m.serial.ier & 2)
             pic_raise(&g_m, 4);
         break;
-    case 1: g_m.serial.ier = v; break;
+    case 1:
+        g_m.serial.ier = v;
+        /*
+         * 16550 的 THRE/RX 中断是**电平**语义：驱动在 start_tx 里只把
+         * UART_IER_THRI 置上就返回，真正把字节塞进 THR 是中断处理里做的。
+         * 如果这里不主动再拉一次 IRQ4，第一次 tty 写就会永久卡住
+         * （表现为用户态 write() 不返回、串口一个字节都不出）。
+         */
+        if ((v & 2) && (g_m.serial.lsr & 0x20))
+            pic_raise(&g_m, 4);
+        if ((v & 1) && (g_m.serial.in_head != g_m.serial.in_tail))
+            pic_raise(&g_m, 4);
+        break;
     case 2: g_m.serial.fcr = v; break;
     case 3: g_m.serial.lcr = v; break;
     case 4: g_m.serial.mcr = v; break;

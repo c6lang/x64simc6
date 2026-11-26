@@ -1098,3 +1098,28 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     a. 给 `--sys` 加**返回值**打印，看 `mount`/`write` 是否返回、返回什么；
     b. 统计 8250 **所有寄存器**的读写次数（尤其 THR 之外的 `start_tx` 触发点）；
     c. 用 git 历史重建旧构建做二分（每次约 25 分钟）。
+
+77. **根因与修复：16550 的 THRE 是电平中断，写 IER 时必须重新拉 IRQ4**。
+    上一节的回归其实是**一直存在的建模缺陷**（11 个历史构建逐个并行验证，
+    含 login.log 时代的 `e2e2065`，全都失败，所以不是近期改动引入的）：
+    * 计数器证据（22 亿条）：`wr[1]=19`（IER 写了 19 次）、`ier=7`（RX+THRE+
+      line-status 全开）、`wr[0]=135`（THR 只在开机阶段写过），但 `irq4=0`。
+    * Linux 的 `serial8250_start_tx()` **只负责把 `UART_IER_THRI` 置上就返回**，
+      真正的字节搬运在 THRE 中断处理函数里做；8250 的 THRE/RX 都是**电平**
+      语义，使能后就该立刻再断言一次中断。
+    * 我们的模型只在「写 THR」时 `pic_raise(4)`，于是驱动使能 THRI 后再也
+      等不到中断 → 用户态第一次 `write()` 永久阻塞 → `/init` 卡死。
+    修复（`src/dev.c6` 的 `serial_write`，case 1）：
+    ```c
+    case 1:
+        g_m.serial.ier = v;
+        if ((v & 2) && (g_m.serial.lsr & 0x20)) pic_raise(&g_m, 4);   /* THRE */
+        if ((v & 1) && (g_m.serial.in_head != g_m.serial.in_tail)) pic_raise(&g_m, 4); /* RX */
+        break;
+    ```
+    `serial_feed()` 里本来就会在 `ier & 1` 时拉 IRQ4，保持一致。
+    验证：标记 `/init`（`echo INIT-START > /dev/console` 打头）在 17 亿条内
+    依次打出 `INIT-START` / `M-PROC` / `M-DEV`，`ser_out=322 irq4=194`；
+    标准固件 26 亿条时串口上出现 **`(none) login: `**（重复是因为没喂输入，
+    login 读到 EOF 就退出被 respawn，属正常）。
+    回归验证：`./build.sh test` 五项全过、`difftest 1236/1236`。

@@ -330,5 +330,11 @@ int main(int argc, char **argv)
            g_m.instructions, g_m.exit_code,
            (unsigned long long)g_ser_out_bytes,
            (unsigned long long)g_irq4_raises);
+    printf("[UART] rd=%u/%u/%u/%u/%u/%u/%u/%u wr=%u/%u/%u/%u/%u/%u/%u/%u ier=%x mcr=%x lsr=%x\n",
+           g_ser_rd[0], g_ser_rd[1], g_ser_rd[2], g_ser_rd[3],
+           g_ser_rd[4], g_ser_rd[5], g_ser_rd[6], g_ser_rd[7],
+           g_ser_wr[0], g_ser_wr[1], g_ser_wr[2], g_ser_wr[3],
+           g_ser_wr[4], g_ser_wr[5], g_ser_wr[6], g_ser_wr[7],
+           g_ser_last_ier, g_ser_last_mcr, g_ser_last_lsr);
     return g_m.exit_code & 0xff;
 }
