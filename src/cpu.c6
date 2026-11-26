@@ -905,6 +905,17 @@ static void shift_op(struct CPUState *c, int fn, u64 *v, u64 cnt, int s)
     c->flags = f | 2;
 }
 
+/* 快通道的收尾：必须复刻 step() 尾部的故障回滚。
+ * 快通道只可能改 RIP（不碰 RSP/RSI/RDI/RCX/标志），所以取指在页边界上
+ * 缺页时把 RIP 退回指令开头即可；漏掉这一步会让内核重试到错误的地址，
+ * 整机引导里表现为 init 起来后跳到野地址、kernel panic。 */
+static int fast_done(struct CPUState *c, u64 start)
+{
+    if (c->fault_abort)
+        c->rip = start;
+    return 0;
+}
+
 int step(struct CPUState *c)
 {
     u64 start = c->rip;
@@ -927,12 +938,122 @@ int step(struct CPUState *c)
         opsz = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
         addrsz = 8;
     }
+    if (!g_no_fast) {
+    /* ---- (a) 热指令快通道 ----
+     * 只覆盖「高频 + 不会缺页（因此不涉及故障回退）」的编码：
+     * nop、MOV r,r、Jcc rel8、JMP rel8/rel32。命中就在这里直接返回，
+     * 省掉后面的 ALU 判别和 55 个 case 的比较链；不命中则原样落回主分派。
+     * 语义完全复用主路径的 reg_read/reg_write/cond/sx，保证一致。 */
+    if (op == 0x90 && (rex & 1) == 0)
+        return fast_done(c, start);                                     /* nop (xchg eax,eax) */
+    if (op == 0x89 || op == 0x8b) {
+        u8 mrm = mem_fetch8(c->rip);
+        if ((mrm & 0xc0) == 0xc0) {                   /* mod=3，纯寄存器 */
+            u32 sz = (rex & 8) ? 8 : opsz;
+            u32 rr = ((mrm >> 3) & 7) | ((rex & 4) ? 8 : 0);
+            u32 rq = (mrm & 7) | ((rex & 1) ? 8 : 0);
+            u64 mv = 0;
+            c->rip = c->rip + 1;
+            if (op == 0x8b) {
+                mv = reg_read(c, rq, sz);
+                reg_write(c, rr, sz, mv);
+            } else {
+                mv = reg_read(c, rr, sz);
+                reg_write(c, rq, sz, mv);
+            }
+            return fast_done(c, start);
+        }
+    }
+    if (op >= 0x70 && op <= 0x7f) {                   /* Jcc rel8 */
+        u64 d = sx(fetch_n(c, 1), 8);
+        if (cond(c, op - 0x70))
+            c->rip = (u64)((i64)c->rip + (i64)d);
+        return fast_done(c, start);
+    }
+    if (op == 0xeb) {                                 /* JMP rel8 */
+        u64 d = sx(fetch_n(c, 1), 8);
+        c->rip = (u64)((i64)c->rip + (i64)d);
+        return fast_done(c, start);
+    }
+    if (op == 0xe9) {                                 /* JMP rel32 */
+        u64 d = sx(fetch_n(c, 4), 32);
+        c->rip = (u64)((i64)c->rip + (i64)d);
+        return fast_done(c, start);
+    }
+
+    }
     if (op == 0x0f) {
         u8 op2 = fetch8(c);
         struct Operand rm = {0};
         int s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
         u64 v = 0, a = 0, b = 0;
         switch (op2) {
+        case 0x1e:  /* endbr64/endbr32 等：NOP */
+            (void)fetch8(c);
+            break;
+        case 0xb6: case 0xb7: case 0xbe: case 0xbf: { /* movzx/movsx */
+            int from = (op2 == 0xb6 || op2 == 0xbe) ? 1 : 2;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            v = op_read(c, &rm, from);
+            if (op2 == 0xbe || op2 == 0xbf) v = sx(v, from * 8);
+            reg_write(c, rm.reg, s, v);
+            break;
+        }
+        case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85:
+        case 0x86: case 0x87: case 0x88: case 0x89: case 0x8a: case 0x8b:
+        case 0x8c: case 0x8d: case 0x8e: case 0x8f: {
+            i64 d = sx(fetch_n(c, 4), 32);
+            if (cond(c, op2 - 0x80)) c->rip = (u64)((i64)c->rip + d);
+            break;
+        }
+        case 0x1f:  /* nop r/m */
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            break;
+        case 0xaf: { /* imul r, r/m */
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            v = op_read(c, &rm, s);
+            if (s == 8) {
+                u64 lo = 0, hi = 0;
+                mul128s((i64)reg_read(c, rm.reg, 8), (i64)v, &lo, &hi);
+                reg_write(c, rm.reg, 8, lo);
+                c->flags = (c->flags & ~(RF_CF | RF_OF)) |
+                           (((hi == 0 && (lo & sign_bit(8)) == 0) ||
+                             (hi == ~((u64)0) && (lo & sign_bit(8)) != 0))
+                            ? 0 : (RF_CF | RF_OF));
+            } else {
+                i64 p = (i64)sx(v, s * 8) * (i64)sx(reg_read(c, rm.reg, s), s * 8);
+                u64 low = (u64)p & sz_mask(s);
+                reg_write(c, rm.reg, s, low);
+                c->flags = (c->flags & ~(RF_CF | RF_OF)) |
+                           (((i64)sx(low, s * 8) != p) ? (RF_CF | RF_OF) : 0);
+            }
+            {
+                /* SF/ZF/PF 在 SDM 里是未定义，但硬件按结果设置 */
+                u64 r = reg_read(c, rm.reg, s);
+                c->flags &= ~(RF_PF | RF_ZF | RF_SF);
+                c->flags |= parity(r & 0xff);
+                if ((r & sz_mask(s)) == 0) c->flags |= RF_ZF;
+                if (r & sign_bit(s)) c->flags |= RF_SF;
+            }
+            break;
+        }
+        case 0xba: { /* group 8：bt/bts/btr/btc r/m, imm8 */
+            u8 m1 = fetch8(c);
+            u32 sub = 0, bit = 0;
+            rm = decode_modrm(c, m1, rex, addrsz);
+            sub = (m1 >> 3) & 7;
+            bit = (u32)fetch8(c);
+            op_fix_rip(&rm, 1);
+            if (!rm.is_reg) rm.addr += (u64)(bit / (u32)(s * 8)) * (u64)s;
+            bit = bit & ((s == 8) ? 63u : ((s == 4) ? 31u : 15u));
+            v = op_read(c, &rm, s);
+            c->flags &= ~RF_CF;
+            if ((v & ((u64)1 << bit)) != 0) c->flags |= RF_CF;
+            if (sub == 5) op_write(c, &rm, s, v | ((u64)1 << bit));
+            else if (sub == 6) op_write(c, &rm, s, v & ~((u64)1 << bit));
+            else if (sub == 7) op_write(c, &rm, s, v ^ ((u64)1 << bit));
+            break;
+        }
         case 0x05:  /* syscall：RCX=RIP，R11=RFLAGS，CS/SS 取自 STAR */
 #if !defined(C6_WASM)
             if (g_m.sys_trace && g_m.sys_count < 6000) {
@@ -981,9 +1102,6 @@ int step(struct CPUState *c)
             break;
         case 0x0b:  /* ud2 */
             raise_exception(c, EXC_UD, 0, 0);
-            break;
-        case 0x1f:  /* nop r/m */
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
             break;
         case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x26:
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
@@ -1059,9 +1177,6 @@ int step(struct CPUState *c)
         case 0x18:  /* prefetch：NOP，但要完整解码 modrm/disp */
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             break;
-        case 0x1e:  /* endbr64/endbr32 等：NOP */
-            (void)fetch8(c);
-            break;
         case 0x30:  /* wrmsr：ECX=MSR 号，EDX:EAX=值 */
             msr_write(c, (u32)c->r[1],
                       (c->r[0] & 0xffffffffu) | ((c->r[2] & 0xffffffffu) << 32));
@@ -1093,13 +1208,6 @@ int step(struct CPUState *c)
             /* 条件不成立时目标不变，但 32 位操作数仍按 32 位写语义零扩展高 32 位 */
             if (!cond(c, op2 - 0x40)) v = reg_read(c, rm.reg, s);
             reg_write(c, rm.reg, s, v);
-            break;
-        }
-        case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85:
-        case 0x86: case 0x87: case 0x88: case 0x89: case 0x8a: case 0x8b:
-        case 0x8c: case 0x8d: case 0x8e: case 0x8f: {
-            i64 d = sx(fetch_n(c, 4), 32);
-            if (cond(c, op2 - 0x80)) c->rip = (u64)((i64)c->rip + d);
             break;
         }
         case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95:
@@ -1216,34 +1324,6 @@ int step(struct CPUState *c)
             }
             break;
         }
-        case 0xaf: { /* imul r, r/m */
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            v = op_read(c, &rm, s);
-            if (s == 8) {
-                u64 lo = 0, hi = 0;
-                mul128s((i64)reg_read(c, rm.reg, 8), (i64)v, &lo, &hi);
-                reg_write(c, rm.reg, 8, lo);
-                c->flags = (c->flags & ~(RF_CF | RF_OF)) |
-                           (((hi == 0 && (lo & sign_bit(8)) == 0) ||
-                             (hi == ~((u64)0) && (lo & sign_bit(8)) != 0))
-                            ? 0 : (RF_CF | RF_OF));
-            } else {
-                i64 p = (i64)sx(v, s * 8) * (i64)sx(reg_read(c, rm.reg, s), s * 8);
-                u64 low = (u64)p & sz_mask(s);
-                reg_write(c, rm.reg, s, low);
-                c->flags = (c->flags & ~(RF_CF | RF_OF)) |
-                           (((i64)sx(low, s * 8) != p) ? (RF_CF | RF_OF) : 0);
-            }
-            {
-                /* SF/ZF/PF 在 SDM 里是未定义，但硬件按结果设置 */
-                u64 r = reg_read(c, rm.reg, s);
-                c->flags &= ~(RF_PF | RF_ZF | RF_SF);
-                c->flags |= parity(r & 0xff);
-                if ((r & sz_mask(s)) == 0) c->flags |= RF_ZF;
-                if (r & sign_bit(s)) c->flags |= RF_SF;
-            }
-            break;
-        }
         case 0xb0: case 0xb1: { /* cmpxchg */
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             a = op_read(c, &rm, s);
@@ -1262,31 +1342,6 @@ int step(struct CPUState *c)
             flags_add(c, a, b, (a + b) & sz_mask(s), s, 0);
             reg_write(c, rm.reg, s, a);          /* SDM：SRC=DEST 在前 */
             op_write(c, &rm, s, (a + b) & sz_mask(s));
-            break;
-        }
-        case 0xb6: case 0xb7: case 0xbe: case 0xbf: { /* movzx/movsx */
-            int from = (op2 == 0xb6 || op2 == 0xbe) ? 1 : 2;
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            v = op_read(c, &rm, from);
-            if (op2 == 0xbe || op2 == 0xbf) v = sx(v, from * 8);
-            reg_write(c, rm.reg, s, v);
-            break;
-        }
-        case 0xba: { /* group 8：bt/bts/btr/btc r/m, imm8 */
-            u8 m1 = fetch8(c);
-            u32 sub = 0, bit = 0;
-            rm = decode_modrm(c, m1, rex, addrsz);
-            sub = (m1 >> 3) & 7;
-            bit = (u32)fetch8(c);
-            op_fix_rip(&rm, 1);
-            if (!rm.is_reg) rm.addr += (u64)(bit / (u32)(s * 8)) * (u64)s;
-            bit = bit & ((s == 8) ? 63u : ((s == 4) ? 31u : 15u));
-            v = op_read(c, &rm, s);
-            c->flags &= ~RF_CF;
-            if ((v & ((u64)1 << bit)) != 0) c->flags |= RF_CF;
-            if (sub == 5) op_write(c, &rm, s, v | ((u64)1 << bit));
-            else if (sub == 6) op_write(c, &rm, s, v & ~((u64)1 << bit));
-            else if (sub == 7) op_write(c, &rm, s, v ^ ((u64)1 << bit));
             break;
         }
         case 0xbc: case 0xbd: { /* bsf/bsr */
@@ -1809,28 +1864,39 @@ int step(struct CPUState *c)
         }
 
         switch (op) {
-        case 0x50: case 0x51: case 0x52: case 0x53:
-        case 0x54: case 0x55: case 0x56: case 0x57:
-            push64(c, c->r[op - 0x50 + ((rex & 1) ? 8 : 0)]);
-            break;
-        case 0x58: case 0x59: case 0x5a: case 0x5b:
-        case 0x5c: case 0x5d: case 0x5e: case 0x5f:
-            c->r[op - 0x58 + ((rex & 1) ? 8 : 0)] = pop64(c);
-            break;
-        case 0x63:  /* movsxd */
-            s = 4;
+        case 0x88: case 0x89: case 0x8a: case 0x8b: {
+            s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            reg_write(c, rm.reg, 8, sx(op_read(c, &rm, 4), 32));
+            /* 0x88/0x89: MOV r/m,reg；0x8a/0x8b: MOV reg,r/m */
+            a = (op & 2) ? op_read(c, &rm, s) : reg_read(c, rm.reg, s);
+            if (op & 2) reg_write(c, rm.reg, s, a);
+            else op_write(c, &rm, s, a);
             break;
-        case 0x68: push64(c, sx(fetch_n(c, 4), 32)); break;
-        case 0x6a: push64(c, sx(fetch_n(c, 1), 8)); break;
-        case 0x69: case 0x6b: {
+        }
+        case 0x90: case 0x91: case 0x92: case 0x93:
+        case 0x94: case 0x95: case 0x96: case 0x97: {
+            idx = op - 0x90 + ((rex & 1) ? 8 : 0);
+            if (idx != 0) { u64 t = c->r[0]; c->r[0] = c->r[idx]; c->r[idx] = t; }
+            break;
+        }
+        case 0x8d:  /* lea（mod=3 是非法编码，真机 #UD） */
             s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            imm = (op == 0x6b) ? sx(fetch_n(c, 1), 8) : sx(fetch_n(c, 4), 32);
-            op_fix_rip(&rm, (op == 0x6b) ? 1 : 4);
-            a = op_read(c, &rm, s) * imm;
-            reg_write(c, rm.reg, s, a);
+            if (rm.is_reg) {
+                raise_exception(c, EXC_UD, 0, 0);
+                break;
+            }
+            reg_write(c, rm.reg, s, rm.addr);
+            break;
+        case 0xc0: case 0xc1: case 0xd0: case 0xd1: case 0xd2: case 0xd3: {
+            s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            u64 cnt = (op <= 0xc1) ? fetch_n(c, 1) : ((op == 0xd0 || op == 0xd1) ? 1 : reg_read(c, 1, 1));
+            op_fix_rip(&rm, (op <= 0xc1) ? 1 : 0);
+            v = op_read(c, &rm, s);
+            /* /6 在 SDM 里未定义；AMD 真机当作 SHL，这里保持一致 */
+            shift_op(c, (int)((rm.reg & 7) == 6 ? 4 : (rm.reg & 7)), &v, cnt, s);
+            op_write(c, &rm, s, v);
             break;
         }
         case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75:
@@ -1838,6 +1904,34 @@ int step(struct CPUState *c)
         case 0x7c: case 0x7d: case 0x7e: case 0x7f: {
             u64 d = sx(fetch_n(c, 1), 8);
             if (cond(c, op - 0x70)) c->rip = (u64)((i64)c->rip + d);
+            break;
+        }
+        case 0xe9: {  /* jmp rel32 */
+            i64 d = sx(fetch_n(c, 4), 32);
+            c->rip = (u64)((i64)c->rip + d);
+            break;
+        }        case 0xea: {  /* jmp far ptr16:32 */
+            u32 off = (u32)fetch_n(c, 4);
+            u16 sel = (u16)fetch_n(c, 2);
+            c->rip = off;
+            c->sel[1] = sel;
+            break;
+        }
+        case 0xc2: case 0xc3: {
+            u64 ret = pop64(c);
+            if (op == 0xc2) c->r[4] += (u16)fetch_n(c, 2);
+            c->rip = ret;
+            break;
+        }
+        case 0x63:  /* movsxd */
+            s = 4;
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            reg_write(c, rm.reg, 8, sx(op_read(c, &rm, 4), 32));
+            break;
+        case 0xe8: {  /* call rel32 */
+            i64 d = sx(fetch_n(c, 4), 32);
+            push64(c, c->rip);
+            c->rip = (u64)((i64)c->rip + d);
             break;
         }
         case 0x80: case 0x81: case 0x83: {
@@ -1876,6 +1970,49 @@ int step(struct CPUState *c)
             flags_logic(c, a & b, s);
             break;
         }
+        case 0x50: case 0x51: case 0x52: case 0x53:
+        case 0x54: case 0x55: case 0x56: case 0x57:
+            push64(c, c->r[op - 0x50 + ((rex & 1) ? 8 : 0)]);
+            break;
+        case 0x58: case 0x59: case 0x5a: case 0x5b:
+        case 0x5c: case 0x5d: case 0x5e: case 0x5f:
+            c->r[op - 0x58 + ((rex & 1) ? 8 : 0)] = pop64(c);
+            break;
+        case 0xc6: case 0xc7: {
+            s = (op == 0xc6) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            imm = (s == 1) ? fetch_n(c, 1) :
+                  ((s == 2) ? fetch_n(c, 2) :
+                   ((s == 8) ? sx(fetch_n(c, 4), 32) : fetch_n(c, 4)));
+            op_fix_rip(&rm, (s == 1) ? 1 : ((s == 2) ? 2 : 4));
+            op_write(c, &rm, s, imm);
+            break;
+        }
+        case 0xb8: case 0xb9: case 0xba: case 0xbb:
+        case 0xbc: case 0xbd: case 0xbe: case 0xbf:
+            s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
+            {
+                u64 immv = (s == 8) ? fetch_n(c, 8) :
+                           ((s == 2) ? fetch_n(c, 2) : fetch_n(c, 4));
+                reg_write(c, (op - 0xb8) + ((rex & 1) ? 8 : 0), s, immv);
+            }
+            break;
+        case 0xeb: {  /* jmp rel8 */
+            i64 d = sx(fetch_n(c, 1), 8);
+            c->rip = (u64)((i64)c->rip + d);
+            break;
+        }
+        case 0x68: push64(c, sx(fetch_n(c, 4), 32)); break;
+        case 0x6a: push64(c, sx(fetch_n(c, 1), 8)); break;
+        case 0x69: case 0x6b: {
+            s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
+            rm = decode_modrm(c, fetch8(c), rex, addrsz);
+            imm = (op == 0x6b) ? sx(fetch_n(c, 1), 8) : sx(fetch_n(c, 4), 32);
+            op_fix_rip(&rm, (op == 0x6b) ? 1 : 4);
+            a = op_read(c, &rm, s) * imm;
+            reg_write(c, rm.reg, s, a);
+            break;
+        }
         case 0x86: case 0x87: {
             s = (op == 0x86) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
@@ -1885,24 +2022,6 @@ int step(struct CPUState *c)
             reg_write(c, rm.reg, s, a);
             break;
         }
-        case 0x88: case 0x89: case 0x8a: case 0x8b: {
-            s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            /* 0x88/0x89: MOV r/m,reg；0x8a/0x8b: MOV reg,r/m */
-            a = (op & 2) ? op_read(c, &rm, s) : reg_read(c, rm.reg, s);
-            if (op & 2) reg_write(c, rm.reg, s, a);
-            else op_write(c, &rm, s, a);
-            break;
-        }
-        case 0x8d:  /* lea（mod=3 是非法编码，真机 #UD） */
-            s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            if (rm.is_reg) {
-                raise_exception(c, EXC_UD, 0, 0);
-                break;
-            }
-            reg_write(c, rm.reg, s, rm.addr);
-            break;
         case 0x8c: {  /* mov r/m, sreg */
             s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
@@ -1925,12 +2044,6 @@ int step(struct CPUState *c)
             rm = decode_modrm(c, fetch8(c), rex, addrsz);
             op_write(c, &rm, s, pop64(c));
             break;
-        case 0x90: case 0x91: case 0x92: case 0x93:
-        case 0x94: case 0x95: case 0x96: case 0x97: {
-            idx = op - 0x90 + ((rex & 1) ? 8 : 0);
-            if (idx != 0) { u64 t = c->r[0]; c->r[0] = c->r[idx]; c->r[idx] = t; }
-            break;
-        }
         case 0x98:  /* cbw/cwde/cdqe */
             if (rex & 8) c->r[0] = sx(c->r[0], 32);
             else if (pre & PRE_66)
@@ -2011,32 +2124,6 @@ int step(struct CPUState *c)
         case 0xb4: case 0xb5: case 0xb6: case 0xb7:
             reg_write(c, (op - 0xb0) + ((rex & 1) ? 8 : 0), 1, fetch_n(c, 1));
             break;
-        case 0xb8: case 0xb9: case 0xba: case 0xbb:
-        case 0xbc: case 0xbd: case 0xbe: case 0xbf:
-            s = (rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4);
-            {
-                u64 immv = (s == 8) ? fetch_n(c, 8) :
-                           ((s == 2) ? fetch_n(c, 2) : fetch_n(c, 4));
-                reg_write(c, (op - 0xb8) + ((rex & 1) ? 8 : 0), s, immv);
-            }
-            break;
-        case 0xc0: case 0xc1: case 0xd0: case 0xd1: case 0xd2: case 0xd3: {
-            s = (op & 1) ? ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4)) : 1;
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            u64 cnt = (op <= 0xc1) ? fetch_n(c, 1) : ((op == 0xd0 || op == 0xd1) ? 1 : reg_read(c, 1, 1));
-            op_fix_rip(&rm, (op <= 0xc1) ? 1 : 0);
-            v = op_read(c, &rm, s);
-            /* /6 在 SDM 里未定义；AMD 真机当作 SHL，这里保持一致 */
-            shift_op(c, (int)((rm.reg & 7) == 6 ? 4 : (rm.reg & 7)), &v, cnt, s);
-            op_write(c, &rm, s, v);
-            break;
-        }
-        case 0xc2: case 0xc3: {
-            u64 ret = pop64(c);
-            if (op == 0xc2) c->r[4] += (u16)fetch_n(c, 2);
-            c->rip = ret;
-            break;
-        }
         case 0xc9:  /* leave: mov rsp,rbp; pop rbp */
             c->r[4] = c->r[5];
             c->r[5] = pop64(c);
@@ -2045,16 +2132,6 @@ int step(struct CPUState *c)
             c->rip = pop64(c);
             c->sel[1] = (u16)pop64(c);
             if (op == 0xca) c->r[4] += (u16)fetch_n(c, 2);
-            break;
-        }
-        case 0xc6: case 0xc7: {
-            s = (op == 0xc6) ? 1 : ((rex & 8) ? 8 : ((pre & PRE_66) ? 2 : 4));
-            rm = decode_modrm(c, fetch8(c), rex, addrsz);
-            imm = (s == 1) ? fetch_n(c, 1) :
-                  ((s == 2) ? fetch_n(c, 2) :
-                   ((s == 8) ? sx(fetch_n(c, 4), 32) : fetch_n(c, 4)));
-            op_fix_rip(&rm, (s == 1) ? 1 : ((s == 2) ? 2 : 4));
-            op_write(c, &rm, s, imm);
             break;
         }
         case 0xcc:  /* int3 */
@@ -2105,28 +2182,6 @@ int step(struct CPUState *c)
             if (s == 1) io_w8(port, (u8)v);
             else if (s == 2) io_w16(port, (u16)v);
             else io_w32(port, (u32)v);
-            break;
-        }
-        case 0xe8: {  /* call rel32 */
-            i64 d = sx(fetch_n(c, 4), 32);
-            push64(c, c->rip);
-            c->rip = (u64)((i64)c->rip + d);
-            break;
-        }
-        case 0xe9: {  /* jmp rel32 */
-            i64 d = sx(fetch_n(c, 4), 32);
-            c->rip = (u64)((i64)c->rip + d);
-            break;
-        }        case 0xea: {  /* jmp far ptr16:32 */
-            u32 off = (u32)fetch_n(c, 4);
-            u16 sel = (u16)fetch_n(c, 2);
-            c->rip = off;
-            c->sel[1] = sel;
-            break;
-        }
-        case 0xeb: {  /* jmp rel8 */
-            i64 d = sx(fetch_n(c, 1), 8);
-            c->rip = (u64)((i64)c->rip + d);
             break;
         }
         case 0xe0: case 0xe1: case 0xe2: {  /* loop */

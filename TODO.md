@@ -89,3 +89,25 @@
 - [x] `./build.sh test` 全绿：native payload、native 单元测试、wasm payload 冒烟均通过
 - [x] `README.md`：快速开始、已知限制、性能说明
 - [x] Git 提交：每完成一个任务即提交（docs、probes、指令差分测试器与语义修复、页表 NX 修复等）
+
+## 性能优化（v1.0.2）
+
+- [x] 指令频率剖析（临时构建，按 opcode 计数 2 亿条真实引导）
+- [x] (c) 页表快通道 `pg_fast()`：与 `mem_translate()` 同序的逐行等价副本，
+      不持任何翻译状态、失效只靠 `mem_tlb_flush()`（第一版独立页缓存语义不
+      等价、整机 panic，已弃用，过程见 DESIGN §83）
+- [x] (b) 按频率重排主 switch（55 块）与 0x0f 二级 switch（46 块），
+      结构校验 143 个 case 块内容与重排前完全相同
+- [x] (a) 热指令快通道（nop / MOV r,r / Jcc rel8 / JMP rel8,rel32），
+      所有出口统一走 `fast_done()` 复刻故障回滚
+- [x] 调试期开关 `--nofast / --nofetch / --nodata / --cachecheck`（保留）
+- [x] 新增 `tests/test_pcache.c6`：页缓存语义（缺页不污染、失效即生效、
+      R/W/NX/US 四条权限、跨页 4/8 字节、缓存开/关随机对拍 4000 次）
+- [x] difftest 1236/1236、build.sh test 六项
+- [x] 验收点抬到 **9 亿条整机引导**：(a)(c) 全开与全关输出逐字节一致
+      （309 字节串口、irq4=181、无 panic）
+- [x] native 登录验收 `PASS: Alpine booted to login and ran 'uname -m'`
+- [x] wasm 登录验收 `WASM LOGIN OK (MARK-OK)`（1194M 条 / 1056s / 713B）
+- [x] 浏览器验收 `MARK-OK`（1062s / 874M 条 / 658B 串口）
+- [x] 文档 §82 更正 + 新增 §83（两条「快路径必须与慢路径等价」的坑）
+- [ ] 发布 v1.0.2（tag + 三件产物 + SHA256SUMS）

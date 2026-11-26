@@ -44,7 +44,7 @@ test_all() {
     ./build/sim --payload build/hello64.bin > build/payload.out
     grep -q 'C6SIM64 OK' build/payload.out
     echo "test: payload smoke OK"
-    for t in tests/test_cpu.c6 tests/test_cpl3.c6; do
+    for t in tests/test_cpu.c6 tests/test_cpl3.c6 tests/test_pcache.c6; do
         if [ -f "$t" ]; then
             "$C6C" -I src $CORE src/hostfs.c6 "$t" -o "build/$(basename "$t" .c6)" >/dev/null
             "./build/$(basename "$t" .c6)"

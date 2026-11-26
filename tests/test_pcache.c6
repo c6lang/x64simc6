@@ -1,0 +1,228 @@
+/* 页缓存单测：取指页缓存 + 8 项数据页缓存的**语义**必须和 mem_translate
+ * 完全一致。这里锁住三类曾经踩过的坑：
+ *   1) 缺页之后不能把「翻译失败」登记成有效映射（曾经变成「物理页 0 + 全权限」，
+ *      之后的访问既不缺页、又读写错页，整机引导直接崩）；
+ *   2) INVLPG / 改 CR3 / 改权限之后必须立刻失效（陈旧映射不能继续命中）；
+ *   3) U/S、R/W、NX 三条权限在命中路径上同样要检查（不能靠 TLB 命中绕过）。
+ */
+#include "c6sim.h"
+
+static int failures = 0;
+
+static void check(int ok, const char *what)
+{
+    if (!ok) { printf("FAIL: %s\n", what); failures++; }
+}
+
+#define PML4_PA 0x500000ull
+#define PDPT_PA 0x501000ull
+#define PD_PA   0x502000ull
+#define PT_PA   0x503000ull
+#define VA      0x400000ull
+#define PA_A    0x300000ull
+#define PA_B    0x310000ull
+#define PTE_P   1ull
+#define PTE_W   2ull
+#define PTE_U   4ull
+#define PTE_NX  (1ull << 63)
+
+static void clear_exc(void)
+{
+    g_m.cpu.exc_pending = 0;
+    g_m.cpu.fault_abort = 0;
+    g_m.cpu.cr[2] = 0;
+}
+
+/* 写「物理地址」。开了分页之后 mem_w64 的参数是虚拟地址，所以改页表时
+ * 先临时关掉 CR0.PG，写完再打开并刷新（这也顺带覆盖了「开关分页必须
+ * 让页缓存失效」这条要求）。 */
+static void wr_phys(u64 pa, u64 v)
+{
+    u64 pg = g_m.cpu.cr[0] & CR0_PG;
+    g_m.cpu.cr[0] = g_m.cpu.cr[0] & ~CR0_PG;
+    mem_w64(pa, v);
+    g_m.cpu.cr[0] = g_m.cpu.cr[0] | pg;
+    mem_tlb_flush();
+    clear_exc();
+}
+
+/* 把 VA 映射到 pa，flags 是 PTE 低位 | PTE_NX */
+static void map_va(u64 pa, u64 flags)
+{
+    wr_phys(PD_PA + 2 * 8, PT_PA | PTE_P | PTE_W | PTE_U);
+    wr_phys(PT_PA + 0 * 8, pa | flags);
+}
+
+int main(int argc, char **argv)
+{
+    u64 v = 0;
+    u64 i = 0;
+    u64 seed = 0x123456789abcdefull;
+    u32 side = 0;
+    (void)argc; (void)argv;
+    machine_reset();
+    g_m.cpu.cr[0] = 0;                 /* 建表阶段关分页 */
+    g_m.cpu.sel[1] = 0x10;             /* CPL0 */
+    g_m.cpu.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+
+    mem_w64(PML4_PA, PDPT_PA | PTE_P | PTE_W | PTE_U);
+    mem_w64(PDPT_PA, PD_PA | PTE_P | PTE_W | PTE_U);
+    mem_w64(PD_PA + 2 * 8, PT_PA | PTE_P | PTE_W | PTE_U);
+    mem_w64(PT_PA + 0 * 8, PA_A | PTE_P | PTE_W | PTE_U);
+    g_m.cpu.cr[3] = PML4_PA;
+    g_m.cpu.cr[0] = CR0_PE | CR0_PG;
+    mem_tlb_flush();
+    clear_exc();
+
+    /* --- 1. 基本读写：命中路径要把数据落到真实的物理页 --- */
+    mem_w64(VA, 0x1122334455667788ull);
+    v = mem_r64(VA);
+    check(v == 0x1122334455667788ull, "w64/r64 往返");
+    check(g_m.ram[PA_A] == 0x88 && g_m.ram[PA_A + 7] == 0x11, "数据落在物理页 A");
+    check(!g_m.cpu.fault_abort, "正常访问不应缺页");
+    mem_w8(VA + 1, 0xabu);
+    check((mem_r64(VA) & 0xff00ull) == 0xab00ull, "w8/r8 走缓存也要对");
+    mem_w32(VA + 4, 0xdeadbeefu);
+    check((mem_r32(VA + 4)) == 0xdeadbeefu, "w32/r32 走缓存也要对");
+
+    /* --- 2. 取指页缓存：可执行页能取到正确字节 --- */
+    g_m.ram[PA_A + 0x20] = 0x5a;
+    check(mem_fetch8(VA + 0x20) == 0x5a, "取指页缓存命中");
+
+    /* --- 3. 取消映射 + INVLPG：必须立刻缺页（不能吃陈旧缓存） --- */
+    wr_phys(PT_PA + 0 * 8, 0);
+    clear_exc();
+    v = mem_r64(VA);
+    check(g_m.cpu.fault_abort != 0, "取消映射后读必须缺页");
+    check(g_m.cpu.cr[2] == VA, "缺页地址写进 CR2");
+    check(g_m.cpu.exc_pending != 0, "缺页要挂起异常");
+    clear_exc();
+    mem_fetch8(VA);
+    check(g_m.cpu.fault_abort != 0, "取消映射后取指必须缺页");
+
+    /* --- 4. 缺页后重新映射到另一个物理页：不能读到旧页/页 0 --- */
+    map_va(PA_B, PTE_P | PTE_W | PTE_U);
+    mem_w64(VA, 0x0102030405060708ull);
+    check(mem_r64(VA) == 0x0102030405060708ull, "重新映射后读到新内容");
+    check(g_m.ram[PA_B] == 0x08, "新数据落在物理页 B");
+    check(g_m.ram[PA_A] == 0x88, "物理页 A 未被改写");
+
+    /* --- 5. 只读页：写必须缺页，读可以 --- */
+    map_va(PA_B, PTE_P | PTE_U);
+    mem_w64(VA, 0x77ull);
+    check(g_m.cpu.fault_abort != 0, "只读页写入必须缺页");
+    check(g_m.ram[PA_B] == 0x08, "只读页内容不能被改写");
+    clear_exc();
+    v = mem_r64(VA);
+    check(v == 0x0102030405060708ull && !g_m.cpu.fault_abort, "只读页读取正常");
+    clear_exc();
+
+    /* --- 6. NX 页：取指必须缺页 --- */
+    map_va(PA_B, PTE_P | PTE_W | PTE_U | PTE_NX);
+    mem_fetch8(VA);
+    check(g_m.cpu.fault_abort != 0, "NX 页取指必须缺页");
+    check(g_m.cpu.cr[2] == VA, "NX 缺页地址写进 CR2");
+    clear_exc();
+
+    /* --- 7. 内核页 + CPL3：监控页缓存不能绕过 U/S --- */
+    map_va(PA_B, PTE_P | PTE_W);            /* 不带 U */
+    g_m.cpu.sel[1] = 0x23;                  /* CPL3 */
+    mem_r64(VA);
+    check(g_m.cpu.fault_abort != 0, "CPL3 读内核页必须缺页");
+    clear_exc();
+    mem_fetch8(VA);
+    check(g_m.cpu.fault_abort != 0, "CPL3 取指内核页必须缺页");
+    clear_exc();
+    g_m.cpu.sel[1] = 0x10;
+    v = mem_r64(VA);
+    check(!g_m.cpu.fault_abort, "CPL0 读同一页正常");
+
+    /* --- 8. 跨页访问：4 字节/8 字节跨界时必须分属两个物理页，不能读错页 --- */
+    wr_phys(PT_PA + 1 * 8, PA_A | PTE_P | PTE_W | PTE_U);   /* VA+0x1000 -> PA_A */
+    wr_phys(PT_PA + 0 * 8, PA_B | PTE_P | PTE_W | PTE_U);   /* VA      -> PA_B */
+    mem_w64(VA, 0xa1a2a3a4a5a6a7a8ull);                    /* 先预热缓存 */
+    check(mem_r64(VA) == 0xa1a2a3a4a5a6a7a8ull, "预热：VA 页可读写");
+    clear_exc();
+    mem_w64(VA + 0xffc, 0x1122334455667788ull);            /* 跨页写 8 字节 */
+    check(!g_m.cpu.fault_abort, "跨页写不应缺页");
+    check(g_m.ram[PA_B + 0xffc] == 0x88 && g_m.ram[PA_B + 0xffd] == 0x77 &&
+          g_m.ram[PA_B + 0xffe] == 0x66 && g_m.ram[PA_B + 0xfff] == 0x55,
+          "跨页写：低 4 字节落在第一页尾部");
+    check(g_m.ram[PA_A + 0] == 0x44 && g_m.ram[PA_A + 1] == 0x33 &&
+          g_m.ram[PA_A + 2] == 0x22 && g_m.ram[PA_A + 3] == 0x11,
+          "跨页写：高 4 字节落在第二页头部");
+    check(mem_r64(VA + 0xffc) == 0x1122334455667788ull, "跨页读 8 字节往返");
+    clear_exc();
+
+    /* --- 9. 用户页 + CPL0：内核可以访问 --- */
+    map_va(PA_B, PTE_P | PTE_W | PTE_U);
+    v = mem_r64(VA);
+    check(!g_m.cpu.fault_abort, "CPL0 读用户页正常");
+
+    /* --- 10. 随机自校对：同一二进制里开/关缓存，写出的 RAM 必须逐字节一致 --- */
+    wr_phys(PT_PA + 0 * 8, PA_B | PTE_P | PTE_W | PTE_U);
+    wr_phys(PT_PA + 1 * 8, PA_A | PTE_P | PTE_W | PTE_U);
+    clear_exc();
+    for (i = 0; i < 4000 && failures <= 3; i++) {
+        u64 a2 = 0, val = 0, k = 0, off = 0;
+        u32 op2 = 0, diff = 0;
+        u8 before[512] = {0};
+        u8 r_on[512] = {0};
+        u8 r_off[512] = {0};
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        off = 0xf00ull + (seed >> 33) % 0x200ull;         /* 1/4 落在页边界上 */
+        a2 = VA + off;
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        val = seed;
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        op2 = (u32)((seed >> 40) % 6);
+        for (k = 0; k < 512; k++)
+            before[k] = (k < 256) ? g_m.ram[PA_B + 0xf00 + k] : g_m.ram[PA_A + k - 256];
+        if (op2 < 3) {
+            /* 读：缓存开与关必须读出同一个值 */
+            u64 q1 = 0, q2 = 0;
+            if (op2 == 0) {
+                g_no_data = 0; q1 = (u64)mem_r8(a2);
+                g_no_data = 1; q2 = (u64)mem_r8(a2);
+            } else if (op2 == 1) {
+                g_no_data = 0; q1 = (u64)mem_r32(a2);
+                g_no_data = 1; q2 = (u64)mem_r32(a2);
+            } else {
+                g_no_data = 0; q1 = mem_r64(a2);
+                g_no_data = 1; q2 = mem_r64(a2);
+            }
+            g_no_data = 0;
+            check(q1 == q2, "自校对：读值一致");
+        } else {
+            g_no_data = 0;
+            if (op2 == 3) mem_w8(a2, (u8)val);
+            else if (op2 == 4) mem_w32(a2, (u32)val);
+            else mem_w64(a2, val);
+            for (k = 0; k < 512; k++)
+                r_on[k] = (k < 256) ? g_m.ram[PA_B + 0xf00 + k] : g_m.ram[PA_A + k - 256];
+            for (k = 0; k < 512; k++) {
+                if (k < 256) g_m.ram[PA_B + 0xf00 + k] = before[k];
+                else g_m.ram[PA_A + k - 256] = before[k];
+            }
+            g_no_data = 1;
+            if (op2 == 3) mem_w8(a2, (u8)val);
+            else if (op2 == 4) mem_w32(a2, (u32)val);
+            else mem_w64(a2, val);
+            for (k = 0; k < 512; k++)
+                r_off[k] = (k < 256) ? g_m.ram[PA_B + 0xf00 + k] : g_m.ram[PA_A + k - 256];
+            g_no_data = 0;
+            for (k = 0; k < 512; k++) {
+                if (r_on[k] != r_off[k]) diff = 1;
+                if (r_on[k] != before[k]) side = 1;
+            }
+            check(diff == 0, "自校对：缓存写与慢路径写结果一致");
+            check(side != 0, "自校对：写确实改动了内存");
+        }
+    }
+    clear_exc();
+    g_no_data = 0;
+
+    if (failures == 0)
+        printf("test_pcache OK\n");
+    return failures;
+}

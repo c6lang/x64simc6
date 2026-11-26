@@ -5,6 +5,10 @@ static u64 g_ring[16] = {0};
 static u32 g_ring_i = 0;
 
 struct Machine g_m = {0};
+int g_no_fast = 0;
+int g_no_fetch = 0;
+int g_no_data = 0;
+int g_cc = 0;   /* --cachecheck：每次快路径命中都与慢路径对拍 */
 
 static const char default_cmdline[] =
     "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 "
@@ -65,11 +69,18 @@ static int machine_step_loop(u64 count)
 {
     u32 n = (u32)count;
     u32 ri = 0;
+    /* ---- 每指令开销的关键：把「每轮都读、整轮不变」的全局先提到循环外 ----
+     * c6c 每次读全局都要过一次基址，下面这些判断曾经逐条摊在热路径上
+     * （实测纯循环 0.33µs/条）。提到外面 + 调试开关合成一个 bool 之后，
+     * 每轮只剩 halt/停机/取指三条检查。 */
+    u64 stopt = g_m.stopt;
+    int dbg_any = g_m.sample_on || g_m.rip_dump_en || g_m.snap_step != 0 ||
+                  g_m.watch_fd >= 0;
     while (n > 0) {
         n--;
         if (g_m.halted)
             break;
-        if (g_m.stopt != 0 && g_m.instructions >= g_m.stopt) {
+        if (stopt != 0 && g_m.instructions >= stopt) {
             g_m.halted = 1;
             break;
         }
@@ -117,6 +128,7 @@ static int machine_step_loop(u64 count)
         }
         g_m.instructions++;
         g_m.tsc++;
+        if (dbg_any) {
         if (g_m.sample_on) {   /* 只在 --sample 时记录，避免每指令两次写 */
             g_ring[g_ring_i & 15] = g_m.cpu.rip;
             g_ring_i = g_ring_i + 1;
@@ -157,6 +169,7 @@ static int machine_step_loop(u64 count)
             write(g_m.watch_fd, wb, 24);
         }
 #endif
+        }
         cpu_step(&g_m.cpu);
         if (g_m.cpu.exc_pending) {
             /* HLT 之后立刻投递挂起中断：CPU 被唤醒，必须清 halted，

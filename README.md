@@ -1,4 +1,4 @@
-# x64simc6 v1.0.1
+# x64simc6 v1.0.2
 
 用 C6 语言实现的 x86-64 模拟器，可在 native 与浏览器 wasm 两种形态运行；浏览器端通过真实 `fetch()` + Cache Storage + IndexedDB 提供网络与“页面存储当文件系统”。
 
@@ -56,7 +56,9 @@ node tests/wasm_login.js                          # wasm 里跑到 login 并自�
 
 ## 性能
 
-native 解释器：tight loop 0.7–1.2M 条/秒，整机引导平均约 0.9M 条/秒
-（到 `login:` 约 15 分钟）；wasm 约 0.8–1.1M 条/秒（到 `login:` 约 18 分钟）。
-每 1000 万条的实测：`jmp 10.3s`、`nop 8.7s`、`add/cmp/jne 14.8s`
-（v1.0.1 修 TLB 后比 v1.0.0 快 2.1–3.4 倍）。
+native 解释器：tight loop 0.9–1.3M 条/秒，整机引导平均约 0.75M 条/秒
+（到 `login:` 约 17 分钟）；wasm 约 0.8–0.9M 条/秒（到 `login:` 约 18 分钟）。
+每 1000 万条的实测：`jmp 9.2s`、`nop 7.5s`、`add/cmp/jne 17.7s`；
+整机引导 6000 万条 **80.5s**（v1.0.1 87.3s）。
+v1.0.1 修 TLB 后比 v1.0.0 快 2.1–3.4 倍；v1.0.2 的解释器三件套在此基础上
+再快 **1.08×（引导）/ 1.13–1.34×（紧循环）**。
