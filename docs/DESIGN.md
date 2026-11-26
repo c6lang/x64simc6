@@ -1161,3 +1161,28 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     顺带修了 `tests/wasm_boot_smoke.js` 的误判：`sim_run()` 返回 0 只代表
     「这一块没跑满 count」（idle/hlt 快进、异常投递都会这样），不能当永久
     停机；只有 `sim_halt_info() != 0` 才是真停机。
+
+80. **浏览器（headless Chromium + wasm）登录并执行命令 —— PASS**。
+    `MAX_SECONDS=9000 CHUNK=2000000 node tests/browser_alpine.js`：
+    ```
+    [alpine] 看到 login: → 发送 root
+    [alpine] 看到 shell 提示符 → 发送 uname -m
+    [alpine] 用时 1064s，指令 888M，串口 713 字节
+    [alpine] 登录并执行命令成功: MARK-OK
+    [alpine] wasm 跑 Linux/Alpine 通过
+    ```
+    `build/browser_alpine.log` 尾部：
+    ```
+    login[444]: root login on 'ttyS0'
+    (none):~# uname -m; echo MARK-OK
+    x86_64
+    MARK-OK
+    ```
+    排查过程中修掉的两个**测试脚本** bug（都不是模拟器问题）：
+    1. `sim_serial_out(ptr, cap)` 的第一个参数是 wasm 线性内存里的地址，
+       脚本却把 JS 的 `Uint8Array` 传了进去 → 被强转成 0，把 wasm 自己的
+       全局数据写坏（现象：页面里 guest 跑到一半停滞、串口全是 `\0`、
+       `text` 长度在涨但内容不可读）。改为 `sim_serial_out(0x0f800000, 64K)`
+       并用 `new Uint8Array(w.memory.buffer, 0x0f800000, n)` 读。
+    2. `sim_run()` 返回 0 只代表「这一块没跑满 count」，不能当永久停机；
+       只有 `sim_halt_info() != 0` 才是真停机。

@@ -99,11 +99,15 @@ async function main() {
       const rc = w.sim_init(STAGE, fw.length);
       w.sim_riptrace_start();
       window.__w = w;
-      window.__out = new Uint8Array(65536);
       window.__text = '';
+      /* 关键：sim_serial_out 的第一个参数是 **wasm 线性内存里的地址**，不是
+       * JS 的 Uint8Array。传 JS 数组会被强转成 0，直接写坏 wasm 自己的全局
+       * 数据（曾经导致页面里的 guest 跑到一半就停滞、串口全是 \0）。 */
       window.__drain = () => {
-        const n = w.sim_serial_out(window.__out, window.__out.length);
-        if (n > 0) window.__text += new TextDecoder().decode(window.__out.subarray(0, n));
+        const n = w.sim_serial_out(0x0f800000, 65536);
+        if (n > 0)
+          window.__text += new TextDecoder().decode(
+            new Uint8Array(w.memory.buffer, 0x0f800000, n));
         return n;
       };
       window.__step = (n) => { const r = w.sim_run(n); window.__drain(); return r; };
