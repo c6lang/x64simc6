@@ -42,6 +42,16 @@ R/W/NX/U-S 四条权限、跨页 4/8 字节访问、开/关缓存随机对拍 40
 | native 登录 | `tools/boot_login.py` | `PASS: Alpine booted to login and ran 'uname -m'` |
 | wasm 登录 | `node tests/wasm_login.js` | `WASM LOGIN OK (MARK-OK)`（1194M 条 / 1056s / 713B） |
 | 浏览器登录 | `node tests/browser_alpine.js` | `MARK-OK`（1062s / 874M 条 / 658B） |
+| 源码包独立构建 | 解压 `-src.tar.gz` 后 `./build.sh test` | 六项全过 |
+
+### 产物
+
+| 文件 | 内容 |
+| --- | --- |
+| `x64simc6-1.0.2-src.tar.gz` | 源码（git archive，不含 build/） |
+| `x64simc6-1.0.2-dist.tar.gz` | `sim`（native）+ `sim.wasm` + `web/` + 文档 |
+| `x64simc6-1.0.2-firmware.tar.gz` | `build/firmware.bin`（kernel+initrd 打包，34 MB） |
+| `SHA256SUMS` | 上面三件的校验和 |
 
 ---
 

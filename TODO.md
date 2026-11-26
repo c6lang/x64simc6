@@ -110,4 +110,4 @@
 - [x] wasm 登录验收 `WASM LOGIN OK (MARK-OK)`（1194M 条 / 1056s / 713B）
 - [x] 浏览器验收 `MARK-OK`（1062s / 874M 条 / 658B 串口）
 - [x] 文档 §82 更正 + 新增 §83（两条「快路径必须与慢路径等价」的坑）
-- [ ] 发布 v1.0.2（tag + 三件产物 + SHA256SUMS）
+- [x] 发布 v1.0.2（tag v1.0.2 + src/dist/firmware 三件产物 + SHA256SUMS，源码包独立构建 `./build.sh test` 六项全过）
