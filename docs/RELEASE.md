@@ -114,9 +114,10 @@ cd web && python3 -m http.server 8000     # 打开 http://localhost:8000/
 
 | 文件 | 内容 |
 | --- | --- |
-| `x64simc6-1.0.0-src.tar.gz` | `git archive` 出的完整源码（src/web/tests/tools/docs） |
+| `x64simc6-1.0.0-src.tar.gz` | `git archive` 出的完整源码（src/web/tests/tools/docs），已验证可独立构建并通过自检 |
 | `x64simc6-1.0.0-dist.tar.gz` | 可直接运行：`sim` + `sim.wasm` + `web/` 静态文件 + README/RELEASE |
-| `SHA256SUMS` | 上面两个包的校验和 |
+| `x64simc6-1.0.0-firmware.tar.gz` | Alpine 引导固件 `firmware.bin`（33 MiB，压后 14 MiB）——放到 `web/` 同级即可直接在浏览器里跑 |
+| `SHA256SUMS` | 上面三个包的校验和 |
 | `RELEASE.md` | 本文件副本 |
 
 ## 仓库
