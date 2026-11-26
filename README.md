@@ -1,6 +1,10 @@
-# x64simc6
+# x64simc6 v1.0.0
 
 用 C6 语言实现的 x86-64 模拟器，可在 native 与浏览器 wasm 两种形态运行；浏览器端通过真实 `fetch()` + Cache Storage + IndexedDB 提供网络与“页面存储当文件系统”。
+
+**当前状态（v1.0.0）**：原生 Alpine Linux 固件在 native、wasm（Node 驱动）和
+headless Chromium 三条路径上都已引导到 `(none) login:`，自动输入 `root` 后
+执行 `uname -m` 得到 `x86_64`。发布说明见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
 ## 快速开始
 
@@ -31,12 +35,26 @@ cd web && python3 -m http.server 8000
 ./build/sim build/firmware.bin
 ```
 
+## 验证
+
+```sh
+./build.sh test                                   # 5 项：payload/单元/CPL3/C6SIM64/wasm 冒烟
+SIM=build/sim python3 tools/difftest/difftest.py  # 1236 条指令级差分用例
+node tests/browser_e2e.js                         # fetch/Cache Storage/IndexedDB/hostfs
+node tests/browser_alpine.js                      # 浏览器里跑到 login 并自动登录
+node tests/wasm_login.js                          # wasm 里跑到 login 并自动登录
+```
+
 ## 已知限制
 
-- 真实 Alpine Linux 直接引导仍在调试中：已能解码执行数万条内核指令并提供 PVH start info，但尚未到达 `localhost login:`。
-- wasm 路径禁用 `interface` / `err` / `f-string` 与自定义 import；64 位一律用 `unsigned long long`（详见 `docs/DESIGN.md` §13）。
-- 浏览器 virtio-net / c6blk 目前是 MMIO 寄存器桩，v2 再接真实后端。
+- 引导速度慢：到 `login:` 约需 9 亿～12 亿条 guest 指令（native 约 25 分钟、
+  wasm 约 17 分钟、headless Chromium 约 18 分钟）。
+- wasm 路径禁用 `interface` / `err` / `f-string` 与自定义 import；64 位一律用
+  `unsigned long long`（详见 `docs/DESIGN.md` §13）。
+- 浏览器 virtio-net / c6blk 是 MMIO 寄存器桩；真正的网络与文件系统走
+  `hostfs` 桥（`fetch()` / Cache Storage / IndexedDB），已由 `browser_e2e` 验证。
 
 ## 性能
 
-native 解释器约 20k–200k 指令/秒（取决于是否触发 MMIO/分页）；浏览器 wasm 端每帧 20k 条指令，避免阻塞 UI。
+native 解释器约 1.0–1.5M 条/秒（含 idle 快进），wasm 约 0.85–1.1M 条/秒；
+分块调用避免阻塞 UI。
