@@ -90,7 +90,8 @@ cd web && python3 -m http.server 8000     # 打开 http://localhost:8000/
 
 ## 产物
 
-- `build/sim`：native 解释器（ELF x86-64）
+- `build/sim`：native 解释器（ELF x86-64，约 258 MiB —— c6c 把 `g_m` 的
+  128 MiB guest RAM 等静态区直接铺进了文件，压缩后只有 ~1.1 MiB）
 - `web/sim.wasm`：wasm 模块（无 import，导出 `sim_*` 接口）
 - `web/index.html` + `web/app.js`：浏览器界面（串口、网络、文件系统、性能面板）
 - `docs/DESIGN.md`：80 节详细设计与逐问题排查记录
@@ -101,11 +102,22 @@ cd web && python3 -m http.server 8000     # 打开 http://localhost:8000/
 - 引导慢：到 `login:` 需要 9 亿～12 亿条 guest 指令（native ~25 分钟、
   wasm/浏览器 ~17–18 分钟）；解释器吞吐 native 约 1.0–1.5M 条/秒、
   wasm 约 0.85–1.1M 条/秒。
+- native 可执行文件约 258 MiB（大块零填充，gzip 后 ~1.1 MiB）；分发请用
+  `x64simc6-1.0.0-dist.tar.gz`。
 - 未实现：SMP（单核）、真实 virtio 队列（网络/块设备仍是 MMIO 桩，实际
   网络与存储走浏览器 hostfs 桥）、ACPI 表、VGA 文本控制台（getty 只保证
   在 ttyS0 上）。
 - wasm 后端限制见 `docs/DESIGN.md` §13：不支持 `interface` / `err` /
   f-string / 自定义 import，64 位一律用 `unsigned long long`。
+
+## 发布产物（`build/release/v1.0.0/`）
+
+| 文件 | 内容 |
+| --- | --- |
+| `x64simc6-1.0.0-src.tar.gz` | `git archive` 出的完整源码（src/web/tests/tools/docs） |
+| `x64simc6-1.0.0-dist.tar.gz` | 可直接运行：`sim` + `sim.wasm` + `web/` 静态文件 + README/RELEASE |
+| `SHA256SUMS` | 上面两个包的校验和 |
+| `RELEASE.md` | 本文件副本 |
 
 ## 仓库
 
