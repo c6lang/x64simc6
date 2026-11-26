@@ -1141,3 +1141,23 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     MARK-OK
     ```
     同时 `./build.sh test` 五项全过、`difftest 1236/1236`。
+
+79. **wasm 侧跑到登录并执行命令（Node 驱动）**。
+    新增 `tests/wasm_login.js`（与浏览器同一套 wasm 导出，不依赖浏览器）：
+    分块 `sim_run()`、抽串口、看到 `login:` 就 `sim_serial_in('root\n')`、
+    看到 shell 提示符再发 `uname -m; echo MARK-OK`。
+    ```
+    [wasm_login] 926s insns=799091640 看到 login: → 发送 root
+    [wasm_login] insns=1193991187 text=713B loops=444 用时=1068s
+    WASM LOGIN OK (MARK-OK)
+    ```
+    串口尾部：
+    ```
+    login[444]: root login on 'ttyS0'
+    (none):~# uname -m; echo MARK-OK
+    x86_64
+    MARK-OK
+    ```
+    顺带修了 `tests/wasm_boot_smoke.js` 的误判：`sim_run()` 返回 0 只代表
+    「这一块没跑满 count」（idle/hlt 快进、异常投递都会这样），不能当永久
+    停机；只有 `sim_halt_info() != 0` 才是真停机。

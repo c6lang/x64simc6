@@ -44,7 +44,9 @@ const CAP = 1 << 16;
     }
     if (text.indexOf('Linux version') >= 0 || text.indexOf('Run /init') >= 0 ||
         text.indexOf('login:') >= 0 || text.indexOf('Welcome to Alpine') >= 0) break;
-    if (alive === 0) break;
+    /* sim_run 返回 0 只表示这一块没把 count 跑满（idle/hlt 快进、异常投递等），
+     * 不能当作永久停机。只有 halt_info 非 0 才是真停机。 */
+    if (Number(w.sim_halt_info()) !== 0) break;
   }
 
   const insns = Number(w.sim_insns());

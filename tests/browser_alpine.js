@@ -6,7 +6,12 @@
  *       然后分块 sim_run() 并抽取串口输出，直到看到 "Run /init as init process"。
  *
  * 环境变量：
- *   BOOT_TARGET  期望出现的关键字（默认 "Run /init as init process"）
+ *   BOOT_TARGET  期望出现的引导阶段关键字（默认 "Run /init as init process"）
+ *   LOGIN_TARGET 登录后要看到的关键字（默认 "MARK-OK"）
+ *
+ * 看到登录提示后自动往串口喂输入：先 "root\n"，看到 shell 提示符再发
+ * "uname -m; echo MARK-OK\n"，因此本脚本验证的是「浏览器 + wasm 里真的
+ * 能登录并执行命令」，而不只是内核跑起来。
  *   MAX_SECONDS  整体超时（默认 3600）
  *   CHUNK        每次 evaluate 跑的指令数（默认 2000000）
  */
@@ -17,6 +22,7 @@ const PORT = 8132;
 const CDP_PORT = 9233;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const TARGET = process.env.BOOT_TARGET || 'Run /init as init process';
+const LOGIN_TARGET = process.env.LOGIN_TARGET || 'MARK-OK';
 const MAX_SECONDS = Number(process.env.MAX_SECONDS || 3600);
 const CHUNK = Number(process.env.CHUNK || 2000000);
 
@@ -101,6 +107,14 @@ async function main() {
         return n;
       };
       window.__step = (n) => { const r = w.sim_run(n); window.__drain(); return r; };
+      window.__inbox = new Uint8Array(256);
+      window.__send = (s) => {
+        const b = new TextEncoder().encode(s);
+        if (b.length > 240) throw new Error('input too long');
+        const u8 = new Uint8Array(w.memory.buffer);
+        u8.set(b, 0x0f900000);
+        return w.sim_serial_in(0x0f900000, b.length);
+      };
       window.__riptrace = () => {
         const n = w.sim_rip_trace_n();
         const a = new Array(n);
@@ -143,13 +157,32 @@ async function main() {
           console.log(`[alpine] RIP trace ${tr.length} 条 -> build/wasm_rip.json`);
         }
       }
-      if (r.ret === 0) {
-        const info = await evaluate(`window.__info()`);
+      const info = await evaluate(`window.__info()`);
+      if (r.ret === 0 && info.hi !== 0) {
         console.log('[alpine] halt info:', JSON.stringify(info));
       }
+      /* 看到登录提示就喂 root；看到 shell 提示符就发验证命令。 */
+      {
+        const st = await evaluate(`(() => {
+          const t = window.__text;
+          return { login: t.includes('login:'), shell: t.includes(':~#') || t.includes('(none):~#'),
+                   wel: t.includes('Welcome to Alpine') };
+        })()`);
+        if (st.login && !global.__sentRoot) {
+          global.__sentRoot = true;
+          await evaluate(`window.__send('root\\n')`);
+          console.log('[alpine] 看到 login: → 发送 root');
+        }
+        if ((st.shell || st.wel) && !global.__sentCmd) {
+          global.__sentCmd = true;
+          await evaluate(`window.__send('uname -m; echo MARK-OK\\n')`);
+          console.log('[alpine] 看到 shell 提示符 → 发送 uname -m');
+        }
+      }
       const has = await evaluate(`window.__text.includes(${JSON.stringify(TARGET)})`);
-      if (has) { hit = true; break; }
-      if (r.ret === 0) break;                  /* 模拟器停机 */
+      const done = await evaluate(`window.__text.includes(${JSON.stringify(LOGIN_TARGET)})`);
+      if (done) { hit = true; break; }
+      if (r.ret === 0 && info.hi !== 0) break;   /* 真停机 */
     }
 
     const text = await evaluate(`window.__text`);
@@ -158,7 +191,7 @@ async function main() {
     fwlog.mkdirSync('build', { recursive: true });
     fwlog.writeFileSync('build/browser_alpine.log', text);
     console.log(`[alpine] 用时 ${secs.toFixed(0)}s，指令 ${(insns / 1e6).toFixed(0)}M，串口 ${text.length} 字节`);
-    console.log(hit ? `[alpine] 命中目标: ${TARGET}` : `[alpine] 未命中目标: ${TARGET}`);
+    console.log(hit ? `[alpine] 登录并执行命令成功: ${LOGIN_TARGET}` : `[alpine] 未命中目标: ${LOGIN_TARGET}`);
     if (!hit) {
       console.log('[alpine] 串口尾部: ' + text.slice(-400).replace(/\s+/g, ' '));
       process.exitCode = 1;
