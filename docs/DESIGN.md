@@ -1186,3 +1186,34 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
        并用 `new Uint8Array(w.memory.buffer, 0x0f800000, n)` 读。
     2. `sim_run()` 返回 0 只代表「这一块没跑满 count」，不能当永久停机；
        只有 `sim_halt_info() != 0` 才是真停机。
+
+81. **TLB 命中率为 0 —— 每条指令都在走四级页表（性能根因之二）**。
+    现象：`--payload` 的 tight loop 只有 0.32M 条/秒（`add rax,1; cmp; jne`
+    10M 条 31 秒）。加计数器后一目了然：
+    ```
+    [TLB] hits=0 walks=20000002 mt=20006761
+    ```
+    **每次 mem_translate 都 miss**。两个错误叠加：
+    1. 4 KiB 页填充时写死 `flags = TV_P | TV_U | TV_X` —— 等于把所有页
+       都标成「可执行」也就罢了，而命中判断当时写的是
+       `(user != 2 || !(flags & TV_X))`，取指要求 **没有** TV_X，正好相反；
+       于是取指永远不命中（数据访问因为不看 TV_X 反而能命中）。
+    2. 1 GiB / 2 MiB 大页填充把 `TV_U` 也写死，导致内核页在 CPL3 下可以
+       靠 TLB 命中华丽地绕过 U/S 检查（正确性隐患）。
+    统一语义后（`TV_X` = 可执行，`TV_U` = 用户可访问，都按 PTE 位来）：
+    ```
+    [TLB] hits=20000001 walks=1
+    ```
+    同一段 payload 的前后对比（10M 条）：
+    | payload | 修复前 | 修复后 | 提升 |
+    | --- | --- | --- | --- |
+    | `jmp $` | 34.7s | 10.3s | 3.4× |
+    | `nop; jmp` | 28.5s | 8.7s | 3.3× |
+    | `add/cmp/jne` | 31.1s | 14.8s | 2.1× |
+    整机引导到 `login:` 的墙钟几乎没变（native ~900s、wasm ~1105s）：内核
+    代码/数据都在高半区，`mem_translate` 走的是 direct-map 快捷返回，本来就
+    不查 TLB；真正受益的是**低地址的用户态代码**（init 脚本、payload、差分
+    测试），`difftest 1236/1236` 与 `build.sh test` 五项全过，native/wasm
+    登录验收也重新 PASS。
+    INVLPG 目前是「整 TLB 刷新」（保守但正确），CR3/LMSW 写入同样刷新，
+    所以打开真实 TLB 缓存不会踩到陈旧映射。

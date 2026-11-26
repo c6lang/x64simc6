@@ -258,7 +258,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         flags = tlb_val[idx] & 15;
         if ((flags & TV_P) && (!wr || (flags & TV_W)) &&
             (!is_user || (flags & TV_U)) && (!user || 1) &&
-            (user != 2 || !(flags & TV_X)))
+            (user != 2 || (flags & TV_X)))   /* TV_X = 该页可执行：取指必须要求它 */
             return (tlb_val[idx] & ~((u64)15)) | (va & 0xfff);
     }
 
@@ -284,8 +284,9 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
                 pg_fault(va, wr, is_user, pf_ec);
                 return 0;
             }
-            flags = TV_P | TV_U;
+            flags = TV_P;
             if (e & 2) flags |= TV_W;
+            if (e & 4) flags |= TV_U;
             if (!(e & ((u64)1 << 63))) flags |= TV_X;
             pa = (e & 0x000fffffc0000000ull) | (va & 0x3fffffff);
             tlb_tag[idx] = vpn;
@@ -298,8 +299,9 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
                 pg_fault(va, wr, is_user, pf_ec);
                 return 0;
             }
-            flags = TV_P | TV_U;
+            flags = TV_P;
             if (e & 2) flags |= TV_W;
+            if (e & 4) flags |= TV_U;
             if (!(e & ((u64)1 << 63))) flags |= TV_X;
             pa = (e & 0x000fffffffe00000ull) | (va & 0x1fffff);
             tlb_tag[idx] = vpn;
@@ -312,8 +314,15 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         pg_fault(va, wr, is_user, pf_ec);
         return 0;
     }
-    flags = TV_P | TV_U | TV_X;
+    /* 4 KiB 页：TV_X 表示「该页可执行」，必须按 PTE 的 NX 位来置；TV_U
+     * 表示「用户可访问」，必须按 U/S 位来置。历史上这里写死成
+     * TV_P|TV_U|TV_X（等于所有页都「可执行」），而取指要求 TV_X 存在，
+     * 于是**每次取指都 TLB 不命中**、每条指令都走一遍四级页表
+     * （实测 hits=0 / walks=20,000,002，10M 条指令 31 秒）。 */
+    flags = TV_P;
     if (e & 2) flags |= TV_W;
+    if (e & 4) flags |= TV_U;
+    if (!(e & ((u64)1 << 63))) flags |= TV_X;
     pa = (e & 0x000ffffffffff000ull) | (va & 0xfff);
     tlb_tag[idx] = vpn;
     tlb_val[idx] = (pa & ~((u64)0xfff)) | flags;
