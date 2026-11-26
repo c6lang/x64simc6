@@ -1,4 +1,99 @@
-# x64simc6 v1.0.2 发布说明
+# x64simc6 v1.1 发布说明
+
+发布日期：2026-11-27
+
+## v1.1 变更（相对 v1.0.2）
+
+性能版本：**默认构建的整机引导快 28.8×，c6c 自举构建快 1.64×**，指令语义
+不变（difftest 1236/1236，900M 引导串口输出逐字节一致）。
+
+### 1. 构建：native 默认走 `c6c --emit-ctu` + 系统 cc
+
+v1.0.2 的剖析结论是：瓶颈已经不在算法，而在 **c6c 的代码生成** —— 它不做
+内联、不做寄存器分配，`step()` 的每个局部变量/临时量都落栈槽，一条 guest
+指令要几千条宿主指令。v1.1 让 c6c 只做前端：
+
+```sh
+c6c --emit-ctu -I src src/<tu>.c6 -o build/ctu/<tu>.c
+cc -O2 -c build/ctu/<tu>.c -o build/ctu/<tu>.o
+cc -O2 -o build/sim build/ctu/*.o
+```
+
+同一份 C6 源码，20M 条整机引导 **121.9G → 6.41G** 条宿主指令，墙钟
+**27.4s → 0.95s**；到 `login:`（约 9 亿条）从 17–25 分钟降到 **56 秒**。
+`--emit-ctu` 产物有三处 c6 运行时约定需要就地修正（`build.sh` 的
+`ctu_fixup()`，逐条带注释）：
+
+- `stdin/stdout/stderr` 在 c6c 的 `<stdio.h>` 里是 `(FILE *)0/1/2` 魔法指针
+  （c6c 运行时认这三个值，glibc 的 `fflush` 会直接段错误）→ 在 emit 出来的
+  C 里换成真正的 `stdout/stderr/stdin` 并补 extern 声明；
+- `main.c6` 不再用 `<poll.h>`：c6c 没有该头，会落到系统 glibc 头并把
+  `struct timespec` 带进来，和 c6c 自带 `<sys/stat.h>` 重定义。自己声明
+  `struct pollfd` + `poll()` 即可；
+- wasm 构建继续走 tcc-c6，`<stdio.h>` 用 `#if !defined(C6_WASM)` 包起来
+  （tcc-c6 的 wasm 后端遇到这个头会生成非法 wasm）。
+
+没有系统 cc 时自动退回 c6c 自举；`C6_PURE=1 ./build.sh native` 可强制自举。
+
+### 2. 源码级优化（两条构建路径都受益）
+
+- **启动路径**：`machine_reset()` 首次调用直接跳过 128MiB 清零（BSS 本来
+  全 0），后续 reboot 才按 4 字节块清；固件加载不再逐字节 `mem_w8`，内核/
+  initrd 在 0..128MiB 恒等映射区里按 4 字节块直接拷进 `g_m.ram`。
+  进程启动从 **6.4G 条宿主指令降到 390 万条**。
+- **翻译快路径**：`mem_fetch8/mem_r*/mem_w*` 里原来的
+  `pg_check → pg_fast → phys_*` 四层真实调用展开成宏 `TR_PA`（与
+  `mem_translate()` 同序：未开分页 → direct map → 两个高半区窗口 → TLB →
+  慢路径；三个窗口按命中率排序），RAM 访问直接下标 `g_m.ram[]`。
+  `--cachecheck` 照旧每次快路径命中与慢路径对拍。
+- **查表**：`PREFIX_TAB[256]`（前缀循环）、`PARITY_TAB[256]`（8 次移位循环）、
+  `SZ_MASK_TAB`/`SIGN_BIT_TAB`（比较链，注意要照抄「1/2/4 以外返回全 1 /
+  bit63」的旧行为，否则 SSE 的 `s==0` 调用会被清零）；`PRE_*`/`RF_*`/
+  `CR0_*`/`TF_*`/`TV_*`/`TLB_SIZE` 等常量宏全部改字面量（c6c 对
+  `(u64)1 << n` 会生成 movabs+shl）。
+- **`main.c6`** 去掉 `defer/errdefer/try/catch/f-string`：单个 TU 可以
+  `-c` 编译，也能被 `--emit-ctu` 吃下。
+- 试过但**没有采用**：每条指令开头填一次的 16 字节取指窗口。c6c 下
+  小函数调用 + 逐字节拷贝比「再翻译一次」还贵，`jmp $` 20M 条从 60.7G
+  **劣化到 88.0G**。
+
+### 实测（`taskset` 固定核、`perf stat -e instructions:u`）
+
+宿主指令数（与机器负载无关）：
+
+| 负载 | v1.0.2 (c6c) | v1.1 自举 (c6c) | v1.1 默认 (cc -O2) |
+| --- | --- | --- | --- |
+| 20M 条整机引导（含启动） | 121.9G | 72.4G（1.68×） | 6.41G（19.0×） |
+| 100M 条整机引导（稳态） | 640.9G | 444.8G（1.44×） | 36.6G（17.5×） |
+| `jmp $` 紧循环 20M 条 | 77.9G | 60.7G（1.15×） | 5.00G（15.6×） |
+
+到 `login:` 的墙钟（900M 条 guest 指令，同一台机器顺序实测；共享机器，
+±10% 抖动）：
+
+| 构建 | 墙钟 | 相对 v1.0.2 |
+| --- | --- | --- |
+| v1.0.2 (c6c) | 1203 秒（20.1 分钟） | 1× |
+| v1.1 自举 (c6c) | 998 秒（16.6 分钟） | 1.21× |
+| v1.1 默认 (cc -O2) | **56 秒** | **21.4×** |
+
+20M 行的自举比例高于 100M 稳态，是因为 v1.1 去掉了每次启动固定的
+「清 128MiB RAM + 逐字节搬 34MiB 固件」（约 12G 条宿主指令）。
+900M 条引导的串口输出三种构建逐字节一致（`ser_out=309 irq4=181`）。
+
+wasm 仍走 tcc-c6，纯源码级优化：20M 条引导 46.1s → 28.2s（1.63×）。
+
+### 验收
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 单元/冒烟 | `./build.sh test` | 全过（payload / 单元 / CPL3 / pcache / wasm 冒烟） |
+| 指令差分 | `tools/difftest/difftest.py` | 1236/1236，自举与默认两种构建各跑一遍 |
+| 900M 引导 | `build/sim firmware.bin --stopt=900000000` | `ser_out=309 irq4=181`，逐字节一致 |
+| 登录验收 | `tools/boot_login.py` | 两种构建都 PASS（`uname -m` → `x86_64`） |
+
+---
+
+# x64simc6 v1.0.2 发布说明（历史）
 
 发布日期：2026-11-27
 

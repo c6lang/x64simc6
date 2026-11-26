@@ -1,4 +1,7 @@
 /* boot.c6 —— C6FW 固件解析 + Linux x86-64 直接引导 */
+#if !defined(C6_WASM)
+#include <stdio.h>
+#endif
 #include "c6sim.h"
 
 #define BP_HDR_OFF   0x1f1u
@@ -194,6 +197,17 @@ u64 boot_probe(void)
     return (g_m.fw_kernel_len << 8) | ((g_m.fw_kernel != 0) ? 1u : 0u);
 }
 
+/* 把固件按 4 字节块搬进 0..128MiB 的恒等映射区 */
+static void copy_to_ram(u32 pa, const u8 *src, u32 len)
+{
+    u32 i = 0;
+    u32 n4 = len / 4u;
+    u32 *d = (u32 *)&g_m.ram[pa];
+    const u32 *s = (const u32 *)src;
+    for (i = 0; i < n4; i++) d[i] = s[i];
+    for (i = n4 * 4u; i < len; i++) g_m.ram[pa + i] = src[i];
+}
+
 /* wasm 专用入口：c6 的 wasm 后端在不同 TU 里对同一结构体成员的偏移不一致
  * （实测 wasm.c6 写 fw_kernel_len、boot.c6 读出来是 0），所以固件字段的
  * 写入必须和 machine_boot() 在同一个 TU 内完成。 */
@@ -231,10 +245,11 @@ int machine_boot(void)
     if (g_fw_ilen > (RAM_TOP - INITRD_PA)) return -3;
 
     zero_boot_params();
-    for (i = 0; i < g_fw_klen; i++)
-        mem_w8(KERNEL_PA + i, g_m.fw_kernel[i]);
-    for (i = 0; i < g_fw_ilen; i++)
-        mem_w8(INITRD_PA + i, g_m.fw_initrd[i]);
+    /* 内核/initrd 落在 0..128MiB 的恒等映射区，直接搬进 RAM 即可。
+       逐字节 mem_w8 要 5.5G 条宿主指令（约 1.5 秒）；c6 运行时的 memcpy
+       也是字节循环，这里按 4 字节块搬（wasm32 下 u32 指针最稳）。 */
+    copy_to_ram(KERNEL_PA, g_m.fw_kernel, g_fw_klen);
+    copy_to_ram(INITRD_PA, g_m.fw_initrd, g_fw_ilen);
     for (i = 0; i < g_m.cmdline_len; i++)
         mem_w8(CMDLINE_PA + i, g_m.cmdline[i]);
     mem_w8(CMDLINE_PA + g_m.cmdline_len, 0);

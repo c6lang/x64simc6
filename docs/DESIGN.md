@@ -253,9 +253,9 @@ fetch_byte() → 解析 prefix（REX / 66 / 67 / F2 / F3 / LOCK / 段覆盖）
 | `interface` + 结构体方法 | `interface BusDevice { int read(u64 addr, u32 size); void write(...); }`；串口/PIC/PIT/PCI/LAPIC 各自作为实现者放进 `BusDevice[:]` 数组，`foreach` 遍历分派 MMIO/I/O；`CPU.step()`、`Machine.run()`、`Serial.put()` 等也写成方法 |
 | `T[:]` 切片 + `foreach` | 固件字节视图 `u8[:]`、串口环形缓冲视图、e820 表项数组、设备数组、指令字节切片，全部用切片和 `foreach (…)` 遍历；切片下标自带边界检查 |
 | 元组 `(T1,T2)` | `mmu.translate()` 返回 `(u64 pa, u32 fault)`；`decode_modrm()` 返回 `(int disp, int regs)`；`(pa, ec) = ...` 解构赋值；页表项解析也用元组 |
-| `defer` / `errdefer` | native 固件加载：`FILE *f = fopen(...)` 后立刻 `defer fclose(f)`；分配临时缓冲后 `defer free(...)`；`errdefer` 回滚部分装入的机器状态 |
-| `int!error` + `err` + `try` / `catch` | `Firmware.load()`、`Machine.boot()` 等返回 `int!error`；头校验失败 `return err(E_BAD_MAGIC, f"bad magic ...")`；上层用 `try`/`catch e { host_diag(e.msg); }` |
-| `f"..."` | 所有诊断信息：`host_diag(f"UD at rip={rip;016x} op={op;02x}")`——零分配，wasm 控制台缓冲也能用 |
+| `defer` / `errdefer` | v1.0.2 前用于 native 固件加载（`defer fclose(f)` / `defer free(...)`）。**v1.1 起 `main.c6` 改为朴素写法**：`--emit-ctu` 不降级这些语法，为了同一个入口文件既能被 c6c 直接编、也能进宿主 cc 快速构建，错误路径改成显式 `fclose/free`（见 §84） |
+| `int!error` + `err` + `try` / `catch` | 同上，v1.0.2 前 `main.c6` 用它做固件加载/boot 的错误链；v1.1 起改为返回 `int` + 打印原因。`machine_*` 接口本来就是返回 rc，`try/catch` 只影响 CLI 层 |
+| `f"..."` | v1.0.2 前用于 `main.c6` 的错误信息；v1.1 起 CLI 用 `printf("... %s", ...)`。wasm 侧本来就不用 f-string（tcc-c6 后端不支持） |
 | `test "..." { }` | `tests/test_cpu.c6` 中测 ALU 标志、ModRM 解码、分页/权限、e820、固件头解析；`build.sh test` 用 `c6c -test` 跑 |
 | 枚举命名空间 `E.FIELD` | 错误码、异常号、设备状态用 `enum Err { Err.BAD_MAGIC = 1, ... }`，避免裸名冲突 |
 | tag 类型名、结构体方法、切片作为结构体成员 | `Machine` 内 `u8[:]` 视图成员，方法调用统一 `m.run()` 风格 |
@@ -1313,3 +1313,57 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
       三件套的分歧要到 init 起来（约 8 亿条、guest 6.2s）才暴露；
     - 用四象限（(a) 开/关 × (c) 开/关）把责任落到具体一件，再用
       `--cachecheck` 抓第一处现场；对拍比逐条断点快两个数量级。
+
+84. **v1.1 性能：把每指令开销压下去，再让宿主 cc 接管代码生成**。
+    v1.0.2 之后瓶颈已经不在算法而在 **c6c 的代码生成**：它不做内联、不做寄存器
+    分配，`step()` 的每个局部变量/临时量都落在栈槽里，一条 guest 指令要几千条
+    宿主指令。实测（`taskset` 固定核 + `perf stat -e instructions:u`）：
+    20M guest 指令整机引导 **121.9G** 条宿主指令 / 27.4s，其中 6.4G 是
+    `machine_reset()` 逐字节清 128MiB RAM、5.5G 是 `machine_boot()` 用
+    `mem_w8()` 一个字节一个字节搬 34MiB 固件 —— 这两笔是**每次启动都付**的。
+
+    1. **启动路径**（对短负载收益最大）
+       - `g_m` 在 BSS 里本来就是 0：`machine_reset()` 首次调用直接跳过整块清零，
+         后续（reboot）才按 4 字节块清；4 字节而非 8 字节是照顾 wasm32 指针。
+       - 固件加载不再走 `mem_w8`：内核/initrd 落在 0..128MiB 恒等映射区，
+         直接按 4 字节块拷进 `g_m.ram`。语义不变（同一物理地址、同一字节序）。
+       - 结果：进程启动从 **6.4G 条宿主指令降到 390 万**；20M 引导总指令数
+         因此直接少掉约 12G。
+    2. **解释器热路径**（对长负载有效）
+       - `mem_fetch8/mem_r*/mem_w*` 里 `pg_check -> pg_fast -> phys_*` 四层真实
+         函数调用展开成宏 `TR_PA` + `RAM_R8/R16/R32/R64` + `RAM_W16/32/64`。
+         `TR_PA` 与 `mem_translate()` **同序**：未开分页 → direct map →
+         `0xffffffff80000000`/`0xffffffff00000000` 两窗口 → TLB → 慢路径；
+         三个窗口按实测命中率排序。`--cachecheck` 仍然逐次对拍。
+       - `PREFIX_TAB[256]` 取代 10 条比较的前缀循环；`PARITY_TAB[256]` 取代
+         8 次移位循环；`SZ_MASK_TAB`/`SIGN_BIT_TAB` 取代比较链
+         （**注意**：旧实现对 1/2/4 以外的宽度一律返回全 1 / bit63，表里照抄，
+         否则 SSE 路径用 `s==0` 调 `sz_mask()` 会被清零 —— 这个坑在 difftest
+         的 `sse movq/pshuflw/pshufhw` 三条上现形）。
+       - `PRE_*`/`RF_*`/`CR0_*`/`TV_*`/`TLB_SIZE` 等常量宏全部改成字面量：
+         `(u64)1 << n` 在 c6c 里会生成 movabs+shl 序列。
+       - 取指窗口/每指令 16 字节缓冲**试过但没用**（89.1G vs 87.4G，且依赖
+         `memcpy` 的字节循环实现），最终没有保留。
+       - `main.c6` 改成不用 `defer/errdefer/try/catch/f-string` 的朴素写法，
+         单 TU 可以 `-c` 编译，也能被 `--emit-ctu` 吃下。
+    3. **构建路径**：`./build.sh native` 默认走
+       `c6c --emit-ctu`（每个 TU 出一个 C）→ 系统 `cc -O2` → 链接。
+       同一份 C6 源码，宿主 cc 有寄存器分配，20M 引导 **6.41G 条 / 0.95s**
+       （自举路径同负载 72.4G / 16.7s；wasm 走 tcc-c6，同负载 46.1s → 28.2s）。
+       稳态（100M 条引导）的宿主指令数：121.9G/20M 那种启动摊薄消失后，
+       v1.0.2 **640.9G**、自举 **444.8G**（1.44×）、默认 **36.6G**（17.5×）。
+       到 login 的 900M 条墙钟（同机顺序实测）：v1.0.2 1203s、自举 998s、
+       默认 **56s**；三种构建串口输出逐字节一致。
+       三处必要的就地修正（都在 `build.sh` 的 `ctu_fixup()` 里，有注释）：
+       - c6c 的 `<stdio.h>` 把 `stdin/stdout/stderr` 定义成 `(FILE *)0/1/2`
+         魔法指针（c6c 运行时认这三个值，glibc 的 `fflush` 会段错误）→
+         在 emit 出来的 C 里换成真正的 `stdout/stderr/stdin` 并补 extern；
+       - `main.c6` 不用 `<poll.h>`（c6c 没有这个头，会落到系统 glibc 头，
+         `struct timespec` 和 c6c 自带 `<sys/stat.h>` 重定义），自己声明
+         `struct pollfd` + `poll()`；
+       - wasm 构建必须继续走 tcc-c6：`cpu/dev/boot/machine` 的 `<stdio.h>`
+         用 `#if !defined(C6_WASM)` 包起来（tcc-c6 的 wasm 后端遇到这个头会
+         生成非法 wasm），并且 `fetch8()` 里**不能**用 `c->rip`，必须
+         `g_m.cpu.rip`（§10 的指针参数偏移 bug）。
+       自举路径保留为 `C6_PURE=1 ./build.sh native`，用于验证「C6 源码本身」
+       的正确性与可移植性。

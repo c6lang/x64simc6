@@ -1,7 +1,12 @@
 /* machine.c6 —— 整机组装与运行循环（c6 方法：m->run()） */
+#if !defined(C6_WASM)
+#include <stdio.h>
+#include <unistd.h>
+#endif
 #include "c6sim.h"
 
 static u64 g_ring[16] = {0};
+static int g_reset_once = 0;
 static u32 g_ring_i = 0;
 
 struct Machine g_m = {0};
@@ -17,11 +22,16 @@ static const char default_cmdline[] =
 void machine_reset(void)
 {
     struct Machine *m = &g_m;
-    u32 i = 0;
-    /* tcc-c6 的 wasm 后端在用局部指针取大偏移成员地址时会算错偏移，
-       这里直接整块清零全局结构，绕开该问题 */
-    for (i = 0; i < sizeof(g_m); i++)
-        ((u8 *)&g_m)[i] = 0;
+    /* g_m 有 128MiB RAM：逐字节清零在新进程里要 1.7 秒（6.4G 条宿主指令）。
+       首次调用时 BSS 本来就是全 0，直接跳过；后续（reboot）按 4 字节批量清。 */
+    if (g_reset_once != 0) {
+        /* 按 4 字节块清：wasm32 下指针 32 位，用 u32 指针最稳 */
+        u32 *zp = (u32 *)&g_m;
+        u32 zn = (u32)(sizeof(g_m) / 4u);
+        u32 zk = 0;
+        for (zk = 0; zk < zn; zk++) zp[zk] = 0;
+    }
+    g_reset_once = 1;
     m->serial.lsr = 0x60;
     m->serial.msr = 0xb0;
     m->instructions = 0;

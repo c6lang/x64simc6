@@ -1,8 +1,8 @@
-# x64simc6 v1.0.2
+# x64simc6 v1.1
 
 用 C6 语言实现的 x86-64 模拟器，可在 native 与浏览器 wasm 两种形态运行；浏览器端通过真实 `fetch()` + Cache Storage + IndexedDB 提供网络与“页面存储当文件系统”。
 
-**当前状态（v1.0.0）**：原生 Alpine Linux 固件在 native、wasm（Node 驱动）和
+**当前状态（v1.1）**：原生 Alpine Linux 固件在 native、wasm（Node 驱动）和
 headless Chromium 三条路径上都已引导到 `(none) login:`，自动输入 `root` 后
 执行 `uname -m` 得到 `x86_64`。发布说明见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
@@ -13,6 +13,11 @@ headless Chromium 三条路径上都已引导到 `(none) login:`，自动输入 
 ./build.sh test       # native payload、单元测试、wasm payload 冒烟
 ./tests/smoke.sh      # 上面的全部检查 + headless Chromium 端到端
 ```
+
+native 默认走快速构建：`c6c --emit-ctu` 把每个 TU 降成 C，再交给系统
+`cc -O2` 编（宿主 cc 有寄存器分配，整机引导到 `login:` 从 20 分钟降到 1 分钟）。
+没有系统 cc 时自动退回 c6c 自举；也可以用 `C6_PURE=1 ./build.sh native`
+强制自举路径。详细差异见 `docs/DESIGN.md` §84。
 
 运行手汇编 payload：
 
@@ -47,8 +52,8 @@ node tests/wasm_login.js                          # wasm 里跑到 login 并自�
 
 ## 已知限制
 
-- 引导速度慢：到 `login:` 约需 9 亿～12 亿条 guest 指令（native 约 25 分钟、
-  wasm 约 17 分钟、headless Chromium 约 18 分钟）。
+- 到 `login:` 约需 9 亿～12 亿条 guest 指令：v1.1 默认构建 native 约 1 分钟，
+  `C6_PURE=1` 自举构建约 17 分钟；wasm（tcc-c6 出码）约 11 分钟。
 - wasm 路径禁用 `interface` / `err` / `f-string` 与自定义 import；64 位一律用
   `unsigned long long`（详见 `docs/DESIGN.md` §13）。
 - 浏览器 virtio-net / c6blk 是 MMIO 寄存器桩；真正的网络与文件系统走
@@ -56,9 +61,33 @@ node tests/wasm_login.js                          # wasm 里跑到 login 并自�
 
 ## 性能
 
-native 解释器：tight loop 0.9–1.3M 条/秒，整机引导平均约 0.75M 条/秒
-（到 `login:` 约 17 分钟）；wasm 约 0.8–0.9M 条/秒（到 `login:` 约 18 分钟）。
-每 1000 万条的实测：`jmp 9.2s`、`nop 7.5s`、`add/cmp/jne 17.7s`；
-整机引导 6000 万条 **80.5s**（v1.0.1 87.3s）。
-v1.0.1 修 TLB 后比 v1.0.0 快 2.1–3.4 倍；v1.0.2 的解释器三件套在此基础上
-再快 **1.08×（引导）/ 1.13–1.34×（紧循环）**。
+native 有两条构建路径，源码完全相同：
+
+- **默认快速路径**（`./build.sh native`）：c6c 只做前端（`--emit-ctu`），
+  代码生成交给系统 `cc -O2`。c6c 不做内联、不做寄存器分配，每个局部变量都落
+  栈槽；宿主 cc 接手后解释器主循环的指令数降一个数量级。
+- **自举路径**（`C6_PURE=1 ./build.sh native`）：c6c 直接出码，用来验证
+  C6 源码本身的可移植性与正确性。
+
+宿主指令数（`taskset` 固定核 + `perf stat -e instructions:u`，与负载无关）：
+
+| 负载 | v1.0.2（c6c） | v1.1 自举（c6c） | v1.1 默认（cc -O2） |
+| --- | --- | --- | --- |
+| 20M 条整机引导（含启动） | 121.9G | 72.4G（1.68×） | 6.41G（19.0×） |
+| 100M 条整机引导（稳态） | 640.9G | 444.8G（1.44×） | 36.6G（17.5×） |
+
+20M 那行的自举比例比稳态高，是因为 v1.1 把每次启动都要付的
+「逐字节清 128MiB RAM + 逐字节搬 34MiB 固件」（约 12G 条宿主指令）去掉了；
+进程启动从 6.4G 条降到 390 万条。
+
+到 `login:`（900M 条 guest 指令，串口 309 字节、irq4=181）的墙钟，
+同一台机器上顺序实测：
+
+| v1.0.2 | v1.1 自举 | v1.1 默认 |
+| --- | --- | --- |
+| 20.1 分钟 | 16.6 分钟 | **56 秒** |
+
+（这台机器是共享的，墙钟有 ±10% 抖动；三种构建的 900M 串口输出逐字节一致。）
+wasm 仍由 tcc-c6 出码，同一套源码级优化同样受益：20M 条引导 46.1s → 28.2s
+（1.63×），启动阶段少的 19 秒来自不再逐字节清 128MiB RAM。
+具体改了什么、哪些试过但没用，见 `docs/DESIGN.md` §84。
