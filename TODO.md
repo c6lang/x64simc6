@@ -270,5 +270,9 @@
 - [x] JIT 子集：shift/imul/movsxd/98-99/cmovcc/pushfq-popfq/endbr64
       （块测试全过；900M 开/关串口一致）
 - [ ] JIT 子集再扩：setcc/xchg/cmpxchg/bswap、常用 SSE、rep movs/stos
-- [ ] JIT 编译策略：降低热块阈值/提高编译预算，量化编译成本与覆盖率
+- [x] JIT 采样编译 + good/bad RIP 位图、去 CR0/CR4 flush：900M 覆盖
+      107.5M 条（12.3%），墙钟 +24% → +14%，串口/指令数一致
+- [ ] JIT 链式分发 bug：JIT_CHAIN_FALL=0 在 20M 分叉，JIT_BATCH_ONE=1
+      MATCH；默认简单路径，待用 call/ret/memory 链测试定位
+- [ ] JIT 调采样间隔/编译预算，目标把 +14% 继续压低
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用

@@ -239,8 +239,19 @@ static int machine_step_loop(u64 count)
             if (stopt != 0 && stopt > g_m.instructions &&
                 (stopt - g_m.instructions - 1ull) < jlim)
                 jlim = stopt - g_m.instructions - 1ull;
-            if (jlim > 0)
-                jn = (u32)jit_try2(g_m.cpu.rip, (u32)jlim);
+            {
+                u64 jb = (g_m.cpu.rip >> 3) & 0x3fffffull;
+                u32 jbyte = (u32)(jb >> 3);
+                u8 jbit = (u8)(1u << (jb & 7));
+                int jgood = (g_jit_good[jbyte] & jbit) != 0;
+                if (jlim > 0) {
+                    if (jgood)
+                        jn = (u32)jit_try2(g_m.cpu.rip, (u32)jlim);
+                    else if ((g_m.instructions & 0x3full) == 0 &&
+                             (g_jit_bad[jbyte] & jbit) == 0)
+                        jn = (u32)jit_try_sample(g_m.cpu.rip, (u32)jlim);
+                }
+            }
             if (jn > 0) {
                 if ((u64)jn > jlim) g_jit_bad_budget++;
                 g_m.cur_rip = g_m.cpu.rip;

@@ -14,6 +14,7 @@ function makeJitEnv(getInst) {
   const NOCHAIN = process.env.JIT_NOCHAIN === '1';
   const PAGE_ONLY = process.env.JIT_CHAIN_PAGE === '1';
   const FALL_ONLY = process.env.JIT_CHAIN_FALL !== '0';
+  const BATCH_ONE = process.env.JIT_BATCH_ONE === '1';
   const SIMPLE = NOCHAIN || FALL_ONLY;   /* 默认不做分支链，直接走单块快路径 */
   const handles = [];
   const byRip = new Map();
@@ -85,6 +86,7 @@ function makeJitEnv(getInst) {
         if (rc !== 0) { total += rc; break; }
         total += e.n;
         if (NOCHAIN) break;
+        if (BATCH_ONE) break;
         if (FALL_ONLY && e.branch) break;
         const lo = dv.getUint32((state >>> 0) + (ripOff >>> 0), true);
         const hi = dv.getUint32((state >>> 0) + (ripOff >>> 0) + 4, true);

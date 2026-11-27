@@ -1954,12 +1954,10 @@ int step(struct CPUState *c)
                 if (c->cr[rm.reg & 15] != v) {
                     c->cr[rm.reg & 15] = v;
                     mem_tlb_flush();
-#if defined(C6_JIT)
-                    /* CR0/CR4 改分页模式：已翻译块的取指语义可能变，整体失效。
-                     * CR3 不刷：内核 text 是全局映射，进程切换不影响它。 */
-                    if ((rm.reg & 15) == 0 || (rm.reg & 15) == 4)
-                        jit_flush();
-#endif
+                    /* 不刷 JIT 缓存：生成代码不依赖 CR0/CR4（内存访问走
+                     * helper，按当前页表翻译）；内核 text 映射稳定，代码页
+                     * 变化由 SMC 写代数兜底。CR0/CR4 的频繁写入以前会把
+                     * 缓存清空，导致覆盖率上不去。 */
                 }
             } else if (op2 == 0x21) {
                 reg_write(c, rm.rm, opsz, 0);
@@ -2008,9 +2006,8 @@ int step(struct CPUState *c)
                 u16 v = (u16)reg_read(c, (m1 >> 3) & 7, 2);
                 c->cr[0] = (c->cr[0] & ~0xfull) | (v & 0xf);
                 mem_tlb_flush();
-#if defined(C6_JIT)
-                jit_flush();
-#endif
+                /* 同上：lmsw 不刷 JIT 缓存 */
+                
             } else if (regf == 6) {           /* 16 位 smsw */
                 reg_write(c, (m1 >> 3) & 7, 2, c->cr[0] & 0xffff);
             } else if (regf == 7) {           /* invlpg：整 TLB 刷新 */

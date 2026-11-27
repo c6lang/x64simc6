@@ -31,8 +31,8 @@
 
 #define JIT_MOD_MAX 8192
 #define JIT_MAX_INS 16
-#define JIT_CACHE 2048
-#define JIT_MAX_COMPILES 2048
+#define JIT_CACHE 8192
+#define JIT_MAX_COMPILES 8192
 #define JIT_SEEN 8192
 #define JIT_HOT 64
 
@@ -53,6 +53,8 @@ static u64 jit_n_hit = 0;
 static u64 jit_n_insn = 0;
 u64 g_jit_bad_boundary = 0;
 u64 g_jit_flush_gen = 0;
+u8 g_jit_bad[524288];
+u8 g_jit_good[524288];   /* 64K 个 64-bit 位图：不可翻译的 RIP，C 侧快速跳过 */
 int g_jit_trace = 0;
 u32 g_jit_trace_n = 0;
 u64 g_jit_bad_budget = 0;
@@ -1295,6 +1297,18 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
     return out.n;
 }
 
+static void jit_mark_bad(u64 rip)
+{
+    u32 jb = (u32)((rip >> 3) & 0x3fffffull);
+    g_jit_bad[jb >> 3] |= (u8)(1u << (jb & 7));
+}
+
+static void jit_mark_good(u64 rip)
+{
+    u32 jb = (u32)((rip >> 3) & 0x3fffffull);
+    g_jit_good[jb >> 3] |= (u8)(1u << (jb & 7));
+}
+
 /* 编译并实例化一个新块；成功返回句柄，失败返回 -1。 */
 static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
 {
@@ -1306,15 +1320,15 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
     u64 pa = 0;
 
     if (jit_compiles >= JIT_MAX_COMPILES)
-        return -1;
+        return -2;                    /* 预算满：不标 bad（flush 后可再编） */
     n = jit_decode_block(rip, ins, &end);
     if (n <= 0)
-        return -1;
+        return -1;                    /* 真的译不了：标 bad */
     if (g_m.cpu.exc_pending)
-        return -1;                    /* 取指缺页：交给解释器 */
+        return -2;                    /* 取指缺页：交给解释器 */
     pa = mem_translate(rip, 0, 0, 0);
     if (pa >= (u64)RAM_SIZE)
-        return -1;                    /* 只缓存 RAM 里的代码 */
+        return -2;                    /* 只缓存 RAM 里的代码 */
     len = jit_build_module(ins, n, end);
     if (len == 0)
         return -1;
@@ -1322,8 +1336,9 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
                        (u32)rip, (u32)(rip >> 32), (u32)n,
                        *pa_page, *gen, (u32)(ins[n - 1].branch || ins[n - 1].callret));
     if (h < 0)
-        return -1;
+        return -2;
     jit_compiles++;
+    jit_mark_good(rip);
     *n_out = (u32)n;
     *pa_page = (u32)(pa >> 12);
     *gen = jit_page_gen[(u32)(pa >> 12)];
@@ -1332,7 +1347,7 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
 
 /* 执行一个块，返回执行的客户机指令数；0 = 未处理，由解释器接手。
  * max_ins 用于 machine_run 的 stopt / 循环配额：块比它长就不跑。 */
-int jit_try2(u64 rip, u32 max_ins)
+int jit_try_common(u64 rip, u32 max_ins, int sample)
 {
     u32 rip_off = (u32)offsetof(struct Machine, cpu.rip);
     u32 slot = 0;
@@ -1346,6 +1361,12 @@ int jit_try2(u64 rip, u32 max_ins)
         return 0;
     if (rip < jit_lo || rip >= jit_hi)
         return 0;
+    if (jit_compiles >= JIT_MAX_COMPILES) {
+        if (sample) {
+            jit_mark_bad(rip);
+            return 0;
+        }
+    }
     slot = (u32)((rip >> 4) & (u64)(JIT_CACHE - 1));
     e = &jit_cache[slot];
     if (e->valid && e->rip == rip) {
@@ -1368,7 +1389,7 @@ int jit_try2(u64 rip, u32 max_ins)
             return rc;
         }
     }
-    {
+    if (!sample) {
         u32 ss = (u32)((rip >> 4) & (u64)(JIT_SEEN - 1));
         struct SeenEnt *se = &jit_seen[ss];
         if (!se->valid || se->rip != rip) {
@@ -1382,8 +1403,11 @@ int jit_try2(u64 rip, u32 max_ins)
         }
     }
     h = jit_compile(rip, &n, &pa_page, &gen);
-    if (h < 0)
+    if (h < 0) {
+        if (h == -1)
+            jit_mark_bad(rip);
         return 0;
+    }
     e->rip = rip;
     e->n = n;
     e->handle = (u32)h;
@@ -1407,9 +1431,19 @@ int jit_try2(u64 rip, u32 max_ins)
     }
 }
 
+int jit_try2(u64 rip, u32 max_ins)
+{
+    return jit_try_common(rip, max_ins, 0);
+}
+
+int jit_try_sample(u64 rip, u32 max_ins)
+{
+    return jit_try_common(rip, max_ins, 1);
+}
+
 int jit_try(u64 rip)
 {
-    return jit_try2(rip, 0xffffffffu);
+    return jit_try_common(rip, 0xffffffffu, 0);
 }
 
 void jit_flush(void)
@@ -1417,6 +1451,8 @@ void jit_flush(void)
     u32 i = 0;
     for (i = 0; i < JIT_CACHE; i++)
         jit_cache[i].valid = 0;
+    for (i = 0; i < (u32)sizeof(g_jit_good); i++)
+        g_jit_good[i] = 0;
     jit_compiles = 0;      /* 失效后允许重新编译热块 */
     g_jit_flush_gen++;
 }

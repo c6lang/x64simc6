@@ -34,8 +34,8 @@ wasm32，`wasm-ld` 链上 c6 的 wasm 运行时（`libtcc1-wasm32.a`）。整机
 而是调用主模块导出的 `jit_flags_*`，保证与解释器逐位一致。它已经接入
 wasm 的 `machine_run`（块缓存、热块阈值、SMC 页写代数、内核 text 窗口、
 64 位/jcc、LEA/MOVZX）；900M 引导开/关的指令数和串口逐字节一致，但每条
-块都有 wasm↔JS 切换，性能还不是净赢；JS 批量链式默认关闭（全链式已修好 flush 失效，
-但比单块直跑更慢；DESIGN §100）。默认构建仍是 JIT=0，不链接。
+块都有 wasm↔JS 切换，性能还不是净赢；采样编译把 900M 的 JIT 覆盖提到 12.3%，但仍比解释器慢 14%
+（DESIGN §100）。默认构建仍是 JIT=0，不链接。
 
 运行手汇编 payload：
 
