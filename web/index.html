@@ -20,6 +20,13 @@
     </div>
     <label>请求 URL（测试和 guest 网络桥）<input id="neturl" placeholder="https://example.com/"></label>
     <button id="netfetch">fetch 并注入 __net/last</button>
+    <h2 style="margin-top:14px">网络代理（wasm 真上网）</h2>
+    <label>代理地址 <input id="proxyurl" value="ws://127.0.0.1:8787"></label>
+    <div class="row">
+      <button id="netconnect">连接</button>
+      <button id="netdisconnect">断开</button>
+    </div>
+    <p id="netstatus">未连接：本机先跑 node tools/ws_slip_proxy.js</p>
     <p id="status">空闲</p>
   </section>
   <section class="panel grow">
@@ -39,6 +46,6 @@
   </section>
 </main>
 <script src="vendor/xterm.js"></script>
-<script src="app.js?v=1.6"></script>
+<script src="app.js?v=1.7"></script>
 </body>
 </html>

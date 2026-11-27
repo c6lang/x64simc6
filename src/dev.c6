@@ -116,18 +116,21 @@ static void serial_write(u32 port, u8 v)
     }
 }
 
-/* ---------------- COM2 (ttyS1)：SLIP 网关 ---------------- */
-/*
+/* ---------------- COM2 (ttyS1)：SLIP 网关 ----------------
  * 第二个 16550A，落在标准 COM2 端口 0x2f8、IRQ3。guest 用 slattach 把
- * /dev/ttyS1 切到 N_SLIP，IP 包按 RFC 1055 在这里和 src/net.c6 之间搬。
- * 状态独立于 g_m：wasm 侧不编译，也避免动 wasm 的全局布局。
+ * /dev/ttyS1 切到 N_SLIP，IP 包按 RFC 1055 搬运：
+ *   - native：串口字节 <-> src/net.c6 的用户态 NAT（或 --netshim 的 stdout）；
+ *   - wasm：串口字节 <-> JS（sim_net_tx/sim_net_rx），页面再通过 WebSocket
+ *     代理到宿主上的 --netshim 进程。
+ * 环放在全局数组里（wasm 后端对结构体内数组下标的读写有坑）。
  */
-#if !defined(C6_WASM)
 #define SER2_RING 131072u
+static u8 g_s2_in[SER2_RING];
+static u8 g_s2_out[SER2_RING];
 struct Serial2State {
     u8 ier, fcr, lcr, mcr, scr, dll, dlm, lsr, rbr, thre_pending;
     u32 in_head, in_tail;
-    u8 in[SER2_RING];
+    u32 out_head, out_tail;
 };
 static struct Serial2State g_s2;
 
@@ -135,6 +138,10 @@ static void serial2_reset(void)
 {
     u32 i = 0;
     for (i = 0; i < (u32)sizeof(g_s2); i++) ((u8 *)&g_s2)[i] = 0;
+    for (i = 0; i < SER2_RING; i++) {
+        g_s2_in[i] = 0;
+        g_s2_out[i] = 0;
+    }
     g_s2.lcr = 0x03;
     g_s2.lsr = 0x60;
     g_s2.ier = 0;
@@ -150,15 +157,36 @@ int serial2_feed(const u8 *buf, u32 n)
 {
     u32 i = 0;
     if (n == 0) return 0;
+#if !defined(C6_WASM)
+    if (g_net_shim) {                         /* --netshim：帧直接写 stdout 给代理 */
+        size_t w = fwrite(buf, 1, (size_t)n, stdout);
+        fflush(stdout);
+        return (w == (size_t)n) ? (int)n : 0;
+    }
+#endif
     if (n > (u32)serial2_space()) return 0;   /* 整帧要么全进、要么等下一轮 */
     for (i = 0; i < n; i++) {
-        g_s2.in[g_s2.in_head & (SER2_RING - 1u)] = buf[i];
+        g_s2_in[g_s2.in_head & (SER2_RING - 1u)] = buf[i];
         g_s2.in_head++;
     }
     g_s2.lsr |= 1;                            /* DR */
     if (g_s2.ier & 1) pic_raise(&g_m, 3);
+#if !defined(C6_WASM)
     if (g_ntrace) printf("[NT] feed n=%u ier=%02x\n", n, (unsigned)g_s2.ier);
+#endif
     return (int)n;
+}
+
+/* guest 写到 THR 的字节（wasm 侧由 JS 取走送 WebSocket）；native 不用 */
+int serial2_out_take(u8 *dst, int cap)
+{
+    int n = 0;
+    while (n < cap && g_s2.out_tail != g_s2.out_head) {
+        dst[n] = g_s2_out[g_s2.out_tail & (SER2_RING - 1u)];
+        g_s2.out_tail++;
+        n++;
+    }
+    return n;
 }
 
 static u8 serial2_read(u32 port)
@@ -170,7 +198,7 @@ static u8 serial2_read(u32 port)
     }
     if (off == 0) {
         if (g_s2.in_tail != g_s2.in_head) {
-            g_s2.rbr = g_s2.in[g_s2.in_tail & (SER2_RING - 1u)];
+            g_s2.rbr = g_s2_in[g_s2.in_tail & (SER2_RING - 1u)];
             g_s2.in_tail++;
             if (g_s2.in_tail == g_s2.in_head) g_s2.lsr &= (u8)~1;
         }
@@ -207,7 +235,14 @@ static void serial2_write(u32 port, u8 v)
     case 0:
         g_s2.lsr |= 0x40;
         g_s2.thre_pending = 1;   /* 发送"瞬时"完成：THR 又空了 */
+#if defined(C6_WASM)
+        if ((g_s2.out_head - g_s2.out_tail) < SER2_RING) {
+            g_s2_out[g_s2.out_head & (SER2_RING - 1u)] = v;
+            g_s2.out_head++;
+        }
+#else
         slip_rx_byte((u32)v);
+#endif
         if (g_s2.ier & 2) pic_raise(&g_m, 3);
         break;
     case 1:
@@ -222,7 +257,6 @@ static void serial2_write(u32 port, u8 v)
     default: break;
     }
 }
-#endif /* !C6_WASM */
 
 /* ---------------- 8259A PIC ---------------- */
 
@@ -441,9 +475,7 @@ static u8 cmos_read(void)
 u8 io_r8(u32 port)
 {
     if (port >= 0x3f8 && port <= 0x3ff) return serial_read(port);
-#if !defined(C6_WASM)
     if (port >= 0x2f8 && port <= 0x2ff) return serial2_read(port);   /* COM2 */
-#endif
     if (port >= 0x3f0 && port <= 0x3f7) return 0xff;   /* COM3 未装 */
     if (port == 0x20 || port == 0x21 || port == 0xa0 || port == 0xa1)
         return pic_read(port);
@@ -475,9 +507,7 @@ u32 io_r32(u32 port)
 void io_w8(u32 port, u8 v)
 {
     if (port >= 0x3f8 && port <= 0x3ff) { serial_write(port, v); return; }
-#if !defined(C6_WASM)
     if (port >= 0x2f8 && port <= 0x2ff) { serial2_write(port, v); return; }
-#endif
     if (port == 0x20 || port == 0x21 || port == 0xa0 || port == 0xa1) {
         pic_write(port, v);
         return;
@@ -625,8 +655,8 @@ void dev_init(void)
     g_m.pci.config[15] = 0x00;
     g_virtio_net_regs[0] = 0x74726976;  /* 'virt' */
     g_c6blk_regs[0] = 0x74726976;
-#if !defined(C6_WASM)
     serial2_reset();
+#if !defined(C6_WASM)
     net_reset();
 #endif
 }
@@ -684,12 +714,12 @@ void dev_tick(void)
     /* 网络在设备轮询里推进：HLT 等网络包时 dev_tick 会在 idle 循环里被高频
      * 调用，net_tick() 内部按墙钟 1ms 节流，不会空转。 */
     net_tick();
-    /* COM2 的 RX/THRE 同样是电平中断 */
+#endif
+    /* COM2 的 RX/THRE 同样是电平中断（wasm 侧 ISR 由 JS 喂字节/回包） */
     if ((g_s2.ier & 1) && g_s2.in_head != g_s2.in_tail)
         pic_raise(&g_m, 3);
     else if ((g_s2.ier & 2) && g_s2.thre_pending)
         pic_raise(&g_m, 3);
-#endif
 
     /* 串口的 RX/THRE 是**电平**中断：只要使能位还开着、条件还成立，中断线就
      * 一直有效。只在「写 THR / 写 IER」补边沿会丢中断：驱动在 tx_loadsz 一批

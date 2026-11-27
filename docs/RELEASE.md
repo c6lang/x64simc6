@@ -17,6 +17,13 @@
   可指定站点源码 ref（默认最新 release tag，填 `master` 预览未发布改动）。
 - **真终端跑 wasm**：`tools/wasm_tty.js`（raw、Ctrl-] 退出、自动应答/过滤
   `ESC[6n`），已在 pty 里验证登录 + `uname -m`。
+- **wasm 真上网（代理）**：第二串口 COM2 编进 wasm，导出
+  `sim_net_rx/sim_net_tx`；`build/sim --netshim` 不跑 guest、只把
+  stdin/stdout 的 SLIP 帧接到**同一份** `src/net.c6` 用户态 NAT；
+  `tools/ws_slip_proxy.js`（零依赖 WebSocket，每连接一个 shim）；页面加
+  「网络代理」（默认 `ws://127.0.0.1:8787`）。实测 wasm guest 登录后
+  `ping 10.0.2.2` 0% loss、`wget http://example.com/` 成功；
+  `tests/wasm_net_proxy.js` 覆盖整条链路（DESIGN §98）。
 
 ## v1.3 变更（相对 v1.2）
 

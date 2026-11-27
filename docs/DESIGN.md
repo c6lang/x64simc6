@@ -1741,3 +1741,60 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     （产物照旧可用，只是慢）。`WASM_CC/WASM_LD/WASM_OPT/WASM_CFLAGS` 可覆盖。
     链接产物仍是 export-all 的 wasm，浏览器 API 一个没变；clang 默认会用到
     bulk-memory 等较新的 wasm 特性，需要近几年的浏览器。
+
+98. **wasm 真上网：`--netshim` + WebSocket SLIP 代理**。背景：wasm 里没有
+    宿主 socket，native 那套 SLIP + 用户态 NAT（`src/net.c6`）又依赖模拟器的
+    PIC/串口状态，不能原样搬进浏览器。做法是把 NAT 留在 native，wasm 只负责
+    “串口字节 ↔ JS”，中间用 WebSocket 代理把两边接起来：
+
+    ```
+    wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
+      <-> tools/ws_slip_proxy.js <-> build/sim --netshim <-> 宿主 socket
+    ```
+
+    **（a）wasm 第二串口**。`dev.c6` 的 COM2 去掉 `C6_WASM` 限制；RX/TX 两个
+    128 KiB 环从结构体里挪到全局数组（wasm 后端对“结构体内的数组下标”读写
+    有坑，和 §13 的 PIC 位图同类）；新增 guest→JS 的 TX 环：THR 写入在 native
+    下仍走 `slip_rx_byte()`，wasm 下改成进 TX 环；`dev_tick()` 的 COM2
+    RX/THRE 电平重拉对 wasm 也打开。导出
+    `sim_net_rx(src,len)`（→ `serial2_feed`）和 `sim_net_tx(dst,cap)`
+    （→ `serial2_out_take`）。guest 的 `/init` 看到 `/dev/ttyS1` 就会
+    `slattach` + `ifconfig sl0`，和 native 完全相同。
+
+    **（b）`--netshim`**：`main.c6` 加一个无固件模式。`g_net_shim=1` 后
+    `serial2_feed()` 把整帧 SLIP 直接 `fwrite(stdout)`（日志走 stderr，
+    stdout 只放二进制）；主循环 `poll(stdin, 1ms)` 读到的每个字节喂给
+    `slip_rx_byte()`，再调 `net_tick()` 推进宿主 socket。等于把 native 的
+    用户态 NAT（DNS 改写、TCP 中继、UDP、ICMP ping socket）单独跑成一个
+    网关进程，一行 NAT 逻辑都没有重写。
+
+    **（c）WebSocket 代理**：`tools/ws_slip_proxy.js` 是一个零依赖的最小
+    WebSocket 服务器（握手、掩码帧、ping/pong、分片），每个连接 `spawn`
+    一个 `build/sim --netshim`，二进制消息 ↔ 子进程 stdin/stdout 原样搬运。
+    WS 二进制消息就是任意切分的 SLIP 字节流（RFC 1055：`0xC0` 定界、
+    `0xDB` 转义），所以代理本身不理解 IP。
+
+    **（d）页面**：「网络代理」输入框填 `ws://127.0.0.1:8787`，点连接后
+    `onmessage` 把字节写到线性内存 252 MiB 处再调 `sim_net_rx()`；
+    4 ms 定时器调 `sim_net_tx()` 把 guest 的字节 `send()` 回去；状态行显示
+    ↑↓ 字节数。地址仍是 guest `10.0.2.15` / 网关 `10.0.2.2` / DNS
+    `10.0.2.3`，guest 里的 ping/wget 和 native 完全一样。
+
+    **为什么这么绕**：NAT 复用同一份 `src/net.c6`，行为与 native 一致；
+    wasm 仍不需要任何 import（保持 `--no-entry --export-all` 的链接方式）；
+    每个浏览器连接一个 shim 进程，多标签页/多用户天然隔离。
+
+    **实测**（2026-11-27）：wasm guest 带 COM2 启动到 `login:` 约 **778M 条
+    指令 / 52s**；`ifconfig sl0` = `10.0.2.15 P-t-P 10.0.2.2`；
+    `ping -c1 10.0.2.2` 0% loss；`wget http://example.com/` 打印
+    `'/dev/null' saved`（DNS + TCP + HTTP 真出外网，代理 rx/tx 约
+    1.4KB/480B）。`tests/wasm_net_proxy.js` 一条命令覆盖这条链路；
+    `browser_e2e` 覆盖页面「连接」按钮到 WS 代理。
+
+    **限制与安全**：`--netshim` 等于把宿主的网络能力开放给 guest，默认只绑
+    `127.0.0.1`，不要暴露到公网（没有认证/白名单）；HTTPS 页面连
+    `ws://127.0.0.1` 受浏览器混合内容策略影响（各版本不同），本地
+    `http://localhost` 最稳；每个连接一个 shim 进程，没有 IPv6；ICMP 依赖
+    Linux 的非 root ping socket，其它宿主需要相应能力。Pages 的 `sim.wasm`
+    取自 release 资产，要等带 `sim_net_rx/tx` 的 release（v1.4+）才能在
+    线上站点用代理。

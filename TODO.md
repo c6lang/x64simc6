@@ -241,5 +241,9 @@
 - [x] 浏览器串口换 xterm.js：光标/ANSI 颜色/5000 行滚动历史/选择复制，
       键盘直通 guest、Ctrl-C 原样送；`tests/browser_tty_login.js` 走页面
       UI 登录并执行 `uname -m` 通过（约 70s）
+- [x] wasm 真上网：`--netshim`（native SLIP↔NAT 网关，复用 `src/net.c6`）+
+      wasm COM2/`sim_net_rx/tx` + `tools/ws_slip_proxy.js` + 页面「网络代理」；
+      `tests/wasm_net_proxy.js` 里 guest 登录 + `ping 10.0.2.2` +
+      `wget http://example.com/` 全过（DESIGN §98）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）

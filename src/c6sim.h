@@ -235,6 +235,7 @@ extern int g_cc;
 extern int g_ud_trace;
 extern int g_rsp_check;
 extern int g_ntrace;
+extern int g_net_shim;
 u64 boot_probe(void);
 int machine_boot_staged(u8 *base, u32 koff, u32 klen,
                         u32 ioff, u32 ilen, u32 coff, u32 clen);
@@ -310,11 +311,10 @@ void dev_init(void);
 void dev_tick(void);
 void pic_raise(struct Machine *m, u8 irq);
 
-/* dev.c6：第二串口 COM2（0x2f8/IRQ3）用来跑 SLIP，native 才有 */
-#if !defined(C6_WASM)
+/* dev.c6：第二串口 COM2（0x2f8/IRQ3）用来跑 SLIP（native + wasm 都有） */
 int serial2_space(void);
 int serial2_feed(const u8 *buf, u32 n);
-#endif
+int serial2_out_take(u8 *dst, int cap);
 
 /* net.c6：用户态 SLIP 网关（native） */
 #if !defined(C6_WASM)

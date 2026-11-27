@@ -18,6 +18,9 @@
 
 /* --nettrace：打印 SLIP/IP/UDP/ICMP 收发摘要（只打前 400 条，避免刷屏） */
 int g_ntrace = 0;
+/* --netshim：不跑 guest，只把 stdin/stdout 上的 SLIP 帧接到本文件的 NAT
+ * （浏览器 wasm 的 WebSocket 代理用），见 main.c6 的 net_shim_mode()。 */
+int g_net_shim = 0;
 static u32 g_nt_n = 0;
 #define NT_ON (g_ntrace && g_nt_n < 800u)
 

@@ -2,9 +2,12 @@
  * 与 wasm 之间只通过导出的 C 函数 + 共享线性内存通信，不依赖 wasm import。 */
 const $ = (id) => document.getElementById(id);
 const status = (s) => { $('status').textContent = s; };
+const netstatus = (s) => { $('netstatus').textContent = s; };
 const SCRATCH = 0x0f800000;   // 248 MiB：hostfs/串口的小缓冲（初始 256 MiB 内）
 const FW_STAGE = 0x10000000;  // 256 MiB：大固件 staging；不够就先把内存扩到 512 MiB
 const FW_MAX = 48 << 20;      // 与 src/wasm.c6 的 g_fw_stage 一致
+const NET_RX = SCRATCH + 4 * 0x100000;   // 252 MiB：代理 -> wasm 的收包缓冲
+const NET_TX = NET_RX + 65536;            // 252 MiB + 64 KiB：wasm -> 代理
 const FS_CAP = 1 << 20;
 
 let wasm = null;
@@ -18,6 +21,9 @@ let totalInsns = 0;
 let lastSync = 0;
 let lastStatus = 0;
 let sawSerial = false;
+let netws = null;
+let netTimer = 0;
+let netRx = 0, netTx = 0, netStatusAt = 0;
 
 function bytes() { return new Uint8Array(wasm.memory.buffer); }
 function str2bytes(s) { return new TextEncoder().encode(s); }
@@ -247,7 +253,80 @@ function loop() {
   raf = requestAnimationFrame(loop);
 }
 
+/* ---------- wasm 网络代理（WebSocket <-> COM2 SLIP） ---------- */
+function ensureNetBuf() {
+  const need = NET_TX + 65536;
+  if (need > wasm.memory.buffer.byteLength) {
+    const pages = Math.ceil((need - wasm.memory.buffer.byteLength) / 65536);
+    if (wasm.memory.grow(pages) < 0) return false;
+  }
+  return true;
+}
+
+function pumpNet() {
+  if (!wasm || !netws || netws.readyState !== 1) return;
+  const n = wasm.sim_net_tx(NET_TX, 65536);
+  if (n > 0) {
+    netws.send(new Uint8Array(wasm.memory.buffer, NET_TX, n).slice());
+    netTx += n;
+  }
+  const now = Date.now();
+  if (now - netStatusAt > 300) {
+    netStatusAt = now;
+    netstatus('已连接 ' + $('proxyurl').value.trim() + ' ↑' + netTx + ' ↓' + netRx + ' B');
+  }
+}
+
+function disconnectProxy() {
+  if (netTimer) { clearInterval(netTimer); netTimer = 0; }
+  if (netws) {
+    const w = netws;
+    netws = null;
+    try { w.close(); } catch (e) {}
+  }
+  netstatus('未连接：本机先跑 node tools/ws_slip_proxy.js');
+}
+
+function connectProxy() {
+  if (!wasm) { netstatus('请先加载 wasm'); return; }
+  if (typeof wasm.sim_net_rx !== 'function') {
+    netstatus('这个 sim.wasm 不支持网络代理（需要本仓库重新构建的 wasm）');
+    return;
+  }
+  if (netws) return;
+  const url = $('proxyurl').value.trim();
+  if (!url) { netstatus('请输入代理地址'); return; }
+  if (!ensureNetBuf()) { netstatus('线性内存不足'); return; }
+  try {
+    const w = new WebSocket(url);
+    w.binaryType = 'arraybuffer';
+    netws = w;
+    w.onopen = () => {
+      netRx = netTx = 0;
+      netstatus('已连接 ' + url);
+      netTimer = setInterval(pumpNet, 4);
+    };
+    w.onmessage = (ev) => {
+      if (!wasm || netws !== w) return;
+      const b = new Uint8Array(ev.data);
+      if (b.length > 65536) return;
+      put(NET_RX, b);
+      wasm.sim_net_rx(NET_RX, b.length);
+      netRx += b.length;
+    };
+    w.onerror = () => netstatus('连接失败：' + url);
+    w.onclose = () => {
+      if (netws === w) netws = null;
+      if (netTimer) { clearInterval(netTimer); netTimer = 0; }
+      netstatus('已断开 ' + url);
+    };
+  } catch (e) { netstatus('连接失败：' + e.message); }
+}
+
 /* ---------- UI ---------- */
+$('netconnect').onclick = connectProxy;
+$('netdisconnect').onclick = disconnectProxy;
+window.addEventListener('beforeunload', disconnectProxy);
 $('load').onclick = loadFirmware;
 $('start').onclick = () => {
   if (!wasm) { status('请先加载 wasm'); return; }
