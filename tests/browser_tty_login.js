@@ -115,7 +115,32 @@ function freePort() {
     if (!text.includes('login:')) throw new Error('xterm 里没等到 login:');
     console.log('[tty] xterm 看到 login:');
 
-    await evaluate(`term.paste('root\\r')`);
+    // 模拟真实用户：点一下终端（聚焦 xterm 的隐藏 textarea），再发键盘事件
+    const box = await evaluate(`(() => {
+      const e = document.querySelector('.xterm');
+      const r = e.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 });
+    const focused = await evaluate(`document.activeElement && document.activeElement.className`);
+    if (!String(focused).includes('xterm-helper-textarea')) throw new Error('点击后终端没有获得焦点: ' + focused);
+    console.log('[tty] 终端获得键盘焦点');
+
+    async function typeLine(line) {
+      await send('Input.insertText', { text: line });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter',
+        windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+        text: '\r', unmodifiedText: '\r',
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter',
+        windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      });
+    }
+
+    await typeLine('root');
     for (let i = 0; i < 300; i++) {
       text = await termText();
       if (text.includes('# ')) break;
@@ -124,7 +149,7 @@ function freePort() {
     if (!text.includes('# ')) throw new Error('没有等到 shell 提示符');
     console.log('[tty] 登录成功，看到 shell 提示符');
 
-    await evaluate(`term.paste('uname -m\\r')`);
+    await typeLine('uname -m');
     for (let i = 0; i < 100; i++) {
       text = await termText();
       if (text.includes('x86_64')) break;

@@ -46,6 +46,14 @@ cd web && python3 -m http.server 8000
 guest。`tests/browser_tty_login.js` 会从页面点「加载固件」「启动」，在 xterm
 里等到 `login:`、输入 `root` 和 `uname -m`，验证整条 UI + 键盘 + 串口链路。
 
+要注意的两点（也是“点了没反应”的常见原因）：
+
+- **先点一下终端再打字**（终端里出现光标），键盘才会进 guest；页面启动后
+  会自动聚焦，但点过按钮/别处后焦点会丢。
+- 点「启动」后，内核解压阶段大约 **20 秒没有串口输出**（第一条日志大约在
+  3 亿条指令之后），状态栏会显示已执行的指令数，属正常现象。
+- 必须用 HTTP 服务打开，`file://` 下 wasm/firmware 拉不下来（状态栏会提示）。
+
 也可以托管到 GitHub Pages（`sim.wasm` / `firmware.bin` 是构建产物，不在 git
 里，所以 Pages workflow 直接从 release 资产取）：仓库 Settings → Pages →
 Source 选「GitHub Actions」，手动跑一次 `pages` workflow（之后每次 release

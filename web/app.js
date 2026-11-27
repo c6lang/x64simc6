@@ -16,6 +16,8 @@ let running = false;
 let raf = 0;
 let totalInsns = 0;
 let lastSync = 0;
+let lastStatus = 0;
+let sawSerial = false;
 
 function bytes() { return new Uint8Array(wasm.memory.buffer); }
 function str2bytes(s) { return new TextEncoder().encode(s); }
@@ -131,7 +133,12 @@ function initTerm() {
     },
   });
   term.open($('term'));
+  $('term').addEventListener('mousedown', () => term.focus());
   term.onData((data) => {
+    if (!running) {
+      status('先点「加载固件」和「启动」，终端才会连到 guest');
+      return;
+    }
     const b = str2bytes(data);
     put(wasm.sim_host_bridge(), b);
     wasm.sim_host_event(3, b.length);
@@ -141,6 +148,10 @@ function initTerm() {
 
 /* ---------- 初始化 ---------- */
 async function initWasm() {
+  if (location.protocol === 'file:') {
+    status('请用 HTTP 服务打开（cd web && python3 -m http.server 8000），不能用 file://');
+    return;
+  }
   status('加载 wasm…');
   const bytesWasm = await fetchAsset('sim.wasm');
   const module = await WebAssembly.compile(bytesWasm);
@@ -179,6 +190,7 @@ async function loadFirmware() {
     if (rc !== 0) throw new Error(`sim_init 返回 ${rc}`);
     term.reset();
     serialLog = '';
+    sawSerial = false;
     term.focus();
     status(`固件已加载：${fw.length} 字节`);
   } catch (e) { status(`固件加载失败：${e.message}`); }
@@ -189,6 +201,7 @@ function pumpSerial() {
   const p = SCRATCH + 2 * FS_CAP;
   const n = wasm.sim_serial_out(p, cap);
   if (n > 0) {
+    sawSerial = true;
     const bytes = get(p, n);
     term.write(bytes);
     serialLog += new TextDecoder().decode(bytes);
@@ -215,6 +228,12 @@ function loop() {
     return;
   }
   const now = Date.now();
+  if (now - lastStatus > 500) {
+    lastStatus = now;
+    const n = (totalInsns / 1e6).toFixed(0);
+    status(sawSerial ? `运行中… ${n}M 条指令`
+                     : `运行中… ${n}M 条指令（内核解压中，第一条串口日志还没出来）`);
+  }
   if (now - lastSync > 2000) {
     lastSync = now;
     exportFiles();
@@ -228,10 +247,10 @@ function loop() {
 $('load').onclick = loadFirmware;
 $('start').onclick = () => {
   if (!wasm) { status('请先加载 wasm'); return; }
-  if (!running) { running = true; term.focus(); status('运行中…'); loop(); }
+  if (!running) { running = true; setTimeout(() => term.focus(), 0); status('运行中…'); loop(); }
 };
 $('pause').onclick = () => { running = false; cancelAnimationFrame(raf); status('已暂停'); exportFiles(); };
-$('reset').onclick = () => { running = false; cancelAnimationFrame(raf); wasm.sim_reset(); term.reset(); serialLog = ''; term.focus(); status('已复位'); };
+$('reset').onclick = () => { running = false; cancelAnimationFrame(raf); wasm.sim_reset(); term.reset(); serialLog = ''; sawSerial = false; term.focus(); status('已复位'); };
 $('netfetch').onclick = async () => {
   const url = $('neturl').value.trim();
   if (!url) { status('请输入 URL'); return; }
