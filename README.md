@@ -91,6 +91,7 @@ ifconfig sl0
 ping -c1 10.0.2.2          # 本地网关，3ms 左右
 ping -c1 10.0.2.3          # DNS，本地回
 wget -O /dev/null http://example.com/   # DNS + TCP/HTTP 真外网
+wget -O /dev/null https://example.com/  # HTTPS：证书校验依赖 RTC 对时
 ```
 
 如果 `ifconfig sl0` 报 `Device not found`，说明**固件没带 SLIP 模块**，
@@ -107,6 +108,10 @@ dmesg | grep -iE 'slip|slhc'                # insmod 失败会打印 invalid mod
 `mkfw` 会打印「未指定 --modules，guest 将没有外网」。重新按上面命令生成
 `build/firmware.bin` 即可（成功时会打印「注入 SLIP 模块：build/alpine/lib」）。
 浏览器/wasm 版没有真实 socket，永远没有 `sl0`。
+
+guest 的时钟由模拟的 CMOS RTC（0x70/0x71，mc146818 布局）从宿主 UTC 时间
+初始化，所以 `date -u` 与宿主一致、HTTPS 证书校验能过（DESIGN §96）；guest
+里 `date -s` 只改内核时钟，不会回写 RTC。
 
 宿主侧的行为：IP 层自己封/解（含校验和、>1480 的分片），TCP 每条连接用一个
 非阻塞宿主 socket 中继（最大 16 条），UDP 逐流转发（16 条，DNS 自动改写目标到

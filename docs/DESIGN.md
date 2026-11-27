@@ -1665,3 +1665,29 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     一次通过。注意 §92 的交互模式 `pace_ahead()` 不受影响：它本来就把
     step 置 0，只是现在「先轮询、再决定是否快进」的顺序对批处理模式
     同样正确。
+
+96. **guest 时钟停在 1999：CMOS RTC 是桩，HTTPS 证书校验失败**。
+    guest 里 `wget https://qq.com/` 报
+    `tls_post_process_server_certificate:certificate verify failed`
+    然后 `ssl_client: SSL_connect` / `error getting response: Connection
+    reset by peer`。TCP/TLS 本身是通的（443 连上了、服务器证书收到了），
+    问题在**时间**：`date -u` 显示 **Tue Nov 30 00:00:07 UTC 1999**，
+    X.509 的 notBefore/notAfter 全部落在窗口外。根因是 `dev.c6` 的
+    CMOS 一直是空实现：`io_w8(0x70)` 丢掉索引、`io_r8(0x71)` 恒返回 0，
+    内核 `mach_get_cmos_time()` 读到全 0 的秒/分/时/日/月/年，落到
+    mc146818 的默认时间 1999-11-30 00:00:00。
+
+    修法：实现只读的 mc146818 RTC。`0x70` 写存索引（低 7 位），
+    `0x71` 用宿主 `CLOCK_REALTIME` **现算** UTC 年月日时分秒
+    （Howard Hinnant 的 `civil_from_days`，不依赖 libc 的 `gmtime`
+    结构体布局），按 BCD、24 小时制返回；状态寄存器 `0x0A = 0x26`
+    （UIP=0）、`0x0B = 0x02`（BCD+24h、不使能中断）、`0x0C = 0`、
+    `0x0D = 0x80`（VRT），`0x32` 给世纪。`acpi=off` 时内核不读世纪，
+    年份 26 走 `year < 70 → +2000` 得到 2026。RTC 只读：guest 的
+    `date -s`/`hwclock -w` 只改内核时钟，不回写 CMOS；wasm 侧没有
+    `CLOCK_REALTIME`，给 2026 年的常量（浏览器里证书不会"未生效"）。
+
+    验证：guest `date -u` = 宿主时间（2026-11-27 11:45 UTC），
+    `wget -O /dev/null https://qq.com/` 证书校验通过并下载 132k，
+    `http://example.com/` 同时正常。这个 bug 与联网无关（任何 HTTPS
+    都会踩），但只有 guest 真能上网才会暴露。

@@ -205,6 +205,11 @@
 - [x] 修 difftest 本机端 `native_run.c` 在 glibc 2.34+ 的
       `SIGSTKSZ` 非常量编译失败（固定 64 KiB 备用栈）
 - [x] 文档：README「外网访问」、DESIGN §93–§95、本段 TODO、RELEASE
+- [x] CMOS RTC（`0x70/0x71`，mc146818）：用宿主 UTC 时间现算年月日时分秒
+      （BCD/24h、状态 A 无 UIP、状态 D 置 VRT、`0x32` 世纪），修 guest 时钟
+      停在 1999-11-30 导致 `wget https://…` 证书校验失败（DESIGN §96）
+- [x] HTTPS 验证：guest `date -u` 与宿主一致，`wget https://qq.com/` 证书
+      校验通过（132 KiB）；HTTP/DNS/ping 同时正常
 - [ ] 后续（未做）：IPv6、DHCP、TCP 窗口缩放/拥塞控制（现在固定窗口，
       MSS 1460）、UDP 的严格无状态 NAT（现在是逐流表）；wasm 路径没有
       真实 socket，浏览器端仍走 `hostfs`/fetch 桥，不做 SLIP

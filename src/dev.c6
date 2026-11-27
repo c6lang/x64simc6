@@ -367,6 +367,75 @@ static void pit_write(u32 port, u8 v)
     }
 }
 
+/* ---------------- CMOS / RTC ----------------
+ * 以前 0x71 一律返回 0，guest 开机时间停在 1999-11-30，HTTPS 的 X.509
+ * 证书校验必然失败（certificate verify failed）。这里按 mc146818 的
+ * 寄存器布局返回宿主 UTC 时间：BCD、24 小时制、状态 A 无 UIP、状态 D
+ * 置 VRT。只读；guest 写时间不落盘（内核启动后自己用 PIT/TSC 走时）。
+ */
+static u8 g_cmos_idx = 0;
+
+#if !defined(C6_WASM)
+struct rtc_ts { long tv_sec; long tv_nsec; };
+extern int clock_gettime(int clk, struct rtc_ts *ts);
+#define RTC_CLOCK_REALTIME 0
+
+static u64 rtc_epoch(void)
+{
+    struct rtc_ts ts = {0};
+    if (clock_gettime(RTC_CLOCK_REALTIME, &ts) != 0) return 0;
+    return (u64)ts.tv_sec;
+}
+#else
+/* wasm 侧没有 CLOCK_REALTIME：给 2026 年的常量，证书不会"未生效" */
+static u64 rtc_epoch(void) { return 1795000000ull; }
+#endif
+
+static u8 rtc_bcd(u32 v)
+{
+    return (u8)((((v / 10u) & 0x0fu) << 4) | (v % 10u));
+}
+
+static u8 cmos_read(void)
+{
+    u64 t = rtc_epoch();
+    u64 days = 0, z = 0, era = 0, doe = 0, yoe = 0, y = 0, doy = 0, mp = 0;
+    u64 dd = 0, mm = 0;
+    u32 sod = 0, hh = 0, mi = 0, ss = 0, wd = 0;
+    days = t / 86400ull;
+    sod = (u32)(t % 86400ull);
+    /* days -> 公历年月日（civil_from_days，1970-01-01 起） */
+    z = days + 719468ull;
+    era = z / 146097ull;
+    doe = z - era * 146097ull;
+    yoe = (doe - doe / 1460ull + doe / 36524ull - doe / 146096ull) / 365ull;
+    y = yoe + era * 400ull;
+    doy = doe - (365ull * yoe + yoe / 4ull - yoe / 100ull);
+    mp = (5ull * doy + 2ull) / 153ull;
+    dd = doy - (153ull * mp + 2ull) / 5ull + 1ull;
+    mm = (mp < 10ull) ? (mp + 3ull) : (mp - 9ull);
+    if (mm <= 2ull) y = y + 1ull;
+    hh = sod / 3600u;
+    mi = (sod / 60u) % 60u;
+    ss = sod % 60u;
+    wd = (u32)((days + 4ull) % 7ull) + 1u;   /* 1970-01-01 是周四；CMOS 1=周日 */
+    switch (g_cmos_idx) {
+    case 0x00: return rtc_bcd(ss);
+    case 0x02: return rtc_bcd(mi);
+    case 0x04: return rtc_bcd(hh);
+    case 0x06: return rtc_bcd(wd);
+    case 0x07: return rtc_bcd((u32)dd);
+    case 0x08: return rtc_bcd((u32)mm);
+    case 0x09: return rtc_bcd((u32)(y % 100ull));
+    case 0x0a: return 0x26;   /* 状态 A：UIP=0，DV=010，RS=0110 */
+    case 0x0b: return 0x02;   /* 状态 B：24 小时制 + BCD，不使能中断 */
+    case 0x0c: return 0x00;   /* 状态 C：无中断 */
+    case 0x0d: return 0x80;   /* 状态 D：VRT（RAM/时间有效） */
+    case 0x32: return rtc_bcd((u32)(y / 100ull));   /* 世纪（acpi=off 时不读） */
+    default: return 0x00;
+    }
+}
+
 /* ---------------- I/O 端口分派 ---------------- */
 
 u8 io_r8(u32 port)
@@ -379,7 +448,7 @@ u8 io_r8(u32 port)
     if (port == 0x20 || port == 0x21 || port == 0xa0 || port == 0xa1)
         return pic_read(port);
     if (port >= 0x40 && port <= 0x43) return pit_read(port);
-    if (port == 0x71) return 0;
+    if (port == 0x71) return cmos_read();
     if (port == 0xcfc) {
         u32 a = g_m.pci.addr;
         if (!(a & 0x80000000)) return 0xff;
@@ -414,8 +483,8 @@ void io_w8(u32 port, u8 v)
         return;
     }
     if (port >= 0x40 && port <= 0x43) { pit_write(port, v); return; }
-    if (port == 0x70) return;
-    if (port == 0x71) return;
+    if (port == 0x70) { g_cmos_idx = (u8)(v & 0x7fu); return; }
+    if (port == 0x71) return;   /* RTC 只读：写时间不落盘 */
     if (port == 0xcf8) {
         g_m.pci.addr = ((u32)v) | (g_m.pci.addr & 0xffffff00);
         return;

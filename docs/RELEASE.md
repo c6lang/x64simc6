@@ -18,6 +18,10 @@
   → `resolv.conf`；`./build.sh fw` 在 `build/alpine/lib/modules` 存在时
   自动启用。initrd 只增加约 19 KiB（两个模块解压后共约 64 KiB，cpio.gz
   压缩后约 19 KiB；固件总量 34.30 MiB → 34.32 MiB）。
+- **CMOS RTC**：`0x70/0x71` 按 mc146818 布局返回宿主 UTC 时间（BCD、24 小时
+  制、状态 A 无 UIP、状态 D 置 VRT、0x32 世纪寄存器），修 guest 时钟停在
+  1999-11-30、任何 `wget https://…` 都 `certificate verify failed`
+  （DESIGN §96）。
 - 用法、限制（仅 IPv4、无 DHCP、固定窗口/MSS 1460）见 README「外网访问」，
   实现与选型见 `docs/DESIGN.md` §93。
 
@@ -39,7 +43,8 @@
 验收：`./build.sh test` 全绿（native payload/单元/CPL3/pcache/wasm 冒烟）、
 `tools/boot_login.py` PASS、difftest **1252/1252**、guest 内
 `ping -c1 10.0.2.2` / `ping -c1 10.0.2.3` 0% loss、
-`wget http://example.com/` 成功。
+`wget http://example.com/` 成功、`wget https://qq.com/` 证书校验通过
+（RTC 对时后，132 KiB）。
 
 ## v1.1 变更（相对 v1.0.2）
 
