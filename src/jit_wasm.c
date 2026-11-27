@@ -57,7 +57,7 @@ u8 g_jit_bad[524288];
 u8 g_jit_good[524288];   /* 64K 个 64-bit 位图：不可翻译的 RIP，C 侧快速跳过 */
 int g_jit_trace = 0;
 int g_jit_mask = 0;   /* 诊断：按组禁用指令 */
-int g_jit_min_n = 1;  /* 只编译 >= n 条指令的长块（短块每次 JS 切换不划算） */
+int g_jit_min_n = 9;  /* 只编译 >= n 条指令的长块（短块每次 JS 切换不划算） */
 u32 g_jit_trace_n = 0;
 u64 g_jit_bad_budget = 0;
 
