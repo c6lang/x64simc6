@@ -1,0 +1,94 @@
+name: release
+
+# 打 tag（v*）或手动触发：跑发布脚本 -> 生成说明 -> 打包 -> 创建 GitHub Release。
+#
+# 依赖：
+#   - C6 工具链（c6c / tcc-c6），默认在自托管 runner 的 ~/c6；
+#     也可以用仓库变量 C6C / TCC 指到别处。
+#   - 固件需要 Alpine 内核/initrd：workflow 里会自动跑 tools/fetch_alpine.py；
+#     runner 上已有 build/alpine 时跳过下载。
+#   - 公共 ubuntu runner 没有 c6c，需要先自己装工具链再把 runs-on 改回去。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v1.2，必须已存在于仓库）"
+        required: true
+      skip_tests:
+        description: "跳过 ./build.sh test（不建议）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: [self-hosted, linux]
+    env:
+      C6C: ${{ vars.C6C }}
+      TCC: ${{ vars.TCC }}
+    steps:
+      - name: 取出仓库与全部 tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: 检查 tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || {
+            echo "::error::tag $TAG 不存在"; exit 1;
+          }
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "REL=build/release/$TAG" >> "$GITHUB_ENV"
+
+      - name: 检查工具链
+        run: |
+          echo "c6c: ${C6C:-$HOME/c6/c6c/build/c6c}"
+          ls -l "${C6C:-$HOME/c6/c6c/build/c6c}"
+          cc --version | head -1
+          python3 --version
+
+      - name: 准备 Alpine 内核与模块
+        run: |
+          if [ ! -f build/alpine/boot/vmlinuz-lts ]; then
+            python3 tools/fetch_alpine.py --dest build/alpine
+          else
+            echo "build/alpine 已存在，跳过下载"
+          fi
+
+      - name: 生成发布说明并打包
+        run: |
+          ARGS="--tag $TAG"
+          if [ "${{ inputs.skip_tests }}" = "true" ]; then
+            ARGS="$ARGS --no-test"
+          fi
+          python3 tools/release.py $ARGS
+
+      - name: 上传 Actions 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ env.TAG }}
+          path: ${{ env.REL }}/*
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          body_path: ${{ env.REL }}/RELEASE_NOTES.md
+          files: |
+            ${{ env.REL }}/*.tar.gz
+            ${{ env.REL }}/SHA256SUMS
+          fail_on_unmatched_files: false

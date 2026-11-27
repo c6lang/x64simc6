@@ -60,6 +60,11 @@ native 版可以让 guest 真正上外网：模拟器在 **COM2（0x2f8 / IRQ3�
 （RFC 1055），宿主侧 `src/net.c6` 实现一个最小用户态 NAT。**不需要 tap、
 不需要 root、不依赖 libslirp。**
 
+![登录后用 ping 和 wget 访问外网](docs/img/net-demo.gif)
+
+*登录后依次执行 `ifconfig sl0`、`ping -c3 qq.com`、`wget -O /dev/null
+https://qq.com/`（HTTPS 证书校验通过）；GIF 由 `tools/make_demo_gif.py` 录制。*
+
 地址约定与 QEMU user networking 一致（方便记）：
 
 | | 地址 |
@@ -139,6 +144,29 @@ SIM=build/sim python3 tools/difftest/difftest.py  # 1236 条指令级差分用�
 node tests/browser_e2e.js                         # fetch/Cache Storage/IndexedDB/hostfs
 node tests/browser_alpine.js                      # 浏览器里跑到 login 并自动登录
 node tests/wasm_login.js                          # wasm 里跑到 login 并自动登录
+```
+
+## 发布
+
+发布说明从提交文本自动生成，产物由同一套脚本打包（本地和 CI 共用）：
+
+```sh
+git tag -a vX.Y -m "vX.Y: …"
+python3 tools/release.py --tag vX.Y                 # 先跑 ./build.sh test，再出三件产物
+python3 tools/release.py --tag vX.Y --notes-only    # 只预览自动生成的说明
+```
+
+产物在 `build/release/vX.Y/`：`RELEASE_NOTES.md`（Release 正文：`docs/RELEASE.md`
+的概述 + `<上一个 tag>..<tag>` 的提交按 feat/fix/perf/docs/... 分组）、
+`x64simc6-X.Y-{src,dist,firmware}.tar.gz`、`SHA256SUMS`。固件需要 `build/alpine`，
+新机器先跑 `python3 tools/fetch_alpine.py`。
+
+推 tag 后 `.github/workflows/release.yml` 在带 C6 工具链的自托管 runner 上跑同一
+脚本并创建 GitHub Release；仓库内 skill `.claude/skills/release/SKILL.md` 记录了
+完整发版流程、验收闸门和回滚办法。演示 GIF 可重新录制：
+
+```sh
+python3 tools/make_demo_gif.py --out docs/img/net-demo.gif
 ```
 
 ## 已知限制

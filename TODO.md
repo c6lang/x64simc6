@@ -215,3 +215,18 @@
 - [ ] 后续（未做）：IPv6、DHCP、TCP 窗口缩放/拥塞控制（现在固定窗口，
       MSS 1460）、UDP 的严格无状态 NAT（现在是逐流表）；wasm 路径没有
       真实 socket，浏览器端仍走 `hostfs`/fetch 桥，不做 SLIP
+
+## 阶段 11 —— 发布自动化
+
+- [x] `tools/release.py`：从 `<上一个 tag>..<tag>` 的提交生成 `RELEASE_NOTES.md`
+      （Conventional Commits 分组 + `docs/RELEASE.md` 概述），打包
+      src/dist/firmware 三件产物、`SHA256SUMS`、`RELEASE.md` 副本
+- [x] `tools/fetch_alpine.py`：钉 Alpine 3.20 的 linux-lts apk 与 minirootfs，
+      解出 `build/alpine/{boot,lib,minirootfs.tar.gz}`，供 CI/新机器用
+- [x] `.github/workflows/release.yml`：tag 推送或手动 dispatch，自托管 runner
+      上跑发布脚本、上传 Actions 产物并创建 GitHub Release
+- [x] `.claude/skills/release/SKILL.md`：仓库内发布 skill（步骤/参数/验收闸门/回滚）
+- [x] `tools/make_demo_gif.py` + `docs/img/net-demo.gif`：登录后
+      ifconfig/ping/wget 的演示 GIF（README 已嵌入）
+- [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
+      runner；`runs-on` / `C6C` / `TCC` 已参数化）

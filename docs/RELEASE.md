@@ -1,5 +1,16 @@
 # x64simc6 发布说明
 
+## v1.3 变更（开发版，相对 v1.2）
+
+- **发布自动化**：`tools/release.py` 从提交文本生成 `RELEASE_NOTES.md`
+  （Conventional Commits 分组 + `docs/RELEASE.md` 概述）并打包
+  src/dist/firmware + `SHA256SUMS`；`tools/fetch_alpine.py` 为 CI/新机器准备
+  `build/alpine`；`.github/workflows/release.yml` 在 tag 推送时创建 GitHub
+  Release；仓库内发布 skill `.claude/skills/release/SKILL.md` 记录完整流程。
+- **演示 GIF**：README「外网访问」嵌入登录后 `ifconfig sl0` / `ping qq.com` /
+  `wget https://qq.com/` 的 GIF（`docs/img/net-demo.gif`，由
+  `tools/make_demo_gif.py` 录制）。
+
 ## v1.2 变更（相对 v1.1）
 
 发布日期：2026-11-27
