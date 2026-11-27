@@ -2080,3 +2080,24 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     Linux 的非 root ping socket，其它宿主需要相应能力。Pages 的 `sim.wasm`
     取自 release 资产，要等带 `sim_net_rx/tx` 的 release（v1.4+）才能在
     线上站点用代理。
+
+102. **wasm 空闲快进也要按墙钟节流：ping 卡顿、DNS 提前超时**。浏览器的
+     wasm 页面里 `ping bing.com` 报 `bad address`，而 `ping 10.0.2.2` 的
+     RTT 显示 2.8s、回复一团一团地出来。根因是**空闲快进只节流了 native
+     交互模式**：`pace_ahead()` / `g_pace_idle` 整段都在
+     `#if !defined(C6_WASM)` 里，wasm 的 HLT 快进每次都把 `g_m.tsc` 推进
+     0x2000~0x40000 条指令，guest 钟在等待网络时比墙钟跑得快得多——
+     musl 解析器的 5s 超时提前到、busybox ping 的 1s 间隔被压缩、RTT 被
+     撑大，表现就是「坏地址」和一阵一阵的回复。
+
+     修法：wasm 也走同一套 `pace_ahead()`。`pace_wall_ns()` 在 wasm 下读
+     `g_host_ms`（页面/Node 前端每帧调
+     `sim_set_host_ms(Date.now() & 0xffffffff)`），`g_pace_idle` 在 wasm
+     下恒为 1；空闲快进前若 guest 钟比墙钟超前 20ms，这一步就不推进时间
+     （仍然 `dev_tick()` 收设备事件）。前端不提供宿主时间（`g_host_ms=0`）
+     时 `pace_wall_ns()` 返回 0，自动退化为原来的行为。
+
+     验证：`node tests/wasm_net_proxy.js`（每轮都设宿主毫秒）里
+     `ping 10.0.2.2` 的 RTT 3.3~23ms、`ping bing.com` 106ms 且 DNS 正常；
+     浏览器 e2e/页面登录不受影响。改动：`src/machine.c6`、`src/wasm.c6`、
+     `web/app.js`、`tools/wasm_tty.js`。

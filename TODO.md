@@ -235,6 +235,8 @@
       整机 20M 条 15.85s → 1.04s（15.2×），浏览器登录 Alpine 1062s → 62s，
       产物 1.6 MiB → 116 KiB；50M 条与 native MATCH，无 clang 时回退 tcc-c6
       （DESIGN §97）
+- [x] wasm 空闲快进按墙钟节流：`sim_set_host_ms` + `pace_ahead` 对 wasm
+      生效，修 `ping bing.com` 的 `bad address`、ping 回复一阵一阵（DESIGN §102）
 - [x] `10.0.2.2` 映射到宿主 `127.0.0.1`：guest 可访问宿主上的 HTTP 代理
       （`export http_proxy=http://10.0.2.2:3128`，`wget http://…` 实测通过；
       HTTPS 需代理支持 busybox 的 `GET https://…` 形式）

@@ -87,6 +87,7 @@ function freePort() {
   async function runFor(ms, stop) {
     const t = Date.now();
     while (Date.now() - t < ms) {
+      if (w.sim_set_host_ms) w.sim_set_host_ms(Date.now() >>> 0);
       w.sim_run(200000);
       drain();
       if (stop && stop()) return true;
