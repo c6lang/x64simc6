@@ -15,3 +15,8 @@ button { padding: 6px 10px; background: #2a6f68; color: white; border: 0; border
 button:hover { background: #358b81; }
 pre { flex: 1; min-height: 240px; overflow: auto; background: #0a0e13; border: 1px solid #27323f; padding: 10px; white-space: pre-wrap; word-break: break-all; font-size: 13px; }
 #status { font-size: 12px; color: #f0c674; }
+
+/* xterm.js 终端面板 */
+#term { height: clamp(360px, 62vh, 640px); background: #0a0e13; border: 1px solid #27323f; border-radius: 4px; padding: 8px; overflow: hidden; }
+#term .xterm { height: 100%; }
+.hint { font-size: 12px; color: #8fa4b8; margin: 8px 0 0; }

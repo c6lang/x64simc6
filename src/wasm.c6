@@ -177,6 +177,26 @@ int sim_serial_in(u8 *src, int len)
     return len;
 }
 
+/* 网络代理：JS <-> COM2 的 SLIP 字节流。页面从 WebSocket 收到代理帧后
+ * 调 sim_net_rx()，运行循环里用 sim_net_tx() 把 guest 的帧发回去。 */
+int sim_net_rx(u8 *src, int len)
+{
+    return serial2_feed(src, (u32)len);
+}
+
+int sim_net_tx(u8 *dst, int cap)
+{
+    return serial2_out_take(dst, cap);
+}
+
+/* 宿主时间（Unix 秒）：页面启动时传进来，guest 的 CMOS RTC 用它，
+ * HTTPS 证书校验不会因为固定常量过期。 */
+int sim_set_rtc(u32 t)
+{
+    rtc_set_epoch((u64)t);
+    return 0;
+}
+
 int sim_set_cmdline(const char *s)
 {
     machine_set_cmdline(s);

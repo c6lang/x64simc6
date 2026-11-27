@@ -18,6 +18,9 @@
 
 /* --nettrace：打印 SLIP/IP/UDP/ICMP 收发摘要（只打前 400 条，避免刷屏） */
 int g_ntrace = 0;
+/* --netshim：不跑 guest，只把 stdin/stdout 上的 SLIP 帧接到本文件的 NAT
+ * （浏览器 wasm 的 WebSocket 代理用），见 main.c6 的 net_shim_mode()。 */
+int g_net_shim = 0;
 static u32 g_nt_n = 0;
 #define NT_ON (g_ntrace && g_nt_n < 800u)
 
@@ -100,6 +103,7 @@ struct NetConn {
     u32 fd;              /* 0 = 没有 socket */
     u32 state;
     u32 host_ok;         /* 宿主 connect 已完成 */
+    u32 connect_started; /* 代理模式：guest 第一个数据段到了才连宿主 */
     u32 host_shut;       /* 已对宿主 shutdown(SHUT_WR) */
     u32 guest_fin;       /* guest 已发 FIN */
     u32 host_eof;        /* 宿主已读到 EOF */
@@ -575,15 +579,26 @@ static void conn_open(u32 rip, u32 rport, u32 gip, u32 gport,
         return;
     }
     fcntl(fd, NET_F_SETFL, NET_O_NONBLOCK);
-    n_sa(&sa, rip, rport);
-    connect(fd, &sa, (unsigned int)sizeof(sa));
     c->fd = (u32)fd;
+#if !defined(C6_WASM)
+    if (g_net_shim) {
+        /* WebSocket 代理模式：等 guest 的第一个数据段再连宿主。guest 的
+         * TLS/CRNG 首次可能慢到 30s+，先连会被服务器的握手超时踢掉；
+         * HTTP/HTTPS 都是客户端先说话，这个延迟没有副作用。 */
+        c->connect_started = 0;
+    } else
+#endif
+    {
+        n_sa(&sa, rip, rport);
+        connect(fd, &sa, (unsigned int)sizeof(sa));
+        c->connect_started = 1;
+    }
     tcp_synack(c);
 }
 
 static void conn_check_host(struct NetConn *c)
 {
-    if (c->host_ok || c->fd == 0) return;
+    if (c->host_ok || c->fd == 0 || !c->connect_started) return;
     {
         struct net_pollfd p = {0};
         int rc = 0;
@@ -727,6 +742,15 @@ static void tcp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
         tcp_synack(c);
         return;
     }
+#if !defined(C6_WASM)
+    if (g_net_shim && dlen > 0 && !c->connect_started && c->fd != 0) {
+        struct net_sa sa = {0};
+        n_sa(&sa, c->rip, c->rport);
+        connect((int)c->fd, &sa, (unsigned int)sizeof(sa));
+        c->connect_started = 1;
+        c->last_rx_ms = n_now_ms();
+    }
+#endif
     if (dlen > 0) {
         u32 dseq = seq;
         u32 dl = dlen;
@@ -1152,8 +1176,9 @@ static void net_poll_conns(void)
         conn_check_host(c);
         if (!c->used) continue;
         if (!c->host_ok && c->state != NET_CS_SYN) {
-            /* 连接还在建立中 */
-            if ((u32)(now - c->last_rx_ms) > 20000u) conn_rst(c);
+            /* 连接还在建立中；代理模式在 guest 首包之前不设超时 */
+            if (c->connect_started && (u32)(now - c->last_rx_ms) > 20000u)
+                conn_rst(c);
             continue;
         }
         conn_read_host(c);

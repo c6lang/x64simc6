@@ -1,5 +1,30 @@
 # x64simc6 发布说明
 
+## v1.4 变更（开发版，相对 v1.3）
+
+- **浏览器终端**：`web/` 的串口从 `<pre>` + 输入框换成 xterm.js（vendored，
+  283 KiB）：光标闪烁、ANSI 颜色、5000 行滚动历史、选择复制；键盘直接输入
+  （Ctrl-C 原样送 guest），ash 的 `ESC[6n` 由 xterm 自动应答。新增
+  `tests/browser_tty_login.js`：从页面点「加载固件」「启动」，在 xterm 里等
+  `login:`、真实键盘事件输入 `root`、`uname -m` → `x86_64`（约 70s）。
+  顺带修了「浏览器里输入没反应」的两类问题：点终端后显式聚焦、未启动时
+  给出提示；以及**把 Linux 在 login/idle 时的 HLT 误判为“停机”**（页面
+  循环只看指令数是否前进，不再看 `sim_status()`）。状态栏还会显示已执行
+  指令数，并提示内核解压阶段暂时没有串口输出。
+- **GitHub Pages**：`.github/workflows/pages.yml` 从 release 资产组装站点
+  （`web/` + `sim.wasm` + `firmware.bin`），已部署
+  <https://c6lang.github.io/x64simc6/>；`workflow_dispatch` 的 `site_ref`
+  可指定站点源码 ref（默认最新 release tag，填 `master` 预览未发布改动）。
+- **真终端跑 wasm**：`tools/wasm_tty.js`（raw、Ctrl-] 退出、自动应答/过滤
+  `ESC[6n`），已在 pty 里验证登录 + `uname -m`。
+- **wasm 真上网（代理）**：第二串口 COM2 编进 wasm，导出
+  `sim_net_rx/sim_net_tx`；`build/sim --netshim` 不跑 guest、只把
+  stdin/stdout 的 SLIP 帧接到**同一份** `src/net.c6` 用户态 NAT；
+  `tools/ws_slip_proxy.js`（零依赖 WebSocket，每连接一个 shim）；页面加
+  「网络代理」（默认 `ws://127.0.0.1:8787`）。实测 wasm guest 登录后
+  `ping 10.0.2.2` 0% loss、`wget http://example.com/` 成功；
+  `tests/wasm_net_proxy.js` 覆盖整条链路（DESIGN §98）。
+
 ## v1.3 变更（相对 v1.2）
 
 发布日期：2026-11-27

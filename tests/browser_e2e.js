@@ -36,6 +36,10 @@ async function main() {
   CDP_PORT = await freePort();
   const server = spawn('python3', ['-m', 'http.server', String(PORT), '--bind', '127.0.0.1'],
                        { cwd: 'web', stdio: 'ignore' });
+  // 网络代理：页面「连接」按钮背后是 tools/ws_slip_proxy.js（每个连接起一个 --netshim）
+  const proxyPort = await freePort();
+  const proxy = spawn('node', ['tools/ws_slip_proxy.js', '--port', String(proxyPort)],
+                      { stdio: ['ignore', 'ignore', 'pipe'] });
   // 每次用干净的 profile：否则会命中上一次的 HTTP 缓存（旧 app.js/sim.wasm）
   fs.rmSync('build/chrome-e2e', { recursive: true, force: true });
   fs.mkdirSync('build/chrome-e2e', { recursive: true });
@@ -151,17 +155,48 @@ async function main() {
     const tput = await evaluate(`(async () => {
       const before = Number(wasm.sim_stat_insns());
       document.getElementById('start').click();
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 5000));
       document.getElementById('pause').click();
       return Number(wasm.sim_stat_insns()) - before;
     })()`);
-    if (tput < 4000000) throw new Error('页面运行吞吐过低（1.5s 只跑了 ' + tput + ' 条）');
-    console.log('[browser] 页面 1.5s 跑 ' + tput + ' 条指令 OK');
+    if (tput < 12000000) throw new Error('页面运行吞吐过低（5s 只跑了 ' + tput + ' 条）');
+    console.log('[browser] 页面 5s 跑 ' + tput + ' 条指令 OK');
+
+    // xterm.js：终端要能渲染文本与 ANSI 颜色（引导前 200M 条还没有串口输出，
+    // 所以这里直接往终端写一行带颜色的测试串，验证缓冲区/渲染路径）
+    const screen = await evaluate(`(async () => {
+      if (!document.querySelector('.xterm')) return { ok: false, why: '没有 .xterm' };
+      term.write('xterm-ok\\r\\n');
+      await new Promise(r => setTimeout(r, 300));
+      const b = term.buffer.active;
+      let s = '';
+      for (let i = 0; i < b.length; i++) s += (b.getLine(i) && b.getLine(i).translateToString(true) || '');
+      return { ok: true, text: s, cols: term.cols, rows: term.rows,
+               w: document.querySelector('.xterm').clientWidth };
+    })()`);
+    if (!screen.ok || !screen.text.includes('xterm-ok')) throw new Error('xterm 终端没有渲染文本: ' + JSON.stringify(screen));
+    console.log('[browser] xterm 终端 OK: 渲染 xterm-ok');
+
+    // 页面「网络代理」UI：只验证 WebSocket 连接（真正上网由 wasm_net_proxy 测）
+    const netOk = await evaluate(`(async () => {
+      document.getElementById('proxyurl').value = 'ws://127.0.0.1:${proxyPort}';
+      document.getElementById('netconnect').click();
+      for (let i = 0; i < 100; i++) {
+        const s = document.getElementById('netstatus').textContent || '';
+        if (s.includes('已连接') || s.includes('失败')) return s;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return document.getElementById('netstatus').textContent || '';
+    })()`);
+    if (!(netOk || '').includes('已连接')) throw new Error('页面连接代理失败: ' + netOk);
+    console.log('[browser] 页面网络代理连接 OK:', netOk);
+    await evaluate(`document.getElementById('netdisconnect').click()`);
     console.log('browser_e2e: all checks passed');
   } finally {
     if (ws) ws.close();
     chrome.kill();
     server.kill();
+    proxy.kill();
   }
 }
 

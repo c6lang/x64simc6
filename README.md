@@ -50,6 +50,19 @@ cd web && python3 -m http.server 8000
 # 打开 http://localhost:8000/
 ```
 
+页面里的串口是一个**真终端**（xterm.js）：光标闪烁、ANSI 颜色、5000 行
+滚动历史、选择复制都和终端一致；点一下终端后键盘直接输入，Ctrl-C 原样送
+guest。`tests/browser_tty_login.js` 会从页面点「加载固件」「启动」，在 xterm
+里等到 `login:`、输入 `root` 和 `uname -m`，验证整条 UI + 键盘 + 串口链路。
+
+要注意的两点（也是“点了没反应”的常见原因）：
+
+- **先点一下终端再打字**（终端里出现光标），键盘才会进 guest；页面启动后
+  会自动聚焦，但点过按钮/别处后焦点会丢。
+- 点「启动」后，内核解压阶段大约 **20 秒没有串口输出**（第一条日志大约在
+  3 亿条指令之后），状态栏会显示已执行的指令数，属正常现象。
+- 必须用 HTTP 服务打开，`file://` 下 wasm/firmware 拉不下来（状态栏会提示）。
+
 也可以托管到 GitHub Pages（`sim.wasm` / `firmware.bin` 是构建产物，不在 git
 里，所以 Pages workflow 直接从 release 资产取）：仓库 Settings → Pages →
 Source 选「GitHub Actions」，手动跑一次 `pages` workflow（之后每次 release
@@ -60,6 +73,35 @@ Source 选「GitHub Actions」，手动跑一次 `pages` workflow（之后每次
 想在**终端**里跑 wasm 版（而不是浏览器）：`node tools/wasm_tty.js`（默认
 `--wasm web/sim.wasm --fw build/firmware.bin`）。它和 native 一样切 raw、
 Ctrl-C 送 guest、Ctrl-] 退出，并自己应答 ash 的 `ESC[6n` 光标查询。
+
+### 浏览器里真上网（WebSocket SLIP 代理）
+
+wasm 里没有宿主 socket；guest 的上网走“第二串口 + WebSocket 代理”：
+
+```sh
+./build.sh native                    # 需要 build/sim（--netshim 模式）
+node tools/ws_slip_proxy.js          # 默认 ws://127.0.0.1:8787
+```
+
+页面「网络代理」填 `ws://127.0.0.1:8787`，点「连接」，再「加载固件」「启动」。
+guest 里照常 `ping 10.0.2.2`、`wget http://example.com/`，地址仍是
+10.0.2.15 / 10.0.2.2 / 10.0.2.3。链路是：
+
+```
+wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
+  <-> tools/ws_slip_proxy.js <-> build/sim --netshim <-> 宿主 socket
+```
+
+`--netshim` 不跑 guest，只把 stdin/stdout 上的 SLIP 帧接到 `src/net.c6` 里
+**和 native 完全相同的用户态 NAT**（DNS/TCP/UDP/ICMP），所以 wasm 和 native
+的上网行为一致。`node tests/wasm_net_proxy.js` 会把这条链路完整跑一遍
+（登录 + ping + wget http）。HTTPS 走同一条 TCP 中继，但 wasm guest 目前
+实测会被 CDN 边缘关闭连接（native 的 HTTPS 正常），见 DESIGN §101 的已知问题。
+
+注意：`--netshim` 把宿主的网络能力开放给 guest（默认只绑 127.0.0.1，
+不要暴露到公网）；GitHub Pages 是 HTTPS，浏览器对 `ws://127.0.0.1` 的
+混合内容策略各版本不同，本地 `http://localhost` 页面最稳。Pages 上的
+`sim.wasm` 来自 release 资产，需要 v1.4+ 的构建才带 `sim_net_rx/tx`。
 
 构建 Alpine 固件（需要联网；Alpine 3.20 CDN）：
 

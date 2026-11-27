@@ -2,18 +2,28 @@
  * 与 wasm 之间只通过导出的 C 函数 + 共享线性内存通信，不依赖 wasm import。 */
 const $ = (id) => document.getElementById(id);
 const status = (s) => { $('status').textContent = s; };
+const netstatus = (s) => { $('netstatus').textContent = s; };
 const SCRATCH = 0x0f800000;   // 248 MiB：hostfs/串口的小缓冲（初始 256 MiB 内）
 const FW_STAGE = 0x10000000;  // 256 MiB：大固件 staging；不够就先把内存扩到 512 MiB
 const FW_MAX = 48 << 20;      // 与 src/wasm.c6 的 g_fw_stage 一致
+const NET_RX = SCRATCH + 4 * 0x100000;   // 252 MiB：代理 -> wasm 的收包缓冲
+const NET_TX = NET_RX + 65536;            // 252 MiB + 64 KiB：wasm -> 代理
 const FS_CAP = 1 << 20;
 
 let wasm = null;
 let mem = null;
+let term = null;
+let serialLog = '';
 let db = null;
 let running = false;
 let raf = 0;
 let totalInsns = 0;
 let lastSync = 0;
+let lastStatus = 0;
+let sawSerial = false;
+let netws = null;
+let netTimer = 0;
+let netRx = 0, netTx = 0, netStatusAt = 0;
 
 function bytes() { return new Uint8Array(wasm.memory.buffer); }
 function str2bytes(s) { return new TextEncoder().encode(s); }
@@ -114,22 +124,63 @@ function exportFiles() {
   if (count) status(`页面存储同步：${count} 个文件已写回 IndexedDB`);
 }
 
+/* ---------- 终端（xterm.js） ----------
+ * 浏览器里直接给一个真终端：ANSI 颜色、光标、滚动历史、选择复制都由
+ * xterm.js 处理；键盘输入原样送 guest（Ctrl-C 就是 0x03），
+ * ash 的 ESC[6n 也由 xterm 自动应答。 */
+function initTerm() {
+  term = new Terminal({
+    cols: 80, rows: 24, scrollback: 5000, cursorBlink: true,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: 13,
+    theme: {
+      background: '#0a0e13', foreground: '#d6e0ea', cursor: '#7fd1c1',
+      selectionBackground: '#2a6f68',
+    },
+  });
+  term.open($('term'));
+  $('term').addEventListener('mousedown', () => term.focus());
+  term.onData((data) => {
+    if (!running) {
+      status('先点「加载固件」和「启动」，终端才会连到 guest');
+      return;
+    }
+    const b = str2bytes(data);
+    put(wasm.sim_host_bridge(), b);
+    wasm.sim_host_event(3, b.length);
+  });
+  term.focus();
+}
+
 /* ---------- 初始化 ---------- */
 async function initWasm() {
+  if (location.protocol === 'file:') {
+    status('请用 HTTP 服务打开（cd web && python3 -m http.server 8000），不能用 file://');
+    return;
+  }
   status('加载 wasm…');
   const bytesWasm = await fetchAsset('sim.wasm');
   const module = await WebAssembly.compile(bytesWasm);
   const inst = await WebAssembly.instantiate(module, {});
   wasm = inst.exports;
   mem = wasm.memory;
+  if (typeof wasm.sim_set_rtc === 'function')
+    wasm.sim_set_rtc(Math.floor(Date.now() / 1000));
+  initTerm();
   db = await openDB();
   const files = await idbOp('files', 'readonly', s => s.getAll());
   const keys = await idbOp('files', 'readonly', s => s.getAllKeys());
   const pairs = keys.map((k, i) => [String(k), new Uint8Array(files[i])]);
   importFiles(pairs);
   const log = await idbOp('meta', 'readonly', s => s.get('console'));
-  if (log) $('console').textContent = new TextDecoder().decode(log);
-  status('wasm 已就绪，IndexedDB 文件已导入');
+  if (log) {
+    serialLog = new TextDecoder().decode(log);
+    term.write('\r\n\x1b[90m── 上次会话的串口记录（机器已复位，' +
+               '点「加载固件」「启动」重新开始）──\x1b[0m\r\n');
+    term.write(serialLog);
+  }
+  status(log ? '已恢复上次日志（机器未运行）；请点「加载固件」「启动」'
+             : 'wasm 已就绪，IndexedDB 文件已导入');
 }
 
 async function loadFirmware() {
@@ -148,7 +199,10 @@ async function loadFirmware() {
     put(FW_STAGE, fw);
     const rc = wasm.sim_init(FW_STAGE, fw.length);
     if (rc !== 0) throw new Error(`sim_init 返回 ${rc}`);
-    $('console').textContent = '';
+    term.reset();
+    serialLog = '';
+    sawSerial = false;
+    term.focus();
     status(`固件已加载：${fw.length} 字节`);
   } catch (e) { status(`固件加载失败：${e.message}`); }
 }
@@ -158,9 +212,11 @@ function pumpSerial() {
   const p = SCRATCH + 2 * FS_CAP;
   const n = wasm.sim_serial_out(p, cap);
   if (n > 0) {
-    const el = $('console');
-    el.textContent += new TextDecoder().decode(get(p, n));
-    el.scrollTop = el.scrollHeight;
+    sawSerial = true;
+    const bytes = get(p, n);
+    term.write(bytes);
+    serialLog += new TextDecoder().decode(bytes);
+    if (serialLog.length > 600000) serialLog = serialLog.slice(-400000);
   }
 }
 
@@ -172,41 +228,114 @@ function loop() {
   const t0 = performance.now();
   do {
     wasm.sim_run(100000);
-    if (wasm.sim_status() !== 0) break;
+    // 注意：不要用 sim_status() 判断“停机”——Linux 在 idle/等回车时就是
+    // HLT（cpu.halted=1），那是正常运行状态；只有指令数不再前进才真停了。
   } while (performance.now() - t0 < 12);
   totalInsns = Number(wasm.sim_stat_insns());
   pumpSerial();
-  if (totalInsns - before === 0 || wasm.sim_status() !== 0) {
+  if (totalInsns - before === 0) {
     running = false;
     status(`停机，共执行 ${totalInsns} 条指令`);
     exportFiles();
     return;
   }
   const now = Date.now();
+  if (now - lastStatus > 500) {
+    lastStatus = now;
+    const n = (totalInsns / 1e6).toFixed(0);
+    status(sawSerial ? `运行中… ${n}M 条指令`
+                     : `运行中… ${n}M 条指令（内核解压中，第一条串口日志还没出来）`);
+  }
   if (now - lastSync > 2000) {
     lastSync = now;
     exportFiles();
-    idbOp('meta', 'readwrite', s => s.put(str2bytes($('console').textContent), 'console'));
+    idbOp('meta', 'readwrite', s => s.put(str2bytes(serialLog), 'console'));
     localStorage.setItem('c6sim.insns', String(totalInsns));
   }
   raf = requestAnimationFrame(loop);
 }
 
+/* ---------- wasm 网络代理（WebSocket <-> COM2 SLIP） ---------- */
+function ensureNetBuf() {
+  const need = NET_TX + 65536;
+  if (need > wasm.memory.buffer.byteLength) {
+    const pages = Math.ceil((need - wasm.memory.buffer.byteLength) / 65536);
+    if (wasm.memory.grow(pages) < 0) return false;
+  }
+  return true;
+}
+
+function pumpNet() {
+  if (!wasm || !netws || netws.readyState !== 1) return;
+  const n = wasm.sim_net_tx(NET_TX, 65536);
+  if (n > 0) {
+    netws.send(new Uint8Array(wasm.memory.buffer, NET_TX, n).slice());
+    netTx += n;
+  }
+  const now = Date.now();
+  if (now - netStatusAt > 300) {
+    netStatusAt = now;
+    netstatus('已连接 ' + $('proxyurl').value.trim() + ' ↑' + netTx + ' ↓' + netRx + ' B');
+  }
+}
+
+function disconnectProxy() {
+  if (netTimer) { clearInterval(netTimer); netTimer = 0; }
+  if (netws) {
+    const w = netws;
+    netws = null;
+    try { w.close(); } catch (e) {}
+  }
+  netstatus('未连接：本机先跑 node tools/ws_slip_proxy.js');
+}
+
+function connectProxy() {
+  if (!wasm) { netstatus('请先加载 wasm'); return; }
+  if (typeof wasm.sim_net_rx !== 'function') {
+    netstatus('这个 sim.wasm 不支持网络代理（需要本仓库重新构建的 wasm）');
+    return;
+  }
+  if (netws) return;
+  const url = $('proxyurl').value.trim();
+  if (!url) { netstatus('请输入代理地址'); return; }
+  if (!ensureNetBuf()) { netstatus('线性内存不足'); return; }
+  try {
+    const w = new WebSocket(url);
+    w.binaryType = 'arraybuffer';
+    netws = w;
+    w.onopen = () => {
+      netRx = netTx = 0;
+      netstatus('已连接 ' + url);
+      netTimer = setInterval(pumpNet, 4);
+    };
+    w.onmessage = (ev) => {
+      if (!wasm || netws !== w) return;
+      const b = new Uint8Array(ev.data);
+      if (b.length > 65536) return;
+      put(NET_RX, b);
+      wasm.sim_net_rx(NET_RX, b.length);
+      netRx += b.length;
+    };
+    w.onerror = () => netstatus('连接失败：' + url);
+    w.onclose = () => {
+      if (netws === w) netws = null;
+      if (netTimer) { clearInterval(netTimer); netTimer = 0; }
+      netstatus('已断开 ' + url);
+    };
+  } catch (e) { netstatus('连接失败：' + e.message); }
+}
+
 /* ---------- UI ---------- */
+$('netconnect').onclick = connectProxy;
+$('netdisconnect').onclick = disconnectProxy;
+window.addEventListener('beforeunload', disconnectProxy);
 $('load').onclick = loadFirmware;
 $('start').onclick = () => {
   if (!wasm) { status('请先加载 wasm'); return; }
-  if (!running) { running = true; status('运行中…'); loop(); }
+  if (!running) { running = true; setTimeout(() => term.focus(), 0); status('运行中…'); loop(); }
 };
 $('pause').onclick = () => { running = false; cancelAnimationFrame(raf); status('已暂停'); exportFiles(); };
-$('reset').onclick = () => { running = false; wasm.sim_reset(); $('console').textContent = ''; status('已复位'); };
-$('send').onclick = () => {
-  const data = str2bytes($('input').value + '\n');
-  put(wasm.sim_host_bridge(), data);
-  wasm.sim_host_event(3, data.length);
-  $('input').value = '';
-};
-$('input').addEventListener('keydown', e => { if (e.key === 'Enter') $('send').click(); });
+$('reset').onclick = () => { running = false; cancelAnimationFrame(raf); wasm.sim_reset(); term.reset(); serialLog = ''; sawSerial = false; term.focus(); status('已复位'); };
 $('netfetch').onclick = async () => {
   const url = $('neturl').value.trim();
   if (!url) { status('请输入 URL'); return; }

@@ -171,6 +171,9 @@
       `unpckl/h`、`movmskps/pd`、打包 `cvtdq2ps/cvtps2dq/cvttps2dq`、
       `rcp/rsqrt`（DESIGN §90）；与本机 CPU 对拍 1553 条逐位相同
       （`rcpps/rsqrtps` 故意给精确值，与硬件的 12 位近似不同但不超 SDM 误差界）
+- [ ] wasm 代理下的 HTTPS：guest 的 ClientHello 已到代理、直接重放能拿到
+      完整 ServerHello，但 example.com 的 CDN 边缘 ~2.4s 后直接关闭连接
+      （native HTTPS 正常）；待查（DESIGN §101）。测试暂只断言 HTTP/ICMP
 - [ ] 引导期偶发的「跳进 0x48/0x4a/0x4d 填充页」`#UD`（`--udtrace` 可见，
       进程被 SIGILL 但整机继续跑；引导、登录、`top` 都不受影响）。下一步用
       `--udtrace` + `dmesg` 的 `traps:` 行定位是哪条跳转把 RIP 带进数据页。
@@ -238,6 +241,13 @@
       退出、自动应答/过滤 `ESC[6n`），已在 pty 里验证登录 + `uname -m`
 - [x] `.github/workflows/pages.yml` + 仓库 Pages 设置：从 release 资产组装
       `web/` 站点（<https://c6lang.github.io/x64simc6/> 已部署）
+- [x] 浏览器串口换 xterm.js：光标/ANSI 颜色/5000 行滚动历史/选择复制，
+      键盘直通 guest、Ctrl-C 原样送；`tests/browser_tty_login.js` 走页面
+      UI 登录并执行 `uname -m` 通过（约 70s）
+- [x] wasm 真上网：`--netshim`（native SLIP↔NAT 网关，复用 `src/net.c6`）+
+      wasm COM2/`sim_net_rx/tx` + `tools/ws_slip_proxy.js` + 页面「网络代理」；
+      `tests/wasm_net_proxy.js` 里 guest 登录 + `ping 10.0.2.2` +
+      `wget http://example.com/` 全过（DESIGN §101）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）
 
