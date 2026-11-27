@@ -151,12 +151,27 @@ async function main() {
     const tput = await evaluate(`(async () => {
       const before = Number(wasm.sim_stat_insns());
       document.getElementById('start').click();
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 5000));
       document.getElementById('pause').click();
       return Number(wasm.sim_stat_insns()) - before;
     })()`);
-    if (tput < 4000000) throw new Error('页面运行吞吐过低（1.5s 只跑了 ' + tput + ' 条）');
-    console.log('[browser] 页面 1.5s 跑 ' + tput + ' 条指令 OK');
+    if (tput < 12000000) throw new Error('页面运行吞吐过低（5s 只跑了 ' + tput + ' 条）');
+    console.log('[browser] 页面 5s 跑 ' + tput + ' 条指令 OK');
+
+    // xterm.js：终端要能渲染文本与 ANSI 颜色（引导前 200M 条还没有串口输出，
+    // 所以这里直接往终端写一行带颜色的测试串，验证缓冲区/渲染路径）
+    const screen = await evaluate(`(async () => {
+      if (!document.querySelector('.xterm')) return { ok: false, why: '没有 .xterm' };
+      term.write('xterm-ok\\r\\n');
+      await new Promise(r => setTimeout(r, 300));
+      const b = term.buffer.active;
+      let s = '';
+      for (let i = 0; i < b.length; i++) s += (b.getLine(i) && b.getLine(i).translateToString(true) || '');
+      return { ok: true, text: s, cols: term.cols, rows: term.rows,
+               w: document.querySelector('.xterm').clientWidth };
+    })()`);
+    if (!screen.ok || !screen.text.includes('xterm-ok')) throw new Error('xterm 终端没有渲染文本: ' + JSON.stringify(screen));
+    console.log('[browser] xterm 终端 OK: 渲染 xterm-ok');
     console.log('browser_e2e: all checks passed');
   } finally {
     if (ws) ws.close();

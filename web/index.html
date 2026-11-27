@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>c6simc6 · x86-64 in WebAssembly</title>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="vendor/xterm.css">
 </head>
 <body>
 <header><h1>c6simc6</h1><span>x86-64 emulator compiled from C6, running in WebAssembly</span></header>
@@ -22,12 +23,9 @@
     <p id="status">空闲</p>
   </section>
   <section class="panel grow">
-    <h2>串口</h2>
-    <pre id="console"></pre>
-    <div class="row">
-      <input id="input" placeholder="输入并回车发送到 guest 串口">
-      <button id="send">发送</button>
-    </div>
+    <h2>串口（终端）</h2>
+    <div id="term"></div>
+    <p class="hint">点一下终端后直接输入；Ctrl-C 送 guest，滚轮回看历史。</p>
   </section>
   <section class="panel">
     <h2>页面存储文件表</h2>
@@ -40,6 +38,7 @@
     <pre id="fileresult"></pre>
   </section>
 </main>
-<script src="app.js?v=1.3"></script>
+<script src="vendor/xterm.js"></script>
+<script src="app.js?v=1.4"></script>
 </body>
 </html>

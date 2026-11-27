@@ -9,6 +9,8 @@ const FS_CAP = 1 << 20;
 
 let wasm = null;
 let mem = null;
+let term = null;
+let serialLog = '';
 let db = null;
 let running = false;
 let raf = 0;
@@ -114,6 +116,29 @@ function exportFiles() {
   if (count) status(`页面存储同步：${count} 个文件已写回 IndexedDB`);
 }
 
+/* ---------- 终端（xterm.js） ----------
+ * 浏览器里直接给一个真终端：ANSI 颜色、光标、滚动历史、选择复制都由
+ * xterm.js 处理；键盘输入原样送 guest（Ctrl-C 就是 0x03），
+ * ash 的 ESC[6n 也由 xterm 自动应答。 */
+function initTerm() {
+  term = new Terminal({
+    cols: 80, rows: 24, scrollback: 5000, cursorBlink: true,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: 13,
+    theme: {
+      background: '#0a0e13', foreground: '#d6e0ea', cursor: '#7fd1c1',
+      selectionBackground: '#2a6f68',
+    },
+  });
+  term.open($('term'));
+  term.onData((data) => {
+    const b = str2bytes(data);
+    put(wasm.sim_host_bridge(), b);
+    wasm.sim_host_event(3, b.length);
+  });
+  term.focus();
+}
+
 /* ---------- 初始化 ---------- */
 async function initWasm() {
   status('加载 wasm…');
@@ -122,13 +147,17 @@ async function initWasm() {
   const inst = await WebAssembly.instantiate(module, {});
   wasm = inst.exports;
   mem = wasm.memory;
+  initTerm();
   db = await openDB();
   const files = await idbOp('files', 'readonly', s => s.getAll());
   const keys = await idbOp('files', 'readonly', s => s.getAllKeys());
   const pairs = keys.map((k, i) => [String(k), new Uint8Array(files[i])]);
   importFiles(pairs);
   const log = await idbOp('meta', 'readonly', s => s.get('console'));
-  if (log) $('console').textContent = new TextDecoder().decode(log);
+  if (log) {
+    serialLog = new TextDecoder().decode(log);
+    term.write(serialLog);
+  }
   status('wasm 已就绪，IndexedDB 文件已导入');
 }
 
@@ -148,7 +177,9 @@ async function loadFirmware() {
     put(FW_STAGE, fw);
     const rc = wasm.sim_init(FW_STAGE, fw.length);
     if (rc !== 0) throw new Error(`sim_init 返回 ${rc}`);
-    $('console').textContent = '';
+    term.reset();
+    serialLog = '';
+    term.focus();
     status(`固件已加载：${fw.length} 字节`);
   } catch (e) { status(`固件加载失败：${e.message}`); }
 }
@@ -158,9 +189,10 @@ function pumpSerial() {
   const p = SCRATCH + 2 * FS_CAP;
   const n = wasm.sim_serial_out(p, cap);
   if (n > 0) {
-    const el = $('console');
-    el.textContent += new TextDecoder().decode(get(p, n));
-    el.scrollTop = el.scrollHeight;
+    const bytes = get(p, n);
+    term.write(bytes);
+    serialLog += new TextDecoder().decode(bytes);
+    if (serialLog.length > 600000) serialLog = serialLog.slice(-400000);
   }
 }
 
@@ -186,7 +218,7 @@ function loop() {
   if (now - lastSync > 2000) {
     lastSync = now;
     exportFiles();
-    idbOp('meta', 'readwrite', s => s.put(str2bytes($('console').textContent), 'console'));
+    idbOp('meta', 'readwrite', s => s.put(str2bytes(serialLog), 'console'));
     localStorage.setItem('c6sim.insns', String(totalInsns));
   }
   raf = requestAnimationFrame(loop);
@@ -196,17 +228,10 @@ function loop() {
 $('load').onclick = loadFirmware;
 $('start').onclick = () => {
   if (!wasm) { status('请先加载 wasm'); return; }
-  if (!running) { running = true; status('运行中…'); loop(); }
+  if (!running) { running = true; term.focus(); status('运行中…'); loop(); }
 };
 $('pause').onclick = () => { running = false; cancelAnimationFrame(raf); status('已暂停'); exportFiles(); };
-$('reset').onclick = () => { running = false; wasm.sim_reset(); $('console').textContent = ''; status('已复位'); };
-$('send').onclick = () => {
-  const data = str2bytes($('input').value + '\n');
-  put(wasm.sim_host_bridge(), data);
-  wasm.sim_host_event(3, data.length);
-  $('input').value = '';
-};
-$('input').addEventListener('keydown', e => { if (e.key === 'Enter') $('send').click(); });
+$('reset').onclick = () => { running = false; cancelAnimationFrame(raf); wasm.sim_reset(); term.reset(); serialLog = ''; term.focus(); status('已复位'); };
 $('netfetch').onclick = async () => {
   const url = $('neturl').value.trim();
   if (!url) { status('请输入 URL'); return; }

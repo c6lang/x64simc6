@@ -1,5 +1,19 @@
 # x64simc6 发布说明
 
+## v1.4 变更（开发版，相对 v1.3）
+
+- **浏览器终端**：`web/` 的串口从 `<pre>` + 输入框换成 xterm.js（vendored，
+  283 KiB）：光标闪烁、ANSI 颜色、5000 行滚动历史、选择复制；键盘直接输入
+  （Ctrl-C 原样送 guest），ash 的 `ESC[6n` 由 xterm 自动应答。新增
+  `tests/browser_tty_login.js`：从页面点「加载固件」「启动」，在 xterm 里等
+  `login:`、`term.paste('root\r')`、`uname -m` → `x86_64`（约 70s）。
+- **GitHub Pages**：`.github/workflows/pages.yml` 从 release 资产组装站点
+  （`web/` + `sim.wasm` + `firmware.bin`），已部署
+  <https://c6lang.github.io/x64simc6/>；`workflow_dispatch` 的 `site_ref`
+  可指定站点源码 ref（默认最新 release tag，填 `master` 预览未发布改动）。
+- **真终端跑 wasm**：`tools/wasm_tty.js`（raw、Ctrl-] 退出、自动应答/过滤
+  `ESC[6n`），已在 pty 里验证登录 + `uname -m`。
+
 ## v1.3 变更（相对 v1.2）
 
 发布日期：2026-11-27

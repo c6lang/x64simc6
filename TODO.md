@@ -238,5 +238,8 @@
       退出、自动应答/过滤 `ESC[6n`），已在 pty 里验证登录 + `uname -m`
 - [x] `.github/workflows/pages.yml` + 仓库 Pages 设置：从 release 资产组装
       `web/` 站点（<https://c6lang.github.io/x64simc6/> 已部署）
+- [x] 浏览器串口换 xterm.js：光标/ANSI 颜色/5000 行滚动历史/选择复制，
+      键盘直通 guest、Ctrl-C 原样送；`tests/browser_tty_login.js` 走页面
+      UI 登录并执行 `uname -m` 通过（约 70s）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）

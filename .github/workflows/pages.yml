@@ -11,6 +11,10 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      site_ref:
+        description: "可选：站点源码用哪个 ref（默认最新 release tag；填 master 可预览未发布改动）"
+        required: false
 
 permissions:
   contents: read
@@ -37,13 +41,16 @@ jobs:
           if [ -z "$TAG" ]; then
             TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
           fi
+          REF="${{ inputs.site_ref }}"
+          if [ -z "$REF" ]; then REF="$TAG"; fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "发布 $TAG"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "发布 $TAG（站点源码 $REF）"
 
-      - name: 取出该 tag 的站点源码
+      - name: 取出站点源码
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.rel.outputs.tag }}
+          ref: ${{ steps.rel.outputs.ref }}
 
       - name: 下载该 release 的 sim.wasm 与 firmware.bin
         env:

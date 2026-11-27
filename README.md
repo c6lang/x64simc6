@@ -41,6 +41,11 @@ cd web && python3 -m http.server 8000
 # 打开 http://localhost:8000/
 ```
 
+页面里的串口是一个**真终端**（xterm.js）：光标闪烁、ANSI 颜色、5000 行
+滚动历史、选择复制都和终端一致；点一下终端后键盘直接输入，Ctrl-C 原样送
+guest。`tests/browser_tty_login.js` 会从页面点「加载固件」「启动」，在 xterm
+里等到 `login:`、输入 `root` 和 `uname -m`，验证整条 UI + 键盘 + 串口链路。
+
 也可以托管到 GitHub Pages（`sim.wasm` / `firmware.bin` 是构建产物，不在 git
 里，所以 Pages workflow 直接从 release 资产取）：仓库 Settings → Pages →
 Source 选「GitHub Actions」，手动跑一次 `pages` workflow（之后每次 release
