@@ -133,4 +133,8 @@
 - [x] `./build.sh test` 全过（payload / 单元 / CPL3 / pcache / wasm 冒烟）
 - [x] 900M 引导：两种构建 `ser_out=309 irq4=181` 且逐字节一致
 - [x] `tools/boot_login.py`：默认构建 PASS（约 56s 到 900M）、自举构建 PASS
-- [x] 文档：README 性能表、DESIGN §84、RELEASE v1.1
+- [x] 交互终端：native 在 tty 上切 raw（手写 termios，避开 `--emit-ctu`
+      的头冲突），Ctrl-C 送 guest、Ctrl-] 退出，过滤 ash 的 `ESC[..R` 应答
+- [x] `build.sh` 加 `OPT` 旋钮（默认 `-O2`；-O3/-flto/-march=native/PGO
+      实测都不如 -O2，见 DESIGN §85）
+- [x] 文档：README 性能表、DESIGN §84/§85/§86、RELEASE v1.1

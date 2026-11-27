@@ -40,6 +40,11 @@ cd web && python3 -m http.server 8000
 ./build/sim build/firmware.bin
 ```
 
+在真实终端里跑时模拟器会把终端切到 raw：输入不会显示两遍，`Ctrl-C` 原样
+送给 guest，**`Ctrl-]` 退出**。约 1 分钟出现 `(none) login:`，输入 `root`
+回车进 shell；`/root` 是空的（`ls` 自然没有输出），可以试 `ls /`、
+`cat /etc/os-release`、`uname -a`、`df -h`。
+
 ## 验证
 
 ```sh

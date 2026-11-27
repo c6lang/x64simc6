@@ -53,6 +53,9 @@ cc -O2 -o build/sim build/ctu/*.o
   `(u64)1 << n` 会生成 movabs+shl）。
 - **`main.c6`** 去掉 `defer/errdefer/try/catch/f-string`：单个 TU 可以
   `-c` 编译，也能被 `--emit-ctu` 吃下。
+- **交互终端**：native 在 tty 上把终端切 raw（输入不再显示两遍），
+  `Ctrl-C` 送给 guest、`Ctrl-]` 退出；并过滤 ash 光标查询的应答
+  （`ESC[..R`），命令行不会再被 `^[[24;11R` 这类垃圾污染。
 - 试过但**没有采用**：每条指令开头填一次的 16 字节取指窗口。c6c 下
   小函数调用 + 逐字节拷贝比「再翻译一次」还贵，`jmp $` 20M 条从 60.7G
   **劣化到 88.0G**。

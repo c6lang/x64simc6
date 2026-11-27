@@ -1386,3 +1386,18 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     PGO 只有 ~3% 收益，却需要「拿 34MB 固件跑一遍采样」并维护随源码变化的
     profile 数据，不划算。结论：默认 `-O2`，需要时用 `OPT="-O3" ./build.sh
     native` 覆盖。
+
+86. **交互串口终端**：native CLI 在 stdin 是 tty 时把宿主终端切到 raw。
+    `struct termios` 和 `tcgetattr/tcsetattr` 是手写声明（glibc x86-64 布局，
+    实测 `sizeof` 60），因为 `#include <termios.h>` 会让系统头和 c6c 的
+    `<sys/stat.h>` 抢 `struct timespec`，`--emit-ctu` 路径编不过 —— 和
+    `<poll.h>` 是同一个坑（§84）。不开 raw 时两个问题在真终端上都能复现
+    （用 `script -qec` 分配 pty 验证过）：
+    - 宿主终端的行规程回显 + guest 的串口回显 → 每条命令显示两遍；
+    - busybox ash 每个提示符发 `ESC[6n` 问光标位置，真实终端的应答
+      `ESC[24;11R` 被行规程回显到屏幕上，还会插进正在编辑的命令行
+      （`(none):~# ^[[24;11Rls ...`，这条命令就废了）。
+    现在关掉 `ISIG`（Ctrl-C 原样进 guest），退出用 `Ctrl-]`（0x1d，只在
+    raw 模式下生效）；输入路径上再过滤 `ESC[数字;数字R` 这条应答（方向键等
+    其它 ESC 序列原样转给 guest）；正常退出（Ctrl-] 或机器 halt）时
+    `tcsetattr` 恢复原设置。
