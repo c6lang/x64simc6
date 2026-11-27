@@ -308,9 +308,10 @@
 - [x] `tools/mkfw.py` 生成 `/init` 时先
       `sed -i -e '/sbin\/openrc/d'` 删掉 inittab 里的 openrc 三连，再注入
       `ttyS0::respawn:-/bin/login`（minirootfs 没有 openrc，§103c）
-- [x] 验证：loglevel=7 采样看到 `PCI: Using configuration type 1 for base
-      access` + `[8086:1237] type 00 class 0x060000`；标准固件 1.5B 条到
-      login 的串口只有 56 字节（无任何报错）；`boot_login.py` PASS（418B、
-      无报错）；`wasm_login.js` OK（49s/418B）；`./build.sh test` 全过；
-      difftest 1252/1252
+- [x] 验证：默认 cmdline（earlycon + loglevel=7 + pci=conf1）跑到 1.5B 条，
+      串口 15425 字节、`PCI: Fatal` / `openrc` 各 0 行，`PCI: Using
+      configuration type 1 for base access` 和 `[8086:1237] type 00 class
+      0x060000` 都在；loglevel=4 安静配置 56 字节同样无报错；
+      `boot_login.py` PASS（880B LOG）；`wasm_login.js` OK（49s/418B）；
+      `./build.sh test` 全过；difftest 1252/1252
 - [x] 文档：DESIGN §103、README 启动说明

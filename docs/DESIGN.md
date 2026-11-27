@@ -2148,7 +2148,7 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      统一从 `pci=off` 换成 `pci=conf1`（显式 type-1，跳过 BIOS/MMCONFIG
      探测）：`tools/boot_login.py`、`tools/release.py`、
      `tools/make_demo_gif.py`、`tools/wasm_tty.js`、`tests/*.js`、README
-     的固件示例、`src/machine.c6` 的 `default_cmdline`，共 17 处。
+     的固件示例、`src/machine.c6` 的 `default_cmdline`，共 18 处。
 
      **（c）openrc：minirootfs 里没有这个程序**。Alpine 自带的
      `/etc/inittab` 有三行 `::sysinit:/sbin/openrc sysinit`、
@@ -2158,18 +2158,17 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      `ttyS0::respawn:-/bin/login`，现在先 `sed -i -e '/sbin\/openrc/d'` 把
      三行（含 `::shutdown:` 那行）删掉再注入。
 
-     **验证**：
-     - loglevel=7 的 650M 采样：`PCI: Using configuration type 1 for base
-       access`、`PCI: Probing PCI hardware`、
-       `pci 0000:00:00.0: [8086:1237] type 00 class 0x060000`，没有 Fatal /
-       `System does not support PCI` / 假 ROM 资源；
-     - loglevel=4 的标准固件跑到 1.5B 条（`--stopt=1500000000`）：串口**只有
-       56 字节**（`(none) login: ` ×4，批处理下 stdin EOF 被 respawn），
-       PCI 和 openrc 的报错全部消失；
-     - `tools/boot_login.py` PASS，`build/login.log` 从 `(none) login: root`
-       开始、整份 418 字节、没有一行报错，`uname -m` 仍是 `x86_64`；
-     - `tests/wasm_login.js`（wasm 侧 cmdline 同样改 conf1）`WASM LOGIN OK`，
-       49s / 792M 条 / 串口 418 字节，和 native 同量；
+     **验证**（默认 cmdline 是 `earlycon=... loglevel=7 ... pci=conf1`）：
+     - 默认固件跑到 1.5B 条（`--stopt=1500000000`）：串口 15425 字节，
+       `PCI: Using configuration type 1 for base access` 和
+       `pci 0000:00:00.0: [8086:1237] type 00 class 0x060000` 都在，
+       `PCI: Fatal` / `openrc` 各 **0 行**，最后是 `(none) login:`；
+     - 更早的安静配置（loglevel=4）同样跑到 1.5B：串口**只有 56 字节**
+       （`(none) login: ` ×4，批处理下 stdin EOF 被 respawn），同样 0 报错——
+       说明那两类输出不是被 `loglevel` 压掉的，是真没了；
+     - `tools/boot_login.py` PASS（880 字节 LOG，earlycon 起就有输出，
+       `uname -m` = `x86_64`）；`tests/wasm_login.js`（wasm 侧仍是
+       loglevel=4 的 cmdline）`WASM LOGIN OK`，49s / 792M 条 / 418 字节；
      - `./build.sh test` 全过、`tools/difftest` **1252/1252**。
 
      **顺带记录**：`pci=conf1` 让内核真的枚举到 8086:1237 之后，
