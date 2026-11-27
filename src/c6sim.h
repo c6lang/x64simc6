@@ -253,13 +253,24 @@ void machine_set_cmdline(const char *s);
 /* jit_wasm.c：wasm 后端 JIT 编码器（默认构建不链接，JIT=1 时启用） */
 int jit_poc(u64 rip);
 int jit_block(u64 rip);
+int jit_try(u64 rip);
+int jit_try2(u64 rip, u32 max_ins);
+void jit_flush(void);
+void jit_set_on(int v);
+void jit_set_window(u64 lo, u64 hi);
+extern int g_jit_on;
 
-/* cpu.c6：给 wasm JIT 生成代码复用的标志位实现 */
-void jit_flags_add(u64 a, u64 b, u64 res);
-void jit_flags_sub(u64 a, u64 b, u64 res);
-void jit_flags_logic(u64 r);
-void jit_flags_inc(u64 a, u64 res);
-void jit_flags_dec(u64 a, u64 res);
+/* mem.c6：按物理页的写代数，JIT 用它做 SMC 失效 */
+extern u32 jit_page_gen[32768];
+
+/* cpu.c6：给 wasm JIT 生成代码复用的标志位/条件实现 */
+void jit_flags_add(u64 a, u64 b, u64 res, int s);
+void jit_flags_sub(u64 a, u64 b, u64 res, int s);
+void jit_flags_logic(u64 r, int s);
+void jit_flags_inc(u64 a, u64 res, int s);
+void jit_flags_dec(u64 a, u64 res, int s);
+int jit_cond(u64 flags, u64 cc);
+u64 jit_stat(int i);
 #endif
 
 /* mem.c6 */

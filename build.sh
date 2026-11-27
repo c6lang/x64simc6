@@ -210,7 +210,7 @@ wasm) wasm ;;
 all) native; wasm ;;
 fw) shift; fw "$@" ;;
 test) test_all ;;
-jit) JIT=1 wasm; node tests/jit_poc.js; node tests/jit_block.js ;;
+jit) JIT=1 wasm; node tests/jit_poc.js; node tests/jit_block.js; node tests/jit_block64.js ;;
 clean) rm -rf build web/sim.wasm; echo "cleaned" ;;
 -h|--help|help) usage ;;
 *) echo "unknown target: $1" >&2; usage; exit 2 ;;

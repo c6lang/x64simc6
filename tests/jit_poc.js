@@ -32,6 +32,7 @@ async function main() {
             jit_flags_logic: inst.exports.jit_flags_logic,
             jit_flags_inc: inst.exports.jit_flags_inc,
             jit_flags_dec: inst.exports.jit_flags_dec,
+            jit_cond: inst.exports.jit_cond,
           },
         });
         handles.push(i);

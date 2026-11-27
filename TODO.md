@@ -255,6 +255,12 @@
 - [x] wasm JIT 直线块：mov/ALU/inc/dec/nop + `jit_flags_*` 复用，
       12 条指令的 16 GPR/RFLAGS/RIP 全部对拍（`tests/jit_block.js`，
       `./build.sh jit`）
-- [ ] JIT 接入 `machine_run`：按 RIP 的块缓存、dev_tick/指令计数/TSC/
-      中断边界、未覆盖指令回退、SMC 页代数失效
-- [ ] JIT 指令子集扩展：jcc/jmp、内存操作数、REX/64 位、常用 SSE
+- [x] JIT 接入 `machine_run`：RIP 直接映射缓存 + 热块阈值、dev_tick/
+      指令计数/TSC 边界、未覆盖指令回退、SMC 页写代数、64 位与
+      jcc/jmp；900M 引导 JIT 开/关的指令数与串口逐字节一致
+      （876,201,405 条，`c67ca2a0…`，DESIGN §100）
+- [ ] JIT 批量链式执行：JS 侧按 RIP 连跑多个块，减少 wasm↔JS 切换
+      （当前 900M 慢 20% 的主因）
+- [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用
+- [ ] JIT 子集扩展：lea/movzx/movsx/imul/shift/push/pop/call/ret、
+      内存操作数与缺页回退（当前覆盖约 5% 指令）

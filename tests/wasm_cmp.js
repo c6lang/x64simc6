@@ -52,8 +52,41 @@ function nativeSnapshot() {
 async function wasmSnapshot() {
   const buf = fs.readFileSync('web/sim.wasm');
   const mod = await WebAssembly.compile(buf);
-  const inst = await WebAssembly.instantiate(mod, {});
+  const imports = WebAssembly.Module.imports(mod);
+  const hasJit = imports.some((i) => i.module === 'env' && i.name === 'js_jit_compile');
+  let inst = null;
+  const handles = [];
+  const env = {
+    js_jit_compile(ptr, len) {
+      if (handles.length >= 32768) return -1;
+      try {
+        const bytes = new Uint8Array(inst.exports.memory.buffer, ptr, len).slice();
+        const m = new WebAssembly.Module(bytes);
+        const i = new WebAssembly.Instance(m, {
+          env: {
+            memory: inst.exports.memory,
+            jit_flags_add: inst.exports.jit_flags_add,
+            jit_flags_sub: inst.exports.jit_flags_sub,
+            jit_flags_logic: inst.exports.jit_flags_logic,
+            jit_flags_inc: inst.exports.jit_flags_inc,
+            jit_flags_dec: inst.exports.jit_flags_dec,
+            jit_cond: inst.exports.jit_cond,
+          },
+        });
+        handles.push(i);
+        return handles.length - 1;
+      } catch (e) {
+        return -1;
+      }
+    },
+    js_jit_run(h, state, ram) {
+      if (h < 0 || h >= handles.length) return -2;
+      return handles[h].exports.run(state, ram) | 0;
+    },
+  };
+  inst = await WebAssembly.instantiate(mod, hasJit ? { env } : {});
   const w = inst.exports;
+  if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
   const STAGE = 0x0d800000;
   const fw = new Uint8Array(fs.readFileSync(FW));
   const mem = new Uint8Array(w.memory.buffer);
@@ -93,6 +126,12 @@ async function wasmSnapshot() {
   const regs = [];
   for (let i = 0; i < 16; i++)
     regs.push(BigInt.asUintN(64, w.sim_cpu_reg(i)).toString(16));
+  if (hasJit && process.env.JIT_STATS === '1') {
+    console.error(
+      `[jit] runs=${w.sim_jit_stat(0)} hits=${w.sim_jit_stat(1)} ` +
+      `compiles=${w.sim_jit_stat(3)}`
+    );
+  }
   return { regs, rip: BigInt.asUintN(64, w.sim_last_rip()).toString(16),
            flags: BigInt.asUintN(64, w.sim_cpu_flags()).toString(16),
            insns: Number(w.sim_insns()),

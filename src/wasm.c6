@@ -19,6 +19,7 @@ int sim_init(u8 *fw, int len)
     if (fw == 0 || len <= 0 || len > (int)sizeof(g_fw_stage)) return -1;
     for (i = 0; i < (u32)len; i++) g_fw_stage[i] = fw[i];
     machine_init();
+    g_m.watch_fd = -1;      /* wasm 没有 main() 的初始化；默认 -1 才不关快通道/JIT */
     mag = fw_rd32(0);
     hver = fw_rd32(4);
     ko = fw_rd32(16);
@@ -243,11 +244,50 @@ int sim_jit_poc(u64 rip)
 int sim_jit_block(u64 rip)
 {
 #if defined(C6_JIT)
-    g_m.cpu.cr[0] = 0;      /* POC 用物理地址直接跑，避开分页 */
+    g_m.cpu.cr[0] = 0;      /* 块级测试用物理地址直接跑，避开分页 */
     return jit_block(rip);
 #else
     (void)rip;
     return -99;             /* 默认构建未链接 jit_wasm.c */
+#endif
+}
+
+int sim_jit_try(u64 rip)
+{
+#if defined(C6_JIT)
+    return jit_try(rip);
+#else
+    (void)rip;
+    return 0;
+#endif
+}
+
+void sim_set_jit(int v)
+{
+#if defined(C6_JIT)
+    jit_set_on(v);
+#else
+    (void)v;
+#endif
+}
+
+void sim_set_jit_window(u64 lo, u64 hi)
+{
+#if defined(C6_JIT)
+    jit_set_window(lo, hi);
+#else
+    (void)lo;
+    (void)hi;
+#endif
+}
+
+u64 sim_jit_stat(int i)
+{
+#if defined(C6_JIT)
+    return jit_stat(i);
+#else
+    (void)i;
+    return 0;
 #endif
 }
 

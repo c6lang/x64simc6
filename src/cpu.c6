@@ -324,36 +324,47 @@ static void flags_sub(struct CPUState *c, u64 a, u64 b, u64 res, int s)
 }
 
 #if defined(C6_JIT)
+static int cond(struct CPUState *c, u32 n);
+
 /* wasm JIT 生成代码通过 import 调回这里，复用唯一的一份 flags_* 语义。
- * 生成端只传 32 位操作数（零扩展）和 32 位结果，所以 s=4。
- * inc/dec 不影响 CF：调用 flags_add/sub 后把 CF 恢复。 */
-void jit_flags_add(u64 a, u64 b, u64 res)
+ * 生成端传操作数宽度 s（4/8）；inc/dec 不影响 CF，调用后把 CF 恢复。 */
+void jit_flags_add(u64 a, u64 b, u64 res, int s)
 {
-    flags_add(&g_m.cpu, a, b, res, 4, 0);
+    flags_add(&g_m.cpu, a, b, res, s, 0);
 }
 
-void jit_flags_sub(u64 a, u64 b, u64 res)
+void jit_flags_sub(u64 a, u64 b, u64 res, int s)
 {
-    flags_sub(&g_m.cpu, a, b, res, 4);
+    flags_sub(&g_m.cpu, a, b, res, s);
 }
 
-void jit_flags_logic(u64 r)
+void jit_flags_logic(u64 r, int s)
 {
-    flags_logic(&g_m.cpu, r, 4);
+    flags_logic(&g_m.cpu, r, s);
 }
 
-void jit_flags_inc(u64 a, u64 res)
+void jit_flags_inc(u64 a, u64 res, int s)
 {
     u64 cf = g_m.cpu.flags & RF_CF;
-    flags_add(&g_m.cpu, a, 1, res, 4, 0);
+    flags_add(&g_m.cpu, a, 1, res, s, 0);
     g_m.cpu.flags = (g_m.cpu.flags & ~RF_CF) | cf;
 }
 
-void jit_flags_dec(u64 a, u64 res)
+void jit_flags_dec(u64 a, u64 res, int s)
 {
     u64 cf = g_m.cpu.flags & RF_CF;
-    flags_sub(&g_m.cpu, a, 1, res, 4);
+    flags_sub(&g_m.cpu, a, 1, res, s);
     g_m.cpu.flags = (g_m.cpu.flags & ~RF_CF) | cf;
+}
+
+int jit_cond(u64 flags, u64 cc)
+{
+    u64 save = g_m.cpu.flags;
+    int r = 0;
+    g_m.cpu.flags = flags;
+    r = cond(&g_m.cpu, (u32)cc);
+    g_m.cpu.flags = save;
+    return r;
 }
 #endif
 
@@ -1901,6 +1912,12 @@ int step(struct CPUState *c)
                 if (c->cr[rm.reg & 15] != v) {
                     c->cr[rm.reg & 15] = v;
                     mem_tlb_flush();
+#if defined(C6_JIT)
+                    /* CR0/CR4 改分页模式：已翻译块的取指语义可能变，整体失效。
+                     * CR3 不刷：内核 text 是全局映射，进程切换不影响它。 */
+                    if ((rm.reg & 15) == 0 || (rm.reg & 15) == 4)
+                        jit_flush();
+#endif
                 }
             } else if (op2 == 0x21) {
                 reg_write(c, rm.rm, opsz, 0);
@@ -1949,10 +1966,15 @@ int step(struct CPUState *c)
                 u16 v = (u16)reg_read(c, (m1 >> 3) & 7, 2);
                 c->cr[0] = (c->cr[0] & ~0xfull) | (v & 0xf);
                 mem_tlb_flush();
+#if defined(C6_JIT)
+                jit_flush();
+#endif
             } else if (regf == 6) {           /* 16 位 smsw */
                 reg_write(c, (m1 >> 3) & 7, 2, c->cr[0] & 0xffff);
             } else if (regf == 7) {           /* invlpg：整 TLB 刷新 */
                 mem_tlb_flush();
+                /* 不刷 JIT 缓存：内核 text 是全局映射，INVLPG 基本都是
+                 * 用户页/页表更新；代码页变化由写代数（SMC）兜底。 */
             } else if ((m1 & 0xf8) == 0xd0) { /* xgetbv */
                 c->r[0] = 3; c->r[2] = 0;
             } else if ((m1 & 0xf8) == 0xf8) { /* swapgs */

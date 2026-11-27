@@ -5,6 +5,12 @@
 #endif
 #include "c6sim.h"
 
+#if defined(C6_JIT)
+/* JIT 代码页写代数：对 RAM 的每次写把对应页 +1；缓存命中时比对，
+ * 变了就重新翻译（SMC 失效）。数组按 128MiB / 4KiB 固定。 */
+u32 jit_page_gen[32768];
+#endif
+
 #define TLB_BITS 13
 #define TLB_SIZE 8192
 #define TLB_MASK (TLB_SIZE - 1)
@@ -521,6 +527,10 @@ void mem_w8(u64 a, u8 v)
     u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
     TR_PA(a, 1, 0, g_no_data, pa);
+#if defined(C6_JIT)
+    if (pa < RAM_SIZE && !g_m.cpu.fault_abort)
+        jit_page_gen[(u32)(pa >> 12)]++;
+#endif
     if (pa < RAM_SIZE) {
         g_m.ram[(u32)pa] = v;
         return;
@@ -533,6 +543,10 @@ void mem_w16(u64 a, u16 v)
     u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
     TR_PA(a, 1, 0, g_no_data, pa);
+#if defined(C6_JIT)
+    if (pa < RAM_SIZE && !g_m.cpu.fault_abort)
+        jit_page_gen[(u32)(pa >> 12)]++;
+#endif
     if ((pa & 0xfff) > 0xffe) {
         mem_w8(a, (u8)v);
         mem_w8(a + 1, (u8)(v >> 8));
@@ -550,6 +564,10 @@ void mem_w32(u64 a, u32 v)
     u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
     TR_PA(a, 1, 0, g_no_data, pa);
+#if defined(C6_JIT)
+    if (pa < RAM_SIZE && !g_m.cpu.fault_abort)
+        jit_page_gen[(u32)(pa >> 12)]++;
+#endif
     if ((pa & 0xfff) > 0xffc) {
         u32 i = 0;
         for (i = 0; i < 4; i++)
@@ -568,6 +586,10 @@ void mem_w64(u64 a, u64 v)
     u64 pa = 0;
     if (g_m.cpu.fault_abort) return;   /* 指令已因缺页中止，写操作一律丢弃 */
     TR_PA(a, 1, 0, g_no_data, pa);
+#if defined(C6_JIT)
+    if (pa < RAM_SIZE && !g_m.cpu.fault_abort)
+        jit_page_gen[(u32)(pa >> 12)]++;
+#endif
     if ((pa & 0xfffull) > 0xff8ull) {
         mem_w32(a, (u32)v);
         mem_w32(a + 4, (u32)(v >> 32));

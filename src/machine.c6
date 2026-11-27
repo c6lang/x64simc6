@@ -222,6 +222,30 @@ static int machine_step_loop(u64 count)
             }
             continue;
         }
+#if defined(C6_JIT)
+        /* wasm JIT：执行一个已翻译的内核直线块。块内不含设备访问/分支外跳
+         * 以外的副作用，也不跨 dev_tick 边界，所以只在这里补指令数、TSC
+         * 分频和循环配额。取指/异常/调试模式一律回退解释器。 */
+        if (g_jit_on && !dbg_any && !g_m.cpu.exc_pending && !g_m.cpu.halted &&
+            !g_m.cpu.fault_abort &&
+            ((g_m.instructions & 0x3ffffull) + 16ull) < 0x40000ull) {
+            u64 jlim = (u64)n + 1ull;
+            u32 jn = 0;
+            if (stopt != 0 && stopt > g_m.instructions &&
+                (stopt - g_m.instructions) < jlim)
+                jlim = stopt - g_m.instructions;
+            jn = (u32)jit_try2(g_m.cpu.rip, (u32)jlim);
+            if (jn > 0) {
+                g_m.cur_rip = g_m.cpu.rip;
+                g_m.instructions += (u64)jn;
+                g_tsc_acc += jn;
+                g_m.tsc += g_tsc_acc / 17u;
+                g_tsc_acc %= 17u;
+                n -= (jn - 1u);
+                continue;
+            }
+        }
+#endif
         g_m.instructions++;
         /* TSC 每 17 条指令加 1：内核用 PIT 标定出的 TSC 频率约 1.19MHz，
          * 1 指令 1 TSC 会让 guest 时间比墙钟快 15 倍（login 超时 4 秒就到）。

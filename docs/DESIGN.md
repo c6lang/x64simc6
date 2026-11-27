@@ -1819,9 +1819,8 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     flags=0x96、rip=0x101e）。默认 `JIT=0` 的 `web/sim.wasm` 仍是零 import；
     `wasm_cmp 50M` MATCH、`./build.sh test`、`boot_login.py` 全过。
 
-    **还没做**（下一步）：分支与内存操作数、按 RIP 索引的块缓存、接入
-    `machine_run` 的 `dev_tick`/指令计数/TSC/中断边界、SMC 的页代数失效、
-    批量编译以减少 JS↔wasm 切换。当前块只在测试入口执行，不参与整机引导。
+    **还没做**（下一步）：第一版只做到这里。块缓存、machine_run 接入、
+    SMC、64 位与分支翻译已经在 §100 补上；性能上还不是净赢。
 
     **(e) 复现命令**：
 
@@ -1870,3 +1869,62 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     不是快通道引入的（同一二进制复跑即可复现）。所以全量引导的逐字节对比
     取 200M 确定性窗口 + wasm_cmp；JIT 验收走 wasm 路径（无宿主
     net_tick/节流），不把 native 的墙钟序当确定性基准。
+
+100. **wasm JIT 接入 machine_run（MVP）**。
+
+    §98d 的块编码器现在接进了运行循环；编译目标只有 wasm，native 不受影响。
+
+    - **触发与预算**：`machine_run` 每轮在解释指令前调
+      `jit_try2(rip, max_ins)`。只在 `g_jit_on`、无调试、无 pending 异常/
+      HLT、RIP 落在内核 text 窗口 `[0xffffffff80000000,
+      0xffffffffc0000000)`、且不跨 `(instructions & 0x3ffff)==0` 的
+      dev_tick 边界时尝试。`max_ins = min(循环剩余, stopt 剩余, 到边界距离)`；
+      块比预算长就不跑。成功后按 jn 一次补 `g_m.instructions` 和
+      `g_tsc_acc/g_m.tsc`（整除/取模，和逐条累加结果完全一致），跳过本轮
+      解释器；中断/异常仍只在边界交给解释器。
+    - **缓存**：2048 项直接映射，键 RIP。8192 项 seen 表做热块阈值：同一个
+      块先让解释器跑 64 次才编译，编译上限 2048。900M 引导实际只编译 291
+      个块，避免了把冷块全编一遍（无阈值时 50M 就编满 16384 个，反而 +3%）。
+    - **SMC**：`mem_w8/16/32/64` 每次写 RAM 把 `jit_page_gen[pa>>12]++`；
+      缓存项存代码物理页和写代数，命中时比对，变了就重翻译。INVLPG 不刷
+      整个 JIT 缓存（内核 text 是全局映射，用户页 INVLPG 很频繁；刷了会让
+      50M 之后 0 命中），只有 CR0/CR4 改分页模式才整体失效并重置编译预算。
+    - **指令子集**：在 §98d 的 32 位基础上加了 REX.W（mov imm64/C7、ALU、
+      inc/dec、test）、jmp/jcc rel8/rel32（块尾用 `select` 选 target/next）。
+      标志位/条件仍 call 回主模块的 `jit_flags_*`/`jit_cond`（signature 加
+      操作数宽度），没有第二份语义。
+    - 顺带修了 wasm `sim_init` 没把 `g_m.watch_fd` 置 -1 的问题：BSS 默认 0
+      会让 `dbg_any` 恒真，JIT/快通道永远不触发。
+
+    **正确性**（同一份 JIT=1 wasm，开/关对比）：
+
+    - `wasm_cmp 50M`：寄存器/RIP/RFLAGS/RAM 与 native **MATCH**。
+    - `tests/jit_poc.js`、`tests/jit_block.js`、`tests/jit_block64.js` 全
+      PASS（含 64 位 ALU、jcc taken/not-taken）。
+    - 900M 引导（`tests/wasm_login.js`，实际 876,201,405 条到 shell）：
+      JIT 开/关的指令数完全一样，串口 646 字节 SHA256 都是
+      `c67ca2a0…`，两次都 `WASM LOGIN OK`。
+
+    **性能**（Node，同机）：
+
+    | 负载 | JIT 关 | JIT 开 | 说明 |
+    | --- | --- | --- | --- |
+    | 900M 引导 | 55.97s | 67.17s（+20%） | 11,081,452 次块执行、291 次编译 |
+    | 50M 引导 | 16.11s | 16.12–16.43s | 13 次编译、约 40 万次块执行 |
+
+    MVP 先把正确性/失效/回退打通，还不是净赢。瓶颈有两个：每条缓存块都要
+    从 wasm 进 JS 再回 wasm（900M 里 11M 次约 11s），以及子集只覆盖寄存器/
+    分支（约 5% 指令）。下一步按优先级：JS 侧按 RIP 批量链式执行（一次
+    JS 调用跑多个块、每块查写代数）、生成代码内联 flags/条件、扩到
+    lea/movzx/imul/shift/push/pop/call/ret 和内存操作数（缺页回退解释器）。
+    默认发布构建仍是 JIT=0，零 import。
+
+    复现：
+
+    ```sh
+    ./build.sh jit                 # JIT=1 + 三个块测试
+    JIT=1 ./build.sh wasm
+    JIT_STATS=1 node tests/wasm_cmp.js 50000000
+    node tests/wasm_login.js                  # JIT 开
+    JIT_OFF=1 node tests/wasm_login.js        # JIT 关
+    ```
