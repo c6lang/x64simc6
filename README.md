@@ -51,6 +51,59 @@ x87 FPU 也整套实现了：`awk 'BEGIN{print 22/7, sqrt(2)}'`、`printf "%.17g
 `ESC[6n` 光标查询，见 `docs/DESIGN.md` §91）。
 遇到不认识的指令可以用 `--udtrace` 打印 RIP 和指令字节。
 
+## 外网访问（SLIP + 用户态 NAT）
+
+native 版可以让 guest 真正上外网：模拟器在 **COM2（0x2f8 / IRQ3，/dev/ttyS1）**
+上再挂一个 16550A，guest 用内核自带的 `slip` 模块 + `slattach` 跑 SLIP
+（RFC 1055），宿主侧 `src/net.c6` 实现一个最小用户态 NAT。**不需要 tap、
+不需要 root、不依赖 libslirp。**
+
+地址约定与 QEMU user networking 一致（方便记）：
+
+| | 地址 |
+| --- | --- |
+| guest | `10.0.2.15` |
+| 网关 / peer | `10.0.2.2`（本地回 ping） |
+| DNS | `10.0.2.3`（宿主 `/etc/resolv.conf` 的第一个服务器，兜底 1.1.1.1） |
+
+构建带网络的固件（需要 linux-lts 的模块树，默认在 `build/alpine/lib`，
+也可以 `--modules` 指到 `lib` / `lib/modules` / `lib/modules/<kver>`）：
+
+```sh
+./build.sh fw --kernel build/alpine/boot/vmlinuz-lts \
+  --initrd build/alpine/minirootfs.tar.gz --out build/firmware.bin
+# 没有模块树时自动退回“无网络”固件；等价的显式写法：
+python3 tools/mkfw.py --modules build/alpine/lib ...
+```
+
+mkfw 会把 `slip.ko` / `slhc.ko` 解压进 initrd，并在 `/init` 里自动执行：
+`insmod` 两个模块 → `slattach -p slip -s 115200 /dev/ttyS1` →
+`ifconfig sl0 10.0.2.15 pointopoint 10.0.2.2 mtu 1500 up` → 默认路由 →
+`nameserver 10.0.2.3`。所以引导到 login 时 `sl0` 已经可用，guest 里直接：
+
+```sh
+ifconfig sl0
+ping -c1 10.0.2.2          # 本地网关，3ms 左右
+ping -c1 10.0.2.3          # DNS，本地回
+wget -O /dev/null http://example.com/   # DNS + TCP/HTTP 真外网
+```
+
+宿主侧的行为：IP 层自己封/解（含校验和、>1480 的分片），TCP 每条连接用一个
+非阻塞宿主 socket 中继（最大 16 条），UDP 逐流转发（16 条，DNS 自动改写目标到
+宿主 DNS 并把回包源地址改回 10.0.2.3），ICMP echo 走宿主 **ping socket**
+（`SOCK_DGRAM/IPPROTO_ICMP`，`ping_group_range` 允许非 root 时可用）。TCP/UDP/
+ICMP 的缓冲都在 `net_tick()` 里推进，`dev_tick()` 负责把 COM2 的 RX/THRE 电平
+中断投给 PIC。实现细节和踩过的坑见 `docs/DESIGN.md` §93–§95。
+
+限制：只支持 IPv4（SLIP 上没配 IPv6），没有 DHCP（地址是 initrd 里写死的），
+不做 TCP 窗口缩放/拥塞控制（窗口固定、MSS 1460），UDP 是逐流的、不是严格
+无状态 NAT；宿主必须能访问 DNS 返回的地址（例如某些环境给 example.com 解析到
+不可达的内网段时，guest 里也会连不上）。
+
+调试：`--nettrace` 打印前 800 条 SLIP/IP/TCP/UDP/ICMP 收发摘要（不改变行为）；
+`--rspcheck` 在 RSP 掉进模块区/非法栈时打印最近 64 条 RIP/RSP 并停机，
+`--udtrace` 打印未实现指令。三个开关都只在显式打开时才工作。
+
 ## 验证
 
 ```sh

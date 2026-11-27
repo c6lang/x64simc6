@@ -67,6 +67,21 @@ int g_no_fetch = 0;
 int g_no_data = 0;
 int g_cc = 0;   /* --cachecheck：每次快路径命中都与慢路径对拍 */
 int g_ud_trace = 0;   /* --udtrace：遇到 #UD 时打印指令地址与字节 */
+int g_rsp_check = 0;  /* --rspcheck：RSP 跳进内核 text/模块区时打印 RIP 环并停机 */
+#if !defined(C6_WASM)
+static u64 g_lastrip[64] = {0};
+static u64 g_lastrsp[64] = {0};
+static u32 g_lastrip_i = 0;
+
+/* RSP 是否可能在合法的内核栈上：vmalloc 栈 / CEA（入口栈与 IST）/ 直接映射 */
+static int bad_stack_ptr(u64 rsp)
+{
+    if (rsp >= 0xffffc90000000000ull && rsp < 0xffffca0000000000ull) return 0;
+    if (rsp >= 0xfffffe0000000000ull && rsp < 0xfffffe0000100000ull) return 0;
+    if (rsp >= 0xffff888000000000ull && rsp < 0xffff888800000000ull) return 0;
+    return 1;
+}
+#endif
 
 static const char default_cmdline[] =
     "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 "
@@ -173,9 +188,18 @@ static int machine_step_loop(u64 count)
                 g_m.halted = 1;
                 break;
             }
-            /* idle 快进：直接跳到下一次 PIT 到期，而不是固定 0x2000。
-             * 每次跳进只相当于「原本要跑 32 次 idle 迭代」的同一段 guest 时间，
-             * 语义不变，但 guest 时间推进快一个数量级。 */
+            /* 先轮询设备再快进：网络/串口事件必须能立刻唤醒。否则快进会把
+             * guest 时钟一次性推到下一个 PIT（tickless idle 下可达数秒），
+             * 定时器"提前"到期——表现为 guest 里 ping 的 RTT 是 2 秒、
+             * DNS 查询 1 秒超时（外网访问直接失败）。 */
+            dev_tick();
+            if (g_m.cpu.exc_pending) {
+                g_m.cpu.halted = 0;
+                cpu_deliver(&g_m.cpu);
+                continue;
+            }
+            /* idle 快进：跳到下一次 PIT 到期，但设上限，保证设备事件
+             * 最多晚 0x40000 条指令被发现。 */
             {
                 u64 step = 0x2000;
 #if !defined(C6_WASM)
@@ -186,17 +210,15 @@ static int machine_step_loop(u64 count)
 #endif
                 if (g_m.pit.reload[0] > 0 &&
                     (g_m.pit.mode[0] == 2 || g_m.pit.mode[0] == 3) &&
-                    g_m.pit.count[0] > 0x2000)
-                    step = (u64)g_m.pit.count[0];
+                    g_m.pit.count[0] > 0x2000) {
+                    u64 want = (u64)g_m.pit.count[0];
+                    if (want > 0x40000ull) want = 0x40000ull;
+                    if (want > step) step = want;
+                }
                 if (step > 0) {
                     g_m.tsc += step;
                     g_m.instructions += step;
                 }
-            }
-            dev_tick();
-            if (g_m.cpu.exc_pending) {
-                g_m.cpu.halted = 0;
-                cpu_deliver(&g_m.cpu);
             }
             continue;
         }
@@ -252,7 +274,141 @@ static int machine_step_loop(u64 count)
         }
 #endif
         }
+#if !defined(C6_WASM)
+        if (g_rsp_check) {
+            g_lastrip[g_lastrip_i & 63u] = g_m.cpu.rip;
+            g_lastrsp[g_lastrip_i & 63u] = g_m.cpu.r[4];
+            g_lastrip_i = g_lastrip_i + 1;
+        }
+        /* 页错误入口第一次落在非法栈上时立刻停：这时 RSP 就是那个坏值，
+         * 环里最后几条是把它带飞的 iret/栈切换指令。 */
+        if (g_rsp_check && g_m.instructions > 500000000ull &&
+            g_m.cpu.rip == 0xffffffff81c01340ull &&
+            bad_stack_ptr(g_m.cpu.r[4])) {
+            u32 rk = 0;
+            printf("[RSPFIRST] insns=%llu rip=%llx rsp=%llx cpl=%u"
+                   " rax=%llx rdi=%llx gs=%llx\n",
+                   (unsigned long long)g_m.instructions,
+                   (unsigned long long)g_m.cpu.rip,
+                   (unsigned long long)g_m.cpu.r[4],
+                   (unsigned)(g_m.cpu.sel[1] & 3),
+                   (unsigned long long)g_m.cpu.r[0],
+                   (unsigned long long)g_m.cpu.r[7],
+                   (unsigned long long)g_m.cpu.msr_gs_base);
+            printf("[RING8]");
+            for (rk = 0; rk < 8; rk++) {
+                u32 kk = (g_lastrip_i + 64u - 8u + rk) & 63u;
+                printf(" %llx/%llx", (unsigned long long)g_lastrip[kk],
+                       (unsigned long long)g_lastrsp[kk]);
+            }
+            printf("\n");
+            fflush(stdout);
+            g_m.halted = 1;
+            break;
+        }
+#endif
         cpu_step(&g_m.cpu);
+#if !defined(C6_WASM)
+        /* 调试：RSP 落进 0xffffffff8…/c…（内核 text / 模块区）不可能是栈，
+         * 一出现就打印最近 64 条 (RIP,RSP) 并停机。 */
+        if (g_rsp_check && g_m.instructions > 500000000ull &&
+            (g_m.cpu.r[4] >= 0xffffffffc0000000ull ||
+             (g_m.cpu.r[4] > 0 && g_m.cpu.r[4] < 0x10000ull))) {
+            u32 ri2 = 0;
+            printf("[RSPBAD] insns=%llu rip=%llx rsp=%llx rax=%llx"
+                   " rcx=%llx rdx=%llx rdi=%llx flags=%llx"
+                   " gs=%llx kgs=%llx fs=%llx\n",
+                   (unsigned long long)g_m.instructions,
+                   (unsigned long long)g_m.cpu.rip,
+                   (unsigned long long)g_m.cpu.r[4],
+                   (unsigned long long)g_m.cpu.r[0],
+                   (unsigned long long)g_m.cpu.r[1],
+                   (unsigned long long)g_m.cpu.r[2],
+                   (unsigned long long)g_m.cpu.r[7],
+                   (unsigned long long)g_m.cpu.flags,
+                   (unsigned long long)g_m.cpu.msr_gs_base,
+                   (unsigned long long)g_m.cpu.msr_kgs_base,
+                   (unsigned long long)g_m.cpu.msr_fs_base);
+            printf("[RING]");
+            for (ri2 = 0; ri2 < 64; ri2++) {
+                u32 k2 = (g_lastrip_i + 64u - 64u + ri2) & 63u;
+                printf(" %llx/%llx", (unsigned long long)g_lastrip[k2],
+                       (unsigned long long)g_lastrsp[k2]);
+            }
+            printf("\n");
+            {
+                u64 toff = g_m.cpu.tr_sel & 0xfff8u;
+                u64 d0 = mem_r64(g_m.cpu.gdtr_base + toff);
+                u64 d1 = mem_r64(g_m.cpu.gdtr_base + toff + 8);
+                u64 tb = ((d0 >> 16) & 0xffffffu) |
+                         (((d0 >> 56) & 0xffu) << 24) |
+                         ((d1 & 0xffffffffu) << 32);
+                printf("[TSS] sel=%llx base=%llx sp0=%llx sp1=%llx sp2=%llx"
+                       " cr3=%llx cpl=%u\n",
+                       (unsigned long long)g_m.cpu.tr_sel,
+                       (unsigned long long)tb,
+                       (unsigned long long)mem_r64(tb + 4),
+                       (unsigned long long)mem_r64(tb + 12),
+                       (unsigned long long)mem_r64(tb + 20),
+                       (unsigned long long)g_m.cpu.cr[3],
+                       (unsigned)(g_m.cpu.sel[1] & 3));
+                {
+                    u64 gsa = g_m.cpu.msr_gs_base + 0x6004ull;
+                    u64 pa_a = mem_translate(gsa, 0, 0, 0);
+                    u64 pa_b = mem_translate(tb + 4, 0, 0, 0);
+                    u64 va = 0, vb = 0;
+                    int q = 0;
+                    if (pa_a + 8 < (u64)RAM_SIZE) {
+                        for (q = 0; q < 8; q++)
+                            va |= (u64)g_m.ram[(u32)(pa_a + (u64)q)] << (q * 8);
+                    }
+                    if (pa_b + 8 < (u64)RAM_SIZE) {
+                        for (q = 0; q < 8; q++)
+                            vb |= (u64)g_m.ram[(u32)(pa_b + (u64)q)] << (q * 8);
+                    }
+                    printf("[SP0] per_va=%llx per_pa=%llx per_val=%llx"
+                           " cea_pa=%llx cea_val=%llx\n",
+                           (unsigned long long)gsa,
+                           (unsigned long long)pa_a,
+                           (unsigned long long)va,
+                           (unsigned long long)pa_b,
+                           (unsigned long long)vb);
+                }
+            }
+            {
+                /* 最后一条执行前记录：如果它是 iretq，把它要弹出的 5 槽
+                 * 帧原样打出来（用 mem_translate 读，避免再触发缺页）。 */
+                u32 kp = (g_lastrip_i + 63u) & 63u;
+                u64 prsp = g_lastrsp[kp];
+                printf("[PREV] rip=%llx rsp=%llx\n",
+                       (unsigned long long)g_lastrip[kp],
+                       (unsigned long long)prsp);
+                if (g_lastrip[kp] == 0xffffffff81c0198cull) {
+                    u64 fv[5] = {0};
+                    u32 fi = 0;
+                    for (fi = 0; fi < 5; fi++) {
+                        u64 pa = mem_translate(prsp + (u64)fi * 8ull, 0, 0, 0);
+                        u64 vv = 0;
+                        u32 qq = 0;
+                        if (pa + 8 < (u64)RAM_SIZE) {
+                            for (qq = 0; qq < 8; qq++)
+                                vv |= (u64)g_m.ram[(u32)(pa + (u64)qq)] << (qq * 8);
+                        }
+                        fv[fi] = vv;
+                    }
+                    printf("[IRETFRAME] %llx %llx %llx %llx %llx\n",
+                           (unsigned long long)fv[0],
+                           (unsigned long long)fv[1],
+                           (unsigned long long)fv[2],
+                           (unsigned long long)fv[3],
+                           (unsigned long long)fv[4]);
+                }
+            }
+            fflush(stdout);
+            g_m.halted = 1;
+            break;
+        }
+#endif
         if (g_m.cpu.exc_pending) {
             /* HLT 之后立刻投递挂起中断：CPU 被唤醒，必须清 halted，
              * 否则下一轮会被「halted 且 IF=0」误判成永久停机

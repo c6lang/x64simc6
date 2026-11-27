@@ -511,6 +511,10 @@ int main(int argc, char **argv)
             g_no_data = 1;
         else if (strcmp(argv[a], "--udtrace") == 0)
             g_ud_trace = 1;
+        else if (strcmp(argv[a], "--rspcheck") == 0)
+            g_rsp_check = 1;
+        else if (strcmp(argv[a], "--nettrace") == 0)
+            g_ntrace = 1;
         else if (strcmp(argv[a], "--blob") == 0 && a + 1 < argc)
             blob = argv[++a];
         else if (argv[a][0] == '-') {

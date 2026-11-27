@@ -85,7 +85,9 @@ int main(int argc, char **argv)
         ((uint8_t *)0x200000)[i] = (uint8_t)((i * 37 + 11) & 0xff);
 
     {
-        static char altstack[SIGSTKSZ * 4];
+        /* glibc 2.34+ 把 SIGSTKSZ 定义成 sysconf() 调用，不是常量，
+         * 不能做数组长度；这里固定 64 KiB（远大于 4×SIGSTKSZ）。 */
+        static char altstack[65536];
         stack_t ss;
         ss.ss_sp = altstack;
         ss.ss_size = sizeof(altstack);

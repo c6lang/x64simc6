@@ -174,3 +174,37 @@
 - [ ] 引导期偶发的「跳进 0x48/0x4a/0x4d 填充页」`#UD`（`--udtrace` 可见，
       进程被 SIGILL 但整机继续跑；引导、登录、`top` 都不受影响）。下一步用
       `--udtrace` + `dmesg` 的 `traps:` 行定位是哪条跳转把 RIP 带进数据页。
+
+## 阶段 10 —— 外网访问（SLIP + 用户态 NAT）
+
+- [x] `src/dev.c6`：第二个 16550A（COM2 `0x2f8..0x2ff`、IRQ3、128 KiB RX
+      环），RX/THRE 电平中断 + `thre_pending`（写 THR 置位、读 IIR 清除），
+      `dev_tick()` 每轮重拉 IRQ3（DESIGN §93）
+- [x] `src/net.c6`：用户态 NAT —— SLIP 解/封帧（RFC 1055）、IPv4 校验和与
+      1480 分片、TCP 非阻塞中继（16 条，SYN-ACK + 写缓存 + `SO_ERROR`）、
+      UDP 逐流转发（16 条，DNS 改写回 `10.0.2.3`）、ICMP echo（本地
+      `10.0.2.2/3` + 宿主 ping socket，8 条）、`/etc/resolv.conf` 读 DNS、
+      `net_tick()` 1 ms 墙钟节流（DESIGN §93）
+- [x] `tools/mkfw.py`：`--modules` 注入 `slip.ko`/`slhc.ko` 并给 `/init`
+      追加 `insmod`/`slattach`/`ifconfig sl0`/默认路由/`resolv.conf`；
+      `build.sh fw` 在模块树存在时自动带上（DESIGN §93）
+- [x] `src/c6sim.h` / `src/machine.c6` / `src/main.c6`：`serial2_*` /
+      `net_*` 声明、`dev_init()`/`dev_tick()` 接线、`--nettrace` 调试开关
+- [x] 修 `bswap` 漏 REX.B（`41 0f cc` 被当 `bswap %esp`，`ifconfig`
+      一进 `fib_table_insert` 就把 RSP 打飞 → 整机 #PF 死循环）；difftest
+      补 `bswap r8d..r15d/r8..r15` 16 条，全线 1252/1252（DESIGN §94）
+- [x] 修 HLT 空闲快进「先跳时间、后投设备中断」：改成先 `dev_tick()`，
+      有挂起中断就不推进时间，快进上限 0x40000；`ping` RTT 5869ms → 3.3ms，
+      DNS 不再超时（DESIGN §95）
+- [x] 修 TCP 方向：guest 包 `src`=guest、`dst`=远端，
+      `conn_open/conn_find` 统一成 `(dst,dport,src,sport)`，否则 SYN-ACK
+      IP 头和端口全反、guest 无限重传 SYN（DESIGN §93）
+- [x] 端到端验证：`ifconfig sl0` = 10.0.2.15 P-t-P 10.0.2.2 UP；
+      `ping -c1 10.0.2.2` / `ping -c1 10.0.2.3` 0% loss；`wget
+      http://example.com/` 成功（DNS + TCP + HTTP）
+- [x] 修 difftest 本机端 `native_run.c` 在 glibc 2.34+ 的
+      `SIGSTKSZ` 非常量编译失败（固定 64 KiB 备用栈）
+- [x] 文档：README「外网访问」、DESIGN §93–§95、本段 TODO、RELEASE
+- [ ] 后续（未做）：IPv6、DHCP、TCP 窗口缩放/拥塞控制（现在固定窗口，
+      MSS 1460）、UDP 的严格无状态 NAT（现在是逐流表）；wasm 路径没有
+      真实 socket，浏览器端仍走 `hostfs`/fetch 桥，不做 SLIP

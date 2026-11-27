@@ -1,0 +1,1274 @@
+/* net.c6 —— 用户态外网网关（native）
+ *
+ * guest 侧通过第二串口 ttyS1 跑 SLIP（RFC 1055），本文件在宿主侧实现一个
+ * 最小用户态 NAT：IP 层直接收发，TCP 用一个宿主 socket 做中继，UDP 逐流
+ * 转发，ICMP echo 走宿主 ping socket。这样 guest 里的 wget/ping 都能真正
+ * 走宿主的网络，而不需要 tap / root 权限。
+ *
+ * 约定（与 QEMU user networking 的地址一致，方便记忆）：
+ *   guest 10.0.2.15   peer 10.0.2.2   DNS 10.0.2.3
+ *
+ * wasm 侧没有 socket，整个文件在 C6_WASM 下编译为空；dev.c6 里对 slip_* 的
+ * 调用也都在 !C6_WASM 里。
+ */
+#if !defined(C6_WASM)
+
+#include <stdio.h>
+#include "c6sim.h"
+
+/* --nettrace：打印 SLIP/IP/UDP/ICMP 收发摘要（只打前 400 条，避免刷屏） */
+int g_ntrace = 0;
+static u32 g_nt_n = 0;
+#define NT_ON (g_ntrace && g_nt_n < 800u)
+
+/* ---------------- 常量 ---------------- */
+
+#define NET_MAX_CONN   16
+#define NET_MAX_UDP    16
+#define NET_MAX_PING   8
+
+#define NET_SBUF_SIZE  32768u    /* 每条 TCP 连接待发/未确认的数据 */
+#define NET_WBUF_SIZE  8192u     /* 每条 TCP 连接待写宿主的数据 */
+#define NET_SEG_MAX    1600u     /* TCP 段缓冲 */
+#define NET_IP_MAX     2048u
+#define NET_UDP_MAX    8192u
+#define NET_FRAME_MAX  4096u
+
+#define NET_MSS        1460u
+#define NET_MTU_SLIP   1500u
+
+#define NET_GUEST_IP   0x0a00020fu
+#define NET_PEER_IP    0x0a000202u
+#define NET_DNS_IP     0x0a000203u
+
+#define NET_TP_FIN     0x01u
+#define NET_TP_SYN     0x02u
+#define NET_TP_RST     0x04u
+#define NET_TP_PSH     0x08u
+#define NET_TP_ACK     0x10u
+
+#define NET_CS_FREE    0u
+#define NET_CS_SYN     1u     /* 已回 SYN-ACK，等 guest 的 ACK */
+#define NET_CS_EST     2u     /* guest 侧已建立 */
+#define NET_CS_CLOSE   3u
+
+/* ---------------- 宿主系统调用（手写 ABI，避开 c6c 没有的系统头） ---------------- */
+
+struct net_sa {
+    unsigned short sa_family;
+    unsigned short sa_port;
+    unsigned int sa_addr;
+    unsigned int sa_zero[2];
+};
+struct net_pollfd { int fd; short events; short revents; };
+struct net_ts { long tv_sec; long tv_nsec; };
+
+extern int socket(int domain, int type, int protocol);
+extern int connect(int fd, const struct net_sa *addr, unsigned int len);
+extern long send(int fd, const void *buf, unsigned long n, int flags);
+extern long recv(int fd, void *buf, unsigned long n, int flags);
+extern int close(int fd);
+extern int shutdown(int fd, int how);
+extern int fcntl(int fd, int cmd, int arg);
+extern int getsockopt(int fd, int level, int optname, void *optval,
+                      unsigned int *optlen);
+extern int poll(struct net_pollfd *fds, unsigned long n, int timeout);
+extern int open(const char *path, int flags, int mode);
+extern long read(int fd, void *buf, unsigned long n);
+extern int clock_gettime(int clk, struct net_ts *ts);
+
+#define NET_AF_INET      2
+#define NET_SOCK_STREAM  1
+#define NET_SOCK_DGRAM   2
+#define NET_IPPROTO_ICMP 1
+#define NET_IPPROTO_TCP  6
+#define NET_IPPROTO_UDP  17
+
+#define NET_SOL_SOCKET   1
+#define NET_SO_ERROR     4
+#define NET_SHUT_WR      1
+#define NET_F_SETFL      4
+#define NET_O_NONBLOCK   0x800
+#define NET_MSG_DONTWAIT 0x40
+#define NET_POLLOUT      4
+#define NET_CLOCK_MONO   1
+
+/* ---------------- 状态 ---------------- */
+
+struct NetConn {
+    u32 used;
+    u32 fd;              /* 0 = 没有 socket */
+    u32 state;
+    u32 host_ok;         /* 宿主 connect 已完成 */
+    u32 host_shut;       /* 已对宿主 shutdown(SHUT_WR) */
+    u32 guest_fin;       /* guest 已发 FIN */
+    u32 host_eof;        /* 宿主已读到 EOF */
+    u32 fin_sent;
+    u32 fin_acked;
+    u32 gip, gport;      /* guest 侧地址 */
+    u32 rip, rport;      /* 远端地址 */
+    u32 isn;             /* 我们的初始序号 */
+    u32 rcv_nxt;         /* 期望 guest 的下一个序号 */
+    u32 snd_una;         /* sbuf[0] 对应的序号（guest 已确认到这里） */
+    u32 sbuf_len;        /* sbuf 里的有效字节数（含已发未确认） */
+    u32 sbuf_sent;       /* 已发给 guest 的字节数 */
+    u32 wbuf_len;
+    u32 win;             /* guest 最新通告窗口 */
+    u32 mss;
+    u32 fin_seq;
+    u32 last_rx_ms;
+    u32 last_send_ms;
+    u32 last_ack_ms;
+};
+
+struct NetUdp {
+    u32 used;
+    u32 fd;
+    u32 gip, gport;
+    u32 rip, rport;      /* 回给 guest 时用的源地址（DNS 会换成 10.0.2.3） */
+    u32 last_ms;
+};
+
+struct NetPing {
+    u32 used;
+    u32 fd;
+    u32 gip;
+    u32 rip;             /* 目标 */
+    u32 id, seq;
+    u32 last_ms;
+};
+
+struct NetState {
+    struct NetConn c[NET_MAX_CONN];
+    struct NetUdp u[NET_MAX_UDP];
+    struct NetPing p[NET_MAX_PING];
+    u8 sbuf[NET_MAX_CONN * NET_SBUF_SIZE];
+    u8 wbuf[NET_MAX_CONN * NET_WBUF_SIZE];
+    u8 seg[NET_SEG_MAX];
+    u8 ip[NET_IP_MAX];
+    u8 udp[NET_UDP_MAX];
+    u8 slip[NET_FRAME_MAX];
+    u8 g_slipbuf[NET_IP_MAX];
+    u32 slip_len;
+    u32 slip_esc;
+    u32 slip_bad;
+    u32 dns[3];
+    u32 dns_n;
+    u32 ip_id;
+    u32 isn;
+    u32 inited;
+    u32 last_poll_ms;
+    u32 venet_rx;
+    u32 venet_tx;
+    u32 drops;
+    u32 ok;
+};
+
+static struct NetState g_ns;
+
+/* ---------------- 小工具 ---------------- */
+
+static u32 n_bswap16(u32 v)
+{
+    return ((v & 0xffu) << 8) | ((v >> 8) & 0xffu);
+}
+
+static u32 n_bswap32(u32 v)
+{
+    return ((v & 0xffu) << 24) | ((v & 0xff00u) << 8) |
+           ((v >> 8) & 0xff00u) | ((v >> 24) & 0xffu);
+}
+
+static u32 n_rd16(const u8 *p, u32 o)
+{
+    return ((u32)p[o] << 8) | (u32)p[o + 1];
+}
+
+static u32 n_rd32(const u8 *p, u32 o)
+{
+    return ((u32)p[o] << 24) | ((u32)p[o + 1] << 16) |
+           ((u32)p[o + 2] << 8) | (u32)p[o + 3];
+}
+
+static void n_wr16(u8 *p, u32 o, u32 v)
+{
+    p[o] = (u8)(v >> 8);
+    p[o + 1] = (u8)v;
+}
+
+static void n_wr32(u8 *p, u32 o, u32 v)
+{
+    p[o] = (u8)(v >> 24);
+    p[o + 1] = (u8)(v >> 16);
+    p[o + 2] = (u8)(v >> 8);
+    p[o + 3] = (u8)v;
+}
+
+static void n_copy(u8 *dst, const u8 *src, u32 n)
+{
+    u32 i = 0;
+    for (i = 0; i < n; i++) dst[i] = src[i];
+}
+
+static void n_move(u8 *dst, const u8 *src, u32 n)
+{
+    u32 i = 0;
+    if (dst == src) return;
+    if (dst < src) {
+        for (i = 0; i < n; i++) dst[i] = src[i];
+    } else {
+        i = n;
+        while (i > 0) {
+            i--;
+            dst[i] = src[i];
+        }
+    }
+}
+
+static u32 n_min(u32 a, u32 b) { return a < b ? a : b; }
+
+static int n_seq_lt(u32 a, u32 b)
+{
+    return (int)(a - b) < 0;
+}
+
+static u64 n_now_ns(void)
+{
+    struct net_ts ts = {0};
+    ts.tv_sec = 0;
+    ts.tv_nsec = 0;
+    if (clock_gettime(NET_CLOCK_MONO, &ts) != 0) return 0;
+    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+}
+
+static u32 n_now_ms(void)
+{
+    return (u32)(n_now_ns() / 1000000ull);
+}
+
+static void n_sa(struct net_sa *sa, u32 ip, u32 port)
+{
+    sa->sa_family = (unsigned short)NET_AF_INET;
+    sa->sa_port = (unsigned short)n_bswap16(port & 0xffffu);
+    sa->sa_addr = n_bswap32(ip);
+    sa->sa_zero[0] = 0;
+    sa->sa_zero[1] = 0;
+}
+
+/* ---------------- 校验和 ---------------- */
+
+static u32 n_ck_add(u32 s, u32 v)
+{
+    s = s + (v & 0xffffu);
+    return (s & 0xffffu) + (s >> 16);
+}
+
+static u32 n_ck_buf(u32 s, const u8 *p, u32 n)
+{
+    u32 i = 0;
+    while (i + 1 < n) {
+        s = n_ck_add(s, n_rd16(p, i));
+        i += 2;
+    }
+    if (i < n) s = n_ck_add(s, (u32)p[i] << 8);
+    return s;
+}
+
+static u16 n_ck_done(u32 s)
+{
+    s = (s & 0xffffu) + (s >> 16);
+    s = (s & 0xffffu) + (s >> 16);
+    return (u16)((~s) & 0xffffu);
+}
+
+/* ---------------- SLIP 发送（dev.c6 的 COM2 收） ---------------- */
+
+static void slip_tx(const u8 *pkt, u32 len)
+{
+    u8 *f = g_ns.slip;
+    u32 n = 0;
+    u32 i = 0;
+    if (len + 8 > NET_FRAME_MAX) return;
+    f[n] = 0xc0;
+    n = 1;
+    for (i = 0; i < len; i++) {
+        u8 b = pkt[i];
+        if (b == 0xc0) {
+            f[n] = 0xdb;
+            f[n + 1] = 0xdc;
+            n += 2;
+        } else if (b == 0xdb) {
+            f[n] = 0xdb;
+            f[n + 1] = 0xdd;
+            n += 2;
+        } else {
+            f[n] = b;
+            n++;
+        }
+    }
+    f[n] = 0xc0;
+    n++;
+    {
+        int ok = serial2_feed(f, n);
+        if (NT_ON) {
+            g_nt_n = g_nt_n + 1;
+            printf("[NT] tx frame n=%u ok=%d\n", (unsigned)n, ok);
+        }
+        if (ok == 0) {
+            /* COM2 环满了：丢弃整帧，TCP 会重传、UDP 让 guest 自己重试 */
+            g_ns.drops = g_ns.drops + 1;
+        }
+    }
+}
+
+/* ---------------- IPv4 发送 ---------------- */
+
+static void ip_emit(u32 src, u32 dst, u32 proto, u32 frag,
+                    const u8 *pay, u32 plen)
+{
+    u8 *p = g_ns.ip;
+    u32 total = 20 + plen;
+    u32 i = 0;
+    p[0] = 0x45;
+    p[1] = 0;
+    n_wr16(p, 2, total);
+    n_wr16(p, 4, g_ns.ip_id & 0xffffu);
+    g_ns.ip_id = g_ns.ip_id + 1;
+    n_wr16(p, 6, frag);
+    p[8] = 64;
+    p[9] = (u8)proto;
+    n_wr16(p, 10, 0);
+    n_wr32(p, 12, src);
+    n_wr32(p, 16, dst);
+    n_wr16(p, 10, n_ck_done(n_ck_buf(0, p, 20)));
+    for (i = 0; i < plen; i++) p[20 + i] = pay[i];
+    slip_tx(p, total);
+    g_ns.venet_tx = g_ns.venet_tx + 1;
+}
+
+static void ip_send(u32 src, u32 dst, u32 proto, const u8 *pay, u32 plen)
+{
+    u32 off = 0;
+    if (plen <= 1480) {
+        ip_emit(src, dst, proto, 0, pay, plen);
+        return;
+    }
+    while (off < plen) {
+        u32 n = plen - off;
+        u32 ff = 0;
+        if (n > 1472) n = 1472;          /* 8 的倍数 */
+        if (off + n < plen) ff = 0x2000; /* MF */
+        ip_emit(src, dst, proto, ff | (off >> 3), pay + off, n);
+        off += n;
+    }
+}
+
+/* ---------------- TCP 发送 ---------------- */
+
+static u32 tcp_checksum(u32 src, u32 dst, const u8 *seg, u32 len)
+{
+    u8 ph[12] = {0};
+    u32 s = 0;
+    n_wr32(ph, 0, src);
+    n_wr32(ph, 4, dst);
+    ph[8] = 0;
+    ph[9] = NET_IPPROTO_TCP;
+    n_wr16(ph, 10, len);
+    s = n_ck_buf(0, ph, 12);
+    s = n_ck_buf(s, seg, len);
+    return n_ck_done(s);
+}
+
+static void tcp_seg_out(struct NetConn *c, u32 seq, u32 flags,
+                        const u8 *data, u32 dlen)
+{
+    u8 *s = g_ns.seg;
+    u32 i = 0;
+    u32 plen = 20 + dlen;
+    u32 win = 0;
+    if (c->wbuf_len < NET_WBUF_SIZE) win = NET_WBUF_SIZE - c->wbuf_len;
+    if (win > 65535u) win = 65535u;
+    n_wr16(s, 0, c->rport);
+    n_wr16(s, 2, c->gport);
+    n_wr32(s, 4, seq);
+    n_wr32(s, 8, c->rcv_nxt);
+    s[12] = 0x50;
+    s[13] = (u8)flags;
+    n_wr16(s, 14, win);
+    n_wr16(s, 16, 0);
+    n_wr16(s, 18, 0);
+    for (i = 0; i < dlen; i++) s[20 + i] = data[i];
+    n_wr16(s, 16, tcp_checksum(c->rip, c->gip, s, plen));
+    ip_send(c->rip, c->gip, NET_IPPROTO_TCP, s, plen);
+}
+
+static void tcp_synack(struct NetConn *c)
+{
+    u8 *s = g_ns.seg;
+    u32 win = 0;
+    if (c->wbuf_len < NET_WBUF_SIZE) win = NET_WBUF_SIZE - c->wbuf_len;
+    if (win > 65535u) win = 65535u;
+    n_wr16(s, 0, c->rport);
+    n_wr16(s, 2, c->gport);
+    n_wr32(s, 4, c->isn);
+    n_wr32(s, 8, c->rcv_nxt);
+    s[12] = 0x60;                     /* 6 个 32 位字：20 + MSS 选项 */
+    s[13] = (u8)(NET_TP_SYN | NET_TP_ACK);
+    n_wr16(s, 14, win);
+    n_wr16(s, 16, 0);
+    n_wr16(s, 18, 0);
+    s[20] = 2;                        /* kind=MSS */
+    s[21] = 4;
+    n_wr16(s, 22, NET_MSS);
+    n_wr16(s, 16, tcp_checksum(c->rip, c->gip, s, 24));
+    if (NT_ON) {
+        g_nt_n = g_nt_n + 1;
+        printf("[NT] synack %08x:%u > %08x:%u sq=%u ak=%u ck=%04x\n",
+               (unsigned)c->rip, (unsigned)c->rport, (unsigned)c->gip,
+               (unsigned)c->gport, (unsigned)c->isn, (unsigned)c->rcv_nxt,
+               (unsigned)n_rd16(s, 16));
+    }
+    ip_send(c->rip, c->gip, NET_IPPROTO_TCP, s, 24);
+    c->last_send_ms = n_now_ms();
+}
+
+/* ---------------- 连接管理 ---------------- */
+
+static struct NetConn *conn_alloc(void)
+{
+    u32 i = 0;
+    for (i = 0; i < NET_MAX_CONN; i++) {
+        if (!g_ns.c[i].used) {
+            u32 k = 0;
+            for (k = 0; k < (u32)sizeof(struct NetConn); k++)
+                ((u8 *)&g_ns.c[i])[k] = 0;
+            g_ns.c[i].used = 1;
+            g_ns.c[i].win = 65535;
+            g_ns.c[i].mss = NET_MSS;
+            return &g_ns.c[i];
+        }
+    }
+    return 0;
+}
+
+static struct NetConn *conn_find(u32 rip, u32 rport, u32 gip, u32 gport)
+{
+    u32 i = 0;
+    struct NetConn *c = 0;
+    for (i = 0; i < NET_MAX_CONN; i++) {
+        c = &g_ns.c[i];
+        if (c->used && c->rip == rip && c->rport == rport &&
+            c->gip == gip && c->gport == gport)
+            return c;
+    }
+    return 0;
+}
+
+static void conn_free(struct NetConn *c)
+{
+    if (c->fd != 0) close((int)c->fd);
+    c->fd = 0;
+    c->used = 0;
+    c->state = NET_CS_FREE;
+}
+
+static void conn_rst(struct NetConn *c)
+{
+    u32 flags = NET_TP_RST | NET_TP_ACK;
+    tcp_seg_out(c, c->snd_una + c->sbuf_sent, flags, 0, 0);
+    conn_free(c);
+}
+
+static u8 *conn_sbuf(struct NetConn *c)
+{
+    return g_ns.sbuf + (u32)(c - &g_ns.c[0]) * NET_SBUF_SIZE;
+}
+
+static u8 *conn_wbuf(struct NetConn *c)
+{
+    return g_ns.wbuf + (u32)(c - &g_ns.c[0]) * NET_WBUF_SIZE;
+}
+
+static void conn_slide(struct NetConn *c, u32 acked)
+{
+    u8 *b = conn_sbuf(c);
+    u32 drop = 0;
+    if (n_seq_lt(acked, c->snd_una)) return;
+    drop = acked - c->snd_una;
+    if (drop > c->sbuf_sent) drop = c->sbuf_sent;
+    if (drop > c->sbuf_len) drop = c->sbuf_len;
+    if (drop > 0) {
+        n_move(b, b + drop, c->sbuf_len - drop);
+        c->sbuf_len -= drop;
+        c->sbuf_sent -= drop;
+        c->snd_una = acked;
+    }
+}
+
+static void conn_flush_wbuf(struct NetConn *c)
+{
+    u8 *b = conn_wbuf(c);
+    if (!c->host_ok) return;
+    if (c->wbuf_len > 0 && c->fd != 0) {
+        long n = send((int)c->fd, b, (unsigned long)c->wbuf_len,
+                      NET_MSG_DONTWAIT);
+        if (n > 0) {
+            u32 k = (u32)n;
+            if (k > c->wbuf_len) k = c->wbuf_len;
+            n_move(b, b + k, c->wbuf_len - k);
+            c->wbuf_len -= k;
+        }
+    }
+    if (c->wbuf_len == 0 && c->guest_fin && !c->host_shut && c->fd != 0) {
+        shutdown((int)c->fd, NET_SHUT_WR);
+        c->host_shut = 1;
+    }
+}
+
+static void conn_pump(struct NetConn *c)
+{
+    u8 *b = conn_sbuf(c);
+    if (c->state < NET_CS_EST) return;
+    while (c->sbuf_sent < c->sbuf_len) {
+        u32 n = c->sbuf_len - c->sbuf_sent;
+        u32 unacked = c->sbuf_sent;
+        if (n > c->mss) n = c->mss;
+        if (unacked >= c->win) break;
+        if (n > c->win - unacked) n = c->win - unacked;
+        if (n == 0) break;
+        tcp_seg_out(c, c->snd_una + c->sbuf_sent,
+                    NET_TP_PSH | NET_TP_ACK, b + c->sbuf_sent, n);
+        c->sbuf_sent += n;
+        c->last_send_ms = n_now_ms();
+    }
+    if (c->host_eof && !c->fin_sent && c->sbuf_sent == c->sbuf_len) {
+        c->fin_seq = c->snd_una + c->sbuf_sent;
+        tcp_seg_out(c, c->fin_seq, NET_TP_FIN | NET_TP_ACK, 0, 0);
+        c->fin_sent = 1;
+        c->last_send_ms = n_now_ms();
+    }
+}
+
+/* ---------------- 连接建立 ---------------- */
+
+static void conn_open(u32 rip, u32 rport, u32 gip, u32 gport,
+                      u32 guest_seq, u32 mss)
+{
+    struct NetConn *c = conn_alloc();
+    struct net_sa sa = {0};
+    int fd = 0;
+    if (c == 0) return;
+    c->rip = rip;
+    c->rport = rport;
+    c->gip = gip;
+    c->gport = gport;
+    c->isn = g_ns.isn;
+    g_ns.isn = g_ns.isn + 0x00010001u;
+    c->snd_una = c->isn + 1;
+    c->rcv_nxt = guest_seq + 1;
+    c->state = NET_CS_SYN;
+    c->mss = mss;
+    c->last_rx_ms = n_now_ms();
+    fd = socket(NET_AF_INET, NET_SOCK_STREAM, 0);
+    if (fd < 0) {
+        conn_rst(c);
+        return;
+    }
+    fcntl(fd, NET_F_SETFL, NET_O_NONBLOCK);
+    n_sa(&sa, rip, rport);
+    connect(fd, &sa, (unsigned int)sizeof(sa));
+    c->fd = (u32)fd;
+    tcp_synack(c);
+}
+
+static void conn_check_host(struct NetConn *c)
+{
+    if (c->host_ok || c->fd == 0) return;
+    {
+        struct net_pollfd p = {0};
+        int rc = 0;
+        int err = 0;
+        unsigned int elen = 4;
+        p.fd = (int)c->fd;
+        p.events = NET_POLLOUT;
+        p.revents = 0;
+        rc = poll(&p, 1, 0);
+        if (rc > 0 && (p.revents & NET_POLLOUT)) {
+            if (getsockopt((int)c->fd, NET_SOL_SOCKET, NET_SO_ERROR,
+                           &err, &elen) == 0 && err == 0) {
+                c->host_ok = 1;
+                c->last_ack_ms = n_now_ms();
+            } else {
+                if (NT_ON) {
+                    g_nt_n = g_nt_n + 1;
+                    printf("[NT] hostfail rc=%d ev=%x err=%d\n",
+                           rc, (unsigned)p.revents, err);
+                }
+                c->state = NET_CS_CLOSE;
+                conn_rst(c);
+            }
+        }
+    }
+}
+
+/* ---------------- 从宿主读数据 ---------------- */
+
+static void conn_read_host(struct NetConn *c)
+{
+    u8 *b = conn_sbuf(c);
+    if (!c->host_ok || c->host_eof || c->fd == 0) return;
+    while (c->sbuf_len < NET_SBUF_SIZE) {
+        u32 space = NET_SBUF_SIZE - c->sbuf_len;
+        long n = 0;
+        if (space > 4096) space = 4096;
+        n = recv((int)c->fd, b + c->sbuf_len, (unsigned long)space,
+                 NET_MSG_DONTWAIT);
+        if (n > 0) {
+            c->sbuf_len += (u32)n;
+            continue;
+        }
+        if (n == 0) {
+            c->host_eof = 1;
+        }
+        break;
+    }
+}
+
+/* ---------------- 从 guest 收 TCP ---------------- */
+
+static void tcp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
+{
+    u32 sport = 0, dport = 0, seq = 0, ack = 0, doff = 0, flags = 0, win = 0;
+    u32 dlen = 0;
+    struct NetConn *c = 0;
+    if (plen < 20) return;
+    sport = n_rd16(p, off);
+    dport = n_rd16(p, off + 2);
+    seq = n_rd32(p, off + 4);
+    ack = n_rd32(p, off + 8);
+    doff = ((u32)p[off + 12] >> 4) * 4;
+    flags = (u32)p[off + 13];
+    win = n_rd16(p, off + 14);
+    if (doff < 20 || doff > plen) return;
+    dlen = plen - doff;
+    if (NT_ON) {
+        g_nt_n = g_nt_n + 1;
+        printf("[NT] tcp in %08x:%u > %08x:%u fl=%02x sq=%u ak=%u dl=%u\n",
+               (unsigned)src, (unsigned)sport, (unsigned)dst,
+               (unsigned)dport, (unsigned)flags, (unsigned)seq,
+               (unsigned)ack, (unsigned)dlen);
+    }
+    /* guest 发来的包：src=guest、dst=远端。conn 里 rip/gip 分别是
+     * 远端/guest，所以参数顺序是 (dst, dport, src, sport)。之前写反，
+     * SYN-ACK 的 IP 头和端口方向全错，guest 只看到"自己发给自己"的包
+     * 并不断重传 SYN。 */
+    c = conn_find(dst, dport, src, sport);
+    if (c == 0) {
+        u32 mss = NET_MSS;
+        u32 k = 0;
+        if ((flags & NET_TP_SYN) && !(flags & NET_TP_ACK)) {
+            /* 解析 SYN 里的 MSS 选项 */
+            while (k + 4 <= doff - 20) {
+                u32 kind = (u32)p[off + 20 + k];
+                u32 olen = 0;
+                if (kind == 0) break;
+                if (kind == 1) { k++; continue; }
+                olen = (u32)p[off + 20 + k + 1];
+                if (olen < 2 || k + olen > doff - 20) break;
+                if (kind == 2 && olen == 4) {
+                    mss = n_rd16(p, off + 20 + k + 2);
+                    if (mss < 64) mss = 64;
+                    if (mss > NET_MSS) mss = NET_MSS;
+                }
+                k += olen;
+            }
+            conn_open(dst, dport, src, sport, seq, mss);
+            return;
+        }
+        /* 未知连接的非 SYN：回 RST */
+        if (!(flags & NET_TP_RST)) {
+            struct NetConn t = {0};
+            u32 i = 0;
+            for (i = 0; i < (u32)sizeof(struct NetConn); i++)
+                ((u8 *)&t)[i] = 0;
+            t.rip = dst;
+            t.rport = dport;
+            t.gip = src;
+            t.gport = sport;
+            t.rcv_nxt = seq + dlen;
+            t.snd_una = ack;
+            t.sbuf_sent = 0;
+            tcp_seg_out(&t, ack, NET_TP_RST | NET_TP_ACK, 0, 0);
+        }
+        return;
+    }
+    c->last_rx_ms = n_now_ms();
+    if (flags & NET_TP_RST) {
+        conn_free(c);
+        return;
+    }
+    if (flags & NET_TP_ACK) {
+        c->win = win;
+        if (!n_seq_lt(ack, c->snd_una) &&
+            !n_seq_lt(c->snd_una + c->sbuf_sent, ack))
+            conn_slide(c, ack);
+        if (c->state == NET_CS_SYN && ack == c->isn + 1)
+            c->state = NET_CS_EST;
+        /* FIN 占一个序号，单独判断：ack 可以超过 snd_una + sbuf_sent */
+        if (c->fin_sent && !n_seq_lt(ack, c->fin_seq + 1)) {
+            c->fin_acked = 1;
+            if (c->guest_fin) {
+                conn_free(c);
+                return;
+            }
+        }
+    }
+    if ((flags & NET_TP_SYN) && c->state == NET_CS_SYN) {
+        tcp_synack(c);
+        return;
+    }
+    if (dlen > 0) {
+        u32 dseq = seq;
+        u32 dl = dlen;
+        u32 room = NET_WBUF_SIZE - c->wbuf_len;
+        if (c->state == NET_CS_SYN) c->state = NET_CS_EST;
+        if (n_seq_lt(dseq, c->rcv_nxt)) {
+            u32 skip = c->rcv_nxt - dseq;
+            if (skip >= dl) {
+                dl = 0;
+            } else {
+                dseq += skip;
+                dl -= skip;
+            }
+        }
+        if (dl > 0 && dseq == c->rcv_nxt) {
+            u32 take = dl;
+            if (take > room) take = room;
+            if (take > 0) {
+                n_copy(conn_wbuf(c) + c->wbuf_len, p + off + doff + (dseq - seq), take);
+                c->wbuf_len += take;
+                c->rcv_nxt += take;
+            }
+            tcp_seg_out(c, c->snd_una + c->sbuf_sent, NET_TP_ACK, 0, 0);
+            c->last_ack_ms = n_now_ms();
+        } else {
+            /* 重复/乱序：发当前 ACK，让 guest 重传 */
+            tcp_seg_out(c, c->snd_una + c->sbuf_sent, NET_TP_ACK, 0, 0);
+        }
+    }
+    if (flags & NET_TP_FIN) {
+        u32 finseq = seq + dlen;
+        if (finseq == c->rcv_nxt) {
+            c->rcv_nxt = finseq + 1;
+            c->guest_fin = 1;
+            tcp_seg_out(c, c->snd_una + c->sbuf_sent, NET_TP_ACK, 0, 0);
+        } else if (finseq + 1 == c->rcv_nxt) {
+            tcp_seg_out(c, c->snd_una + c->sbuf_sent, NET_TP_ACK, 0, 0);
+        }
+    }
+    conn_flush_wbuf(c);
+    conn_pump(c);
+}
+
+/* ---------------- UDP ---------------- */
+
+static struct NetUdp *udp_find(u32 gip, u32 gport, u32 rip, u32 rport)
+{
+    u32 i = 0;
+    for (i = 0; i < NET_MAX_UDP; i++) {
+        struct NetUdp *u = &g_ns.u[i];
+        if (u->used && u->gip == gip && u->gport == gport &&
+            u->rip == rip && u->rport == rport)
+            return u;
+    }
+    return 0;
+}
+
+static struct NetUdp *udp_alloc(void)
+{
+    u32 i = 0;
+    for (i = 0; i < NET_MAX_UDP; i++) {
+        if (!g_ns.u[i].used) {
+            u32 k = 0;
+            for (k = 0; k < (u32)sizeof(struct NetUdp); k++)
+                ((u8 *)&g_ns.u[i])[k] = 0;
+            g_ns.u[i].used = 1;
+            return &g_ns.u[i];
+        }
+    }
+    return 0;
+}
+
+static void udp_out(struct NetUdp *u, const u8 *pay, u32 plen)
+{
+    u8 *s = g_ns.seg;
+    u32 total = 8 + plen;
+    u8 ph[12] = {0};
+    u32 ck = 0;
+    u32 i = 0;
+    n_wr16(s, 0, u->rport);
+    n_wr16(s, 2, u->gport);
+    n_wr16(s, 4, total);
+    n_wr16(s, 6, 0);
+    for (i = 0; i < plen; i++) s[8 + i] = pay[i];
+    n_wr32(ph, 0, u->rip);
+    n_wr32(ph, 4, u->gip);
+    ph[8] = 0;
+    ph[9] = NET_IPPROTO_UDP;
+    n_wr16(ph, 10, total);
+    ck = n_ck_buf(0, ph, 12);
+    ck = n_ck_buf(ck, s, total);
+    n_wr16(s, 6, n_ck_done(ck));
+    if (NT_ON) {
+        g_nt_n = g_nt_n + 1;
+        printf("[NT] udp_out %08x:%u>%08x:%u len=%u\n",
+               (unsigned)u->rip, (unsigned)u->rport,
+               (unsigned)u->gip, (unsigned)u->gport, (unsigned)total);
+    }
+    ip_send(u->rip, u->gip, NET_IPPROTO_UDP, s, total);
+}
+
+static void udp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
+{
+    u32 sport = 0, dport = 0, ulen = 0, pl = 0;
+    u32 fwd_ip = 0, fwd_port = 0;
+    struct NetUdp *u = 0;
+    struct net_sa sa = {0};
+    int fd = 0;
+    if (plen < 8) return;
+    sport = n_rd16(p, off);
+    dport = n_rd16(p, off + 2);
+    ulen = n_rd16(p, off + 4);
+    if (ulen < 8 || ulen > plen) ulen = plen;
+    pl = ulen - 8;
+    fwd_ip = dst;
+    fwd_port = dport;
+    if (dst == NET_DNS_IP && dport == 53) {
+        if (g_ns.dns_n == 0) return;
+        fwd_ip = g_ns.dns[0];
+        fwd_port = 53;
+    }
+    if (NT_ON) {
+        g_nt_n = g_nt_n + 1;
+        printf("[NT] udp %08x:%u > fwd %08x:%u len=%u\n",
+               (unsigned)src, (unsigned)sport,
+               (unsigned)fwd_ip, (unsigned)fwd_port, (unsigned)pl);
+    }
+    u = udp_find(src, sport, dst, dport);
+    if (u == 0) {
+        u = udp_alloc();
+        if (u == 0) return;
+        fd = socket(NET_AF_INET, NET_SOCK_DGRAM, 0);
+        if (fd < 0) {
+            u->used = 0;
+            return;
+        }
+        fcntl(fd, NET_F_SETFL, NET_O_NONBLOCK);
+        n_sa(&sa, fwd_ip, fwd_port);
+        if (connect(fd, &sa, (unsigned int)sizeof(sa)) != 0) {
+            close(fd);
+            u->used = 0;
+            return;
+        }
+        u->fd = (u32)fd;
+        u->gip = src;
+        u->gport = sport;
+        u->rip = dst;
+        u->rport = dport;
+    }
+    u->last_ms = n_now_ms();
+    if (u->fd != 0) {
+        long sn = (long)send((int)u->fd, p + off + 8, (unsigned long)pl,
+                             NET_MSG_DONTWAIT);
+        if (NT_ON) {
+            g_nt_n = g_nt_n + 1;
+            printf("[NT %u] udp send %d\n", (unsigned)n_now_ms(), (int)sn);
+        }
+    }
+}
+
+/* ---------------- ICMP ---------------- */
+
+static void icmp_local_reply(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
+{
+    u8 *s = g_ns.seg;
+    u32 i = 0;
+    for (i = 0; i < plen; i++) s[i] = p[off + i];
+    s[0] = 0;                    /* echo reply */
+    n_wr16(s, 2, 0);
+    n_wr16(s, 2, n_ck_done(n_ck_buf(0, s, plen)));
+    ip_send(dst, src, NET_IPPROTO_ICMP, s, plen);
+}
+
+static struct NetPing *ping_find(u32 gip, u32 id, u32 seq)
+{
+    u32 i = 0;
+    for (i = 0; i < NET_MAX_PING; i++) {
+        struct NetPing *q = &g_ns.p[i];
+        if (q->used && q->gip == gip && q->id == id && q->seq == seq)
+            return q;
+    }
+    return 0;
+}
+
+static struct NetPing *ping_alloc(void)
+{
+    u32 i = 0;
+    for (i = 0; i < NET_MAX_PING; i++) {
+        if (!g_ns.p[i].used) {
+            u32 k = 0;
+            for (k = 0; k < (u32)sizeof(struct NetPing); k++)
+                ((u8 *)&g_ns.p[i])[k] = 0;
+            g_ns.p[i].used = 1;
+            return &g_ns.p[i];
+        }
+    }
+    return 0;
+}
+
+static void icmp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
+{
+    u32 type = 0;
+    u32 code = 0;
+    if (plen < 8) return;
+    type = (u32)p[off];
+    code = (u32)p[off + 1];
+    if (type != 8 || code != 0) {
+        if (NT_ON) {
+            u32 qs = 0, qd = 0, qp = 0;
+            g_nt_n = g_nt_n + 1;
+            if (plen >= 28) {
+                qp = (u32)p[off + 9];
+                qs = n_rd32(p, off + 12);
+                qd = n_rd32(p, off + 16);
+            }
+            printf("[NT %u] icmp t=%u c=%u q=%08x>%08x p=%u len=%u\n",
+                   (unsigned)n_now_ms(),
+                   (unsigned)type, (unsigned)code, (unsigned)qs,
+                   (unsigned)qd, (unsigned)qp, (unsigned)plen);
+        }
+        return;
+    }
+    if (NT_ON) {
+        g_nt_n = g_nt_n + 1;
+        printf("[NT] icmp echo %08x>%08x len=%u\n",
+               (unsigned)src, (unsigned)dst, (unsigned)plen);
+    }
+    if (dst == NET_PEER_IP || dst == NET_DNS_IP || dst == NET_GUEST_IP) {
+        icmp_local_reply(src, dst, p, off, plen);
+        return;
+    }
+    {
+        u32 id = n_rd16(p, off + 4);
+        u32 seq = n_rd16(p, off + 6);
+        struct NetPing *q = ping_find(src, id, seq);
+        struct net_sa sa = {0};
+        int fd = 0;
+        if (q == 0) {
+            q = ping_alloc();
+            if (q == 0) return;
+            fd = socket(NET_AF_INET, NET_SOCK_DGRAM, NET_IPPROTO_ICMP);
+            if (fd < 0) {
+                q->used = 0;
+                return;
+            }
+            fcntl(fd, NET_F_SETFL, NET_O_NONBLOCK);
+            n_sa(&sa, dst, 0);
+            if (connect(fd, &sa, (unsigned int)sizeof(sa)) != 0) {
+                close(fd);
+                q->used = 0;
+                return;
+            }
+            q->fd = (u32)fd;
+            q->gip = src;
+            q->rip = dst;
+            q->id = id;
+            q->seq = seq;
+        }
+        q->last_ms = n_now_ms();
+        if (q->fd != 0)
+            send((int)q->fd, p + off, (unsigned long)plen, NET_MSG_DONTWAIT);
+    }
+}
+
+/* ---------------- 从 guest 收到的 IP 包 ---------------- */
+
+void net_input_ip(const u8 *pkt, u32 len)
+{
+    u32 ihl = 0;
+    u32 total = 0;
+    u32 frag = 0;
+    u32 proto = 0;
+    u32 src = 0;
+    u32 dst = 0;
+    u32 plen = 0;
+    if (len < 20) return;
+    if ((pkt[0] >> 4) != 4) return;
+    ihl = ((u32)pkt[0] & 15u) * 4u;
+    if (ihl < 20 || ihl > len) return;
+    total = n_rd16(pkt, 2);
+    if (total < ihl) return;
+    if (total > len) total = len;
+    frag = n_rd16(pkt, 6);
+    if (frag & 0x2000) return;              /* 不处理分片 */
+    if ((frag & 0x1fffu) != 0) return;
+    proto = (u32)pkt[9];
+    src = n_rd32(pkt, 12);
+    dst = n_rd32(pkt, 16);
+    plen = total - ihl;
+    if (NT_ON) {
+        g_nt_n = g_nt_n + 1;
+        printf("[NT] ip %08x>%08x proto=%u len=%u\n",
+               (unsigned)src, (unsigned)dst, (unsigned)proto, (unsigned)total);
+    }
+    g_ns.venet_rx = g_ns.venet_rx + 1;
+    if (proto == NET_IPPROTO_TCP) tcp_input(src, dst, pkt, ihl, plen);
+    else if (proto == NET_IPPROTO_UDP) udp_input(src, dst, pkt, ihl, plen);
+    else if (proto == NET_IPPROTO_ICMP) icmp_input(src, dst, pkt, ihl, plen);
+}
+
+/* ---------------- SLIP 解帧（dev.c6 的 COM2 发） ---------------- */
+
+void slip_rx_byte(u32 v)
+{
+    u32 b = v & 0xffu;
+    if (b == 0xc0) {
+        if (g_ns.slip_len > 0) {
+            if (NT_ON) {
+                g_nt_n = g_nt_n + 1;
+                printf("[NT] slip rx len=%u\n", g_ns.slip_len);
+            }
+            net_input_ip(g_ns.g_slipbuf, g_ns.slip_len);
+            g_ns.slip_len = 0;
+        }
+        g_ns.slip_esc = 0;
+        return;
+    }
+    if (b == 0xdb) {
+        g_ns.slip_esc = 1;
+        return;
+    }
+    if (g_ns.slip_esc) {
+        g_ns.slip_esc = 0;
+        if (b == 0xdc) b = 0xc0;
+        else if (b == 0xdd) b = 0xdb;
+        else {
+            g_ns.slip_bad = g_ns.slip_bad + 1;
+            return;
+        }
+    }
+    if (g_ns.slip_len < NET_IP_MAX) {
+        g_ns.g_slipbuf[g_ns.slip_len] = (u8)b;
+        g_ns.slip_len = g_ns.slip_len + 1;
+    } else {
+        g_ns.slip_bad = g_ns.slip_bad + 1;
+        g_ns.slip_len = 0;
+        g_ns.slip_esc = 0;
+    }
+}
+
+/* ---------------- DNS 配置 ---------------- */
+
+static u32 parse_ip4(const u8 *s, u32 *out_i)
+{
+    u32 i = *out_i;
+    u32 parts[4] = {0};
+    u32 k = 0;
+    u32 v = 0;
+    for (k = 0; k < 4; k++) {
+        u32 d = 0;
+        u32 digits = 0;
+        while (s[i] >= '0' && s[i] <= '9') {
+            d = d * 10 + (u32)(s[i] - '0');
+            i++;
+            digits++;
+            if (digits > 3) return 0;
+        }
+        if (digits == 0 || d > 255) return 0;
+        parts[k] = d;
+        if (k < 3) {
+            if (s[i] != '.') return 0;
+            i++;
+        }
+    }
+    *out_i = i;
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+}
+
+static void net_load_dns(void)
+{
+    u8 buf[1024] = {0};
+    int fd = 0;
+    long n = 0;
+    u32 i = 0;
+    g_ns.dns_n = 0;
+    fd = open("/etc/resolv.conf", 0, 0);
+    if (fd >= 0) {
+        n = read(fd, buf, 1023);
+        close(fd);
+    }
+    if (n > 0) {
+        buf[n] = 0;
+        i = 0;
+        while (i < (u32)n && g_ns.dns_n < 3) {
+            u32 line = i;
+            u32 j = i;
+            while (j < (u32)n && buf[j] != '\n') j++;
+            /* 跳过行首空白，匹配 nameserver */
+            while (line < j && (buf[line] == ' ' || buf[line] == '\t')) line++;
+            if (line + 10 <= j && buf[line] == 'n' && buf[line + 1] == 'a' &&
+                buf[line + 2] == 'm' && buf[line + 3] == 'e' &&
+                buf[line + 4] == 's' && buf[line + 5] == 'e' &&
+                buf[line + 6] == 'r' && buf[line + 7] == 'v' &&
+                buf[line + 8] == 'e' && buf[line + 9] == 'r') {
+                u32 k = line + 10;
+                while (k < j && (buf[k] == ' ' || buf[k] == '\t')) k++;
+                {
+                    u32 ip = parse_ip4(buf, &k);
+                    if (ip != 0) {
+                        g_ns.dns[g_ns.dns_n] = ip;
+                        g_ns.dns_n = g_ns.dns_n + 1;
+                    }
+                }
+            }
+            i = j + 1;
+        }
+    }
+    if (g_ns.dns_n == 0) {
+        g_ns.dns[0] = 0x01010101u;   /* 1.1.1.1 兜底 */
+        g_ns.dns_n = 1;
+    }
+}
+
+/* ---------------- 轮询 ---------------- */
+
+static void net_poll_conns(void)
+{
+    u32 i = 0;
+    u32 now = n_now_ms();
+    for (i = 0; i < NET_MAX_CONN; i++) {
+        struct NetConn *c = &g_ns.c[i];
+        if (!c->used) continue;
+        conn_check_host(c);
+        if (!c->used) continue;
+        if (!c->host_ok && c->state != NET_CS_SYN) {
+            /* 连接还在建立中 */
+            if ((u32)(now - c->last_rx_ms) > 20000u) conn_rst(c);
+            continue;
+        }
+        conn_read_host(c);
+        if (!c->used) continue;
+        conn_flush_wbuf(c);
+        if (!c->used) continue;
+        conn_pump(c);
+        /* SYN-ACK 重传 */
+        if (c->state == NET_CS_SYN && (u32)(now - c->last_send_ms) > 500u)
+            tcp_synack(c);
+        /* 数据重传：只重发最前面一个未确认段 */
+        if (c->state >= NET_CS_EST && c->sbuf_sent > 0 &&
+            (u32)(now - c->last_send_ms) > 300u) {
+            u32 n = c->sbuf_sent;
+            if (n > c->mss) n = c->mss;
+            tcp_seg_out(c, c->snd_una, NET_TP_PSH | NET_TP_ACK,
+                        conn_sbuf(c), n);
+            c->last_send_ms = now;
+        }
+        if (c->fin_sent && (u32)(now - c->last_send_ms) > 500u &&
+            !c->fin_acked) {
+            tcp_seg_out(c, c->fin_seq, NET_TP_FIN | NET_TP_ACK, 0, 0);
+            c->last_send_ms = now;
+        }
+        if ((u32)(now - c->last_rx_ms) > 120000u) {
+            conn_rst(c);
+            continue;
+        }
+    }
+}
+
+static void net_poll_udp(void)
+{
+    u32 i = 0;
+    u32 now = n_now_ms();
+    for (i = 0; i < NET_MAX_UDP; i++) {
+        struct NetUdp *u = &g_ns.u[i];
+        if (!u->used) continue;
+        if ((u32)(now - u->last_ms) > 60000u) {
+            if (u->fd != 0) close((int)u->fd);
+            u->used = 0;
+            continue;
+        }
+        if (u->fd == 0) continue;
+        for (;;) {
+            long n = recv((int)u->fd, g_ns.udp, NET_UDP_MAX, NET_MSG_DONTWAIT);
+            if (n <= 0) break;
+            if (NT_ON) {
+                g_nt_n = g_nt_n + 1;
+                printf("[NT %u] udp recv %d\n", (unsigned)n_now_ms(), (int)n);
+            }
+            udp_out(u, g_ns.udp, (u32)n);
+        }
+    }
+}
+
+static void net_poll_ping(void)
+{
+    u32 i = 0;
+    u32 now = n_now_ms();
+    for (i = 0; i < NET_MAX_PING; i++) {
+        struct NetPing *q = &g_ns.p[i];
+        if (!q->used) continue;
+        if ((u32)(now - q->last_ms) > 10000u) {
+            if (q->fd != 0) close((int)q->fd);
+            q->used = 0;
+            continue;
+        }
+        if (q->fd == 0) continue;
+        for (;;) {
+            long n = recv((int)q->fd, g_ns.udp, NET_UDP_MAX, NET_MSG_DONTWAIT);
+            if (n <= 0) break;
+            if (n >= 8) {
+                u8 *s = g_ns.udp;
+                n_wr16(s, 4, q->id);
+                n_wr16(s, 6, q->seq);
+                n_wr16(s, 2, 0);
+                n_wr16(s, 2, n_ck_done(n_ck_buf(0, s, (u32)n)));
+                ip_send(q->rip, q->gip, NET_IPPROTO_ICMP, s, (u32)n);
+            }
+        }
+    }
+}
+
+void net_tick(void)
+{
+    u32 now = 0;
+    if (!g_ns.inited) return;
+    now = n_now_ms();
+    if ((u32)(now - g_ns.last_poll_ms) < 1u) return;
+    g_ns.last_poll_ms = now;
+    net_poll_conns();
+    net_poll_udp();
+    net_poll_ping();
+}
+
+/* ---------------- 复位 ---------------- */
+
+void net_reset(void)
+{
+    u32 i = 0;
+    for (i = 0; i < NET_MAX_CONN; i++) {
+        if (g_ns.c[i].used && g_ns.c[i].fd != 0) close((int)g_ns.c[i].fd);
+    }
+    for (i = 0; i < NET_MAX_UDP; i++) {
+        if (g_ns.u[i].used && g_ns.u[i].fd != 0) close((int)g_ns.u[i].fd);
+    }
+    for (i = 0; i < NET_MAX_PING; i++) {
+        if (g_ns.p[i].used && g_ns.p[i].fd != 0) close((int)g_ns.p[i].fd);
+    }
+    for (i = 0; i < (u32)sizeof(g_ns); i++) ((u8 *)&g_ns)[i] = 0;
+    g_ns.ip_id = 1;
+    g_ns.isn = 0x5a5a0000u;
+    g_ns.inited = 1;
+    net_load_dns();
+}
+
+#endif /* !C6_WASM */

@@ -16,7 +16,7 @@ CC=${CC:-cc}
 OPT=${OPT:--O2}
 C6_PURE=${C6_PURE:-0}
 
-CORE="src/mem.c6 src/dev.c6 src/fpu.c6 src/cpu.c6 src/boot.c6 src/machine.c6 src/host.c6"
+CORE="src/mem.c6 src/dev.c6 src/fpu.c6 src/cpu.c6 src/boot.c6 src/machine.c6 src/host.c6 src/net.c6"
 
 usage() {
     cat <<'EOF'
@@ -94,7 +94,16 @@ wasm() {
 }
 
 fw() {
-    python3 tools/mkfw.py "$@"
+    # build/alpine 里有从 Alpine apk 解出来的内核模块树时，默认注入 slip/slhc，
+    # 让 firmware.bin 一启动就带用户态外网；用户显式给了 --modules 就不干预。
+    MODARG=""
+    if [ -d build/alpine/lib/modules ]; then
+        case " $* " in
+        *" --modules "*) ;;
+        *) MODARG="--modules build/alpine/lib" ;;
+        esac
+    fi
+    python3 tools/mkfw.py "$@" $MODARG
 }
 
 test_all() {

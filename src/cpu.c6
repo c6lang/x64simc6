@@ -2051,7 +2051,12 @@ int step(struct CPUState *c)
         }
         case 0xc8: case 0xc9: case 0xca: case 0xcb:
         case 0xcc: case 0xcd: case 0xce: case 0xcf: { /* bswap */
-            u32 i = op2 - 0xc8;
+            /* BSWAP r32/r64：目标寄存器 = opcode 低 3 位 + REX.B。
+             * 以前漏了 REX.B：内核里的 `41 0f cc`（bswap %r12d）被当成
+             * bswap %esp，把 RSP 低 32 位字节序颠倒后零扩展成
+             * 0x30781900 这类用户地址 —— ifconfig 一进 fib_table_insert
+             * 就 #PF，页错误处理再入后整机死循环。 */
+            u32 i = (op2 - 0xc8) + ((rex & 1) ? 8 : 0);
             u64 x = c->r[i];
             if (s == 8)
                 c->r[i] = ((x & 0xff00000000000000ull) >> 56) |

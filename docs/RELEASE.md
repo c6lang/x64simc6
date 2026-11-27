@@ -1,8 +1,48 @@
-# x64simc6 v1.1 发布说明
+# x64simc6 发布说明
 
-发布日期：2026-11-27
+## v1.2 变更（开发版，相对 v1.1）
+
+**外网访问**：Alpine guest 可以真正访问互联网（DNS + TCP/HTTP + ICMP），
+不需要 root/tap，也不依赖 libslirp。
+
+- **设备**：`src/dev.c6` 增加 COM2 16550A（`0x2f8..0x2ff` / IRQ3 →
+  `/dev/ttyS1`，128 KiB RX 环）；guest 用内核自带的 `slip`/`slhc` 模块 +
+  `/sbin/slattach` 跑 SLIP（RFC 1055）。
+- **宿主网关**：`src/net.c6`（约 1200 行，`C6_WASM` 下整体为空）实现用户态
+  NAT：IPv4 校验和/分片、TCP 非阻塞中继（16 条）、UDP 逐流转发（16 条）、
+  ICMP echo（本地 + 宿主 ping socket，8 条）、DNS 目标改写。地址沿用 QEMU
+  user networking：guest `10.0.2.15` / 网关 `10.0.2.2` / DNS `10.0.2.3`
+  （宿主 `/etc/resolv.conf`，兜底 `1.1.1.1`）。
+- **固件**：`tools/mkfw.py --modules` 把 `slip.ko`/`slhc.ko` 注入 initrd，
+  并给 `/init` 追加 `insmod` → `slattach` → `ifconfig sl0 ... up` → 默认路由
+  → `resolv.conf`；`./build.sh fw` 在 `build/alpine/lib/modules` 存在时
+  自动启用。initrd 从 3.3 MiB 涨到约 34 MiB（含两个模块）。
+- 用法、限制（仅 IPv4、无 DHCP、固定窗口/MSS 1460）见 README「外网访问」，
+  实现与选型见 `docs/DESIGN.md` §93。
+
+顺带修掉三个模拟器缺陷（不是联网引入的，但联网后才暴露/必须修）：
+
+- **`bswap` 漏了 REX.B**：`ifconfig` 进内核 `fib_table_insert` 执行
+  `41 0f cc`（`bswap %r12d`）时被当成 `bswap %esp`，RSP 低 32 位被字节反转
+  → `#PF` 死循环。修复 + difftest 补 16 条用例（DESIGN §94）。
+- **HLT 空闲快进越过设备中断**：原来先推进 guest 时间、后投 IRQ3，`ping`
+  RTT 5.8 秒、DNS 必然超时；改成先 `dev_tick()`、有挂起中断不推进时间、
+  快进上限 `0x40000` 条指令（DESIGN §95）。RTT 降到 3.3ms。
+- **TCP SYN-ACK 方向反了**：guest 包的 `src` 是 guest、`dst` 是远端，
+  连接表建成 `(远端, guest)` 才正确，否则 guest 只看到自己发给自己的包并
+  无限重传 SYN（DESIGN §93）。
+
+另外 `tools/difftest/native_run.c` 的备用栈改成固定 64 KiB，修 glibc 2.34+
+`SIGSTKSZ` 不是常量导致的编译失败，本机可以直接跑 difftest。
+
+验收：`./build.sh test` 全绿（native payload/单元/CPL3/pcache/wasm 冒烟）、
+`tools/boot_login.py` PASS、difftest **1252/1252**、guest 内
+`ping -c1 10.0.2.2` / `ping -c1 10.0.2.3` 0% loss、
+`wget http://example.com/` 成功。
 
 ## v1.1 变更（相对 v1.0.2）
+
+发布日期：2026-11-27
 
 性能版本：**默认构建的整机引导快 28.8×，c6c 自举构建快 1.64×**，指令语义
 不变（difftest 1236/1236，900M 引导串口输出逐字节一致）。
