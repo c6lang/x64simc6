@@ -10,6 +10,12 @@
 - **演示 GIF**：README「外网访问」嵌入登录后 `ifconfig sl0` / `ping qq.com` /
   `wget https://qq.com/` 的 GIF（`docs/img/net-demo.gif`，由
   `tools/make_demo_gif.py` 录制）。
+- **wasm 也走 -O2**：`c6c --emit-ctu -D C6_WASM=1` + `clang -O2` + `wasm-ld`
+  链接 c6 的 wasm 运行时。整机引导 20M 条 **15.85s → 1.04s（15.2×）**，
+  浏览器里登录 Alpine 并执行命令 **1062s → 62s**（Node 里 59s），
+  `web/sim.wasm` 1.6 MiB → **116 KiB**；50M 条处与 native MATCH。
+  没有 clang/wasm-ld 时自动退回 tcc-c6，也可 `WASM_BACKEND=tcc` 强制
+  （DESIGN §97）。
 
 ## v1.2 变更（相对 v1.1）
 

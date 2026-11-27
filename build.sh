@@ -7,6 +7,14 @@ C6C=${C6C:-$HOME/c6/c6c/build/c6c}
 TCC=${TCC:-$HOME/c6/tcc/c6}
 TCCDIR=${TCCDIR:-$HOME/c6/tcc}
 WASM_FLAGS=${WASM_FLAGS:-"-Wl,--initial-memory=268435456 -Wl,--max-memory=536870912"}
+# wasm 默认走和 native 同一条思路：c6c --emit-ctu 出 C，再交给 clang -O2
+# 编成 wasm32，最后 wasm-ld 链接 c6 的 wasm 运行时。实测比 tcc-c6 出码快 20 倍
+# 以上（5M 条整机引导 6.55s → 0.29s）。没有 clang/wasm-ld 时自动退回 tcc-c6。
+WASM_BACKEND=${WASM_BACKEND:-auto}   # auto | clang | tcc
+WASM_CC=${WASM_CC:-clang}
+WASM_LD=${WASM_LD:-wasm-ld}
+WASM_OPT=${WASM_OPT:--O2}
+WASM_CFLAGS=${WASM_CFLAGS:-"-fno-builtin"}
 # native 默认走「c6c --emit-ctu 出 C → 系统 cc -O2」的快速构建：
 # 同一份 C6 源码，宿主编译器有寄存器分配，整机引导比 c6c 直接出码快 30 倍以上。
 # C6_PURE=1 强制回到 c6c 自举路径（不需要系统 cc）。
@@ -31,6 +39,9 @@ usage() {
   CC=...     快速路径使用的宿主编译器（默认 cc）
   OPT=...    快速路径的优化选项（默认 -O2）
   C6C=...    c6c 路径
+  WASM_BACKEND=auto|clang|tcc  wasm 后端（默认 auto：有 clang+wasm-ld 就 -O2）
+  WASM_CC=... / WASM_LD=...    clang / wasm-ld 路径（默认取 PATH）
+  WASM_OPT=...                 wasm 优化级别（默认 -O2）
 EOF
 }
 
@@ -88,9 +99,36 @@ native() {
 
 wasm() {
     mkdir -p build web
-    TCC_CCFLAGS="$WASM_FLAGS" "$TCC" -B "$TCCDIR" -DC6_WASM=1 -I src --target=wasm32-unknown-unknown \
-        -o web/sim.wasm $CORE src/hostfs.c6 src/wasm.c6
-    echo "wasm: web/sim.wasm ($(wc -c < web/sim.wasm) bytes)"
+    WANT_CLANG=0
+    if [ "$WASM_BACKEND" != "tcc" ] &&
+       command -v "$WASM_CC" >/dev/null 2>&1 &&
+       "$WASM_CC" --print-targets 2>/dev/null | grep -q wasm32 &&
+       command -v "$WASM_LD" >/dev/null 2>&1 &&
+       [ -f "$TCCDIR/libtcc1-wasm32.a" ]; then
+        WANT_CLANG=1
+    fi
+    if [ "$WASM_BACKEND" = "clang" ] && [ "$WANT_CLANG" = "0" ]; then
+        echo "wasm: WASM_BACKEND=clang 但缺少 $WASM_CC / $WASM_LD / $TCCDIR/libtcc1-wasm32.a" >&2
+        exit 1
+    fi
+    if [ "$WANT_CLANG" = "1" ]; then
+        rm -rf build/ctu-wasm
+        mkdir -p build/ctu-wasm
+        for f in $CORE src/hostfs.c6 src/wasm.c6; do
+            b=$(basename "$f" .c6)
+            "$C6C" --emit-ctu -D C6_WASM=1 -I src "$f" -o "build/ctu-wasm/$b.c"
+            "$WASM_CC" --target=wasm32-unknown-unknown $WASM_CFLAGS "$WASM_OPT" \
+                -c "build/ctu-wasm/$b.c" -o "build/ctu-wasm/$b.o"
+        done
+        "$WASM_LD" --no-entry --export-all \
+            --initial-memory=268435456 --max-memory=536870912 \
+            -o web/sim.wasm build/ctu-wasm/*.o "$TCCDIR/libtcc1-wasm32.a"
+        echo "wasm: web/sim.wasm ($(wc -c < web/sim.wasm) bytes, $WASM_CC $WASM_OPT)"
+    else
+        TCC_CCFLAGS="$WASM_FLAGS" "$TCC" -B "$TCCDIR" -DC6_WASM=1 -I src --target=wasm32-unknown-unknown \
+            -o web/sim.wasm $CORE src/hostfs.c6 src/wasm.c6
+        echo "wasm: web/sim.wasm ($(wc -c < web/sim.wasm) bytes, tcc-c6)"
+    fi
 }
 
 fw() {

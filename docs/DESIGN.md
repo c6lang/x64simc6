@@ -1691,3 +1691,53 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     `wget -O /dev/null https://qq.com/` 证书校验通过并下载 132k，
     `http://example.com/` 同时正常。这个 bug 与联网无关（任何 HTTPS
     都会踩），但只有 guest 真能上网才会暴露。
+
+97. **wasm 也用 -O2：ctu + clang + wasm-ld**。native 早就走
+    「`c6c --emit-ctu` → 宿主 `cc -O2`」，wasm 却一直用 tcc-c6 直接出码。
+    tcc 是单遍编译器、基本不做优化，整机只有 **0.76M guest 指令/秒**，
+    浏览器里登录 Alpine 要 **18 分钟**，演示价值大打折扣。
+
+    其实 c6c 的 `--emit-ctu` 正是为交叉编译准备的（帮助里写着「per-TU C：
+    真 C ABI、不要 main、不带运行时」），那就把它接到 clang：
+
+    - `c6c --emit-ctu -D C6_WASM=1 -I src <tu>.c6 -o <tu>.c`：c6c 的预处理器
+      按 `-D` 展开，所以产物是 wasm 变体；头文件被内联进 C（带 `# line` 标记），
+      不依赖宿主/目标机的系统头。
+    - `clang --target=wasm32-unknown-unknown -O2 -fno-builtin -c`。
+    - `wasm-ld --no-entry --export-all --initial-memory=268435456
+      --max-memory=536870912` 链接 tcc-c6 留下的 wasm 运行时
+      `libtcc1-wasm32.a`（提供 printf/memcpy/memset/malloc/free）。
+
+    **ABI 能对上的原因**：wasm32 的 C ABI 两边一致（int 32、long long 64、
+    指针 32），结构布局由同一份 emitted C 决定；wasm 没有 80 位浮点，两边
+    `long double` 都是 f64（`c6sim.h` 里 `C6_WASM` 已经选了 `double`）；
+    wasm 的 varargs 是"参数区指针"约定，tcc 运行时的 `printf` 正好是
+    `(i32 fmt, i32 args)`，clang 生成的调用形式相同。唯一要补的是声明：
+    `src/cpu.c6` 的 `[UD]` 与 `src/mem.c6` 的 `[CC]` 两处 debug printf 在
+    `C6_WASM` 下没有 `<stdio.h>`，clang 会报 implicit declaration；在
+    `c6sim.h` 里给 `#if defined(C6_WASM)` 补一条
+    `int printf(const char *fmt, ...);` 即可。`-fno-builtin` 用来防止 clang
+    把 `printf("...\n")` 换成 `puts` 之类的库函数替换（运行时没有对应实现）。
+
+    **验证与数字**（同一台机器）：
+
+    | 指标 | tcc-c6 | ctu + clang -O2 |
+    | --- | --- | --- |
+    | 5M 条整机引导 | 6.55s / 0.76M 条每秒 | **0.29s / 17M 条每秒（22.6×）** |
+    | 20M 条整机引导 | 15.85s | **1.04s（15.2×）** |
+    | wasm_login（Node） | 1056s / 1194M 条 | **59s / 882M 条** |
+    | browser_alpine（Chromium） | 1062s | **62s** |
+    | `web/sim.wasm` 大小 | 1.6 MiB | **116 KiB** |
+    | 构建时间（9 个 TU） | — | **2.2s** |
+
+    正确性：`tests/wasm_cmp.js 50000000` 与 native **MATCH**（16 个 GPR、
+    RIP、RFLAGS、128MiB RAM 的 FNV 哈希全部一致）；`wasm_smoke.js`、
+    `browser_e2e.js`、`wasm_login.js`、`browser_alpine.js` 全过，
+    `./build.sh test` 全绿。
+
+    **回落与开关**：`WASM_BACKEND=auto|clang|tcc`。auto 会检查 clang 的
+    `--print-targets` 里有 wasm32、`wasm-ld` 在 PATH、以及
+    `$TCCDIR/libtcc1-wasm32.a` 存在；任一不满足就退回原来的 tcc-c6 路径
+    （产物照旧可用，只是慢）。`WASM_CC/WASM_LD/WASM_OPT/WASM_CFLAGS` 可覆盖。
+    链接产物仍是 export-all 的 wasm，浏览器 API 一个没变；clang 默认会用到
+    bulk-memory 等较新的 wasm 特性，需要近几年的浏览器。

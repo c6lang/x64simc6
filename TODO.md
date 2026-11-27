@@ -228,5 +228,9 @@
 - [x] `.claude/skills/release/SKILL.md`：仓库内发布 skill（步骤/参数/验收闸门/回滚）
 - [x] `tools/make_demo_gif.py` + `docs/img/net-demo.gif`：登录后
       ifconfig/ping/wget 的演示 GIF（README 已嵌入）
+- [x] wasm 后端换成 `c6c --emit-ctu -D C6_WASM=1` + `clang -O2` + `wasm-ld`：
+      整机 20M 条 15.85s → 1.04s（15.2×），浏览器登录 Alpine 1062s → 62s，
+      产物 1.6 MiB → 116 KiB；50M 条与 native MATCH，无 clang 时回退 tcc-c6
+      （DESIGN §97）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）

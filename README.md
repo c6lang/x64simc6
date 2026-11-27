@@ -21,6 +21,12 @@ native 默认走快速构建：`c6c --emit-ctu` 把每个 TU 降成 C，再交�
 没有系统 cc 时自动退回 c6c 自举；也可以用 `C6_PURE=1 ./build.sh native`
 强制自举路径。详细差异见 `docs/DESIGN.md` §84。
 
+wasm 也走同一条思路：`c6c --emit-ctu -D C6_WASM=1` 出 C，`clang -O2` 编成
+wasm32，`wasm-ld` 链上 c6 的 wasm 运行时（`libtcc1-wasm32.a`）。整机引导比
+原来的 tcc-c6 出码快 15～22 倍，浏览器里登录 Alpine 从 18 分钟降到约 1 分钟。
+没有 clang/wasm-ld 时自动退回 tcc-c6，也可以 `WASM_BACKEND=tcc ./build.sh wasm`
+强制。见 `docs/DESIGN.md` §97。
+
 运行手汇编 payload：
 
 ```sh
@@ -171,8 +177,9 @@ python3 tools/make_demo_gif.py --out docs/img/net-demo.gif
 
 ## 已知限制
 
-- 到 `login:` 约需 9 亿～12 亿条 guest 指令：v1.1 默认构建 native 约 1 分钟，
-  `C6_PURE=1` 自举构建约 17 分钟；wasm（tcc-c6 出码）约 11 分钟。
+- 到 `login:` 约需 9 亿～12 亿条 guest 指令：native（`cc -O2`）约 1 分钟，
+  `C6_PURE=1` 自举约 17 分钟；wasm（`clang -O2`）约 1 分钟，tcc-c6 回退约
+  18 分钟。
 - wasm 路径禁用 `interface` / `err` / `f-string` 与自定义 import；64 位一律用
   `unsigned long long`（详见 `docs/DESIGN.md` §13）。
 - SSE 浮点覆盖 `add/sub/mul/div/sqrt`、`min/max`、`cmp*`、shuffle/unpack、
@@ -218,6 +225,8 @@ native 有两条构建路径，源码完全相同：
 （这台机器多人共享，墙钟随负载波动；指令数和串口输出不受影响。
 三种构建的 900M 串口输出逐字节一致，默认构建 300.8G 条宿主指令。）
 
-wasm 仍由 tcc-c6 出码，同一套源码级优化同样受益：20M 条引导 46.1s → 28.2s
-（1.63×），启动阶段少的 19 秒来自不再逐字节清 128MiB RAM。
-具体改了什么、哪些试过但没用，见 `docs/DESIGN.md` §84。
+wasm 也从 tcc-c6 换成了同一套「ctu + `clang -O2` + `wasm-ld`」：20M 条整机引导
+**15.85s → 1.04s（15.2×）**，5M 条 6.55s → 0.29s（22.6×），产物 1.6 MiB →
+116 KiB；headless Chromium 里登录 Alpine 并执行 `uname -m` 从 **1062s 降到
+62s**（Node 里 59s），寄存器/RAM 在 50M 条处与 native MATCH。
+细节见 `docs/DESIGN.md` §97。

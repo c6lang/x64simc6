@@ -24,6 +24,12 @@ typedef double fpu_real;
 typedef long double fpu_real;
 #endif
 
+/* wasm 走「c6c --emit-ctu → clang -O2」时，cpu/mem 里那几处 debug printf
+ * 需要显式声明（native 路径有 <stdio.h>，tcc-c6 容忍隐式声明）。 */
+#if defined(C6_WASM)
+int printf(const char *fmt, ...);
+#endif
+
 
 /* 客户机物理内存布局 */
 #define RAM_SIZE        0x08000000u   /* 128 MiB */
