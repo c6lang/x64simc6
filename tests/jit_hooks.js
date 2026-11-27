@@ -57,7 +57,9 @@ function makeJitEnv(getInst) {
         return rc === 0 ? e.n : -2;
       }
       const fg = inst.exports.jit_flush_count ? inst.exports.jit_flush_count() : 0;
-      if (fg !== lastFlush) {
+      if (lastFlush === -1) {
+        lastFlush = fg;         /* 首次运行：不清刚编译好的映射 */
+      } else if (fg !== lastFlush) {
         byRip.clear();          /* flush（CR0/CR4 变更）后旧 handle 可能已过时 */
         lastFlush = fg;
       }
