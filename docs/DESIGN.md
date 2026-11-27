@@ -1741,3 +1741,97 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     （产物照旧可用，只是慢）。`WASM_CC/WASM_LD/WASM_OPT/WASM_CFLAGS` 可覆盖。
     链接产物仍是 export-all 的 wasm，浏览器 API 一个没变；clang 默认会用到
     bulk-memory 等较新的 wasm 特性，需要近几年的浏览器。
+
+98. **启动加速实测与 wasm JIT 第一版**。
+
+    **(a) 宿主内联（已落地）**。c6c 不做内联，`step()` 经宿主 `cc -O2`
+    编译后约 26 KiB，GCC 不会把 `reg_read/reg_write/cond/flags_add/
+    flags_sub/flags_logic/shift_op/op_read/op_write` 这些 static 小函数
+    内联进巨型 switch；200M 条整机引导里它们约占 12% 的周期。`build.sh`
+    在 c6c 产物上补 `static inline __attribute__((always_inline))`
+    （native 与 wasm 的 ctu 路径都做，`INLINE_HOT=0` 可关闭做对照；
+    C6_PURE 自举路径不经过这里）。
+
+    200M 条 guest、`--stopt=200000000`、固定核：
+
+    | 版本 | 宿主 instructions:u | best-of-3 墙钟 |
+    | --- | --- | --- |
+    | P0 基线 | 74,644,973,526 | 10.8s |
+    | +always_inline | **70,710,388,920（-5.3%）** | **9.6–9.7s（约 -10%）** |
+
+    串口输出 SHA256 完全一致（`2c1da2ba…`）。分项实测：只内联
+    reg_read/reg_write/cond 约 -3%；再加 flags_* 约 -3.3%；把 shift_op 和
+    op_read/op_write 也带上才到 -5.3%。sz_mask/sx/parity/sign_bit 已经被
+    cc 内联，再加反而略慢，所以不在列表里。
+
+    **(b) 两个反例（已回退，记录避免重走）**。
+
+    - 计数摊销：把 `g_m.instructions`/`g_tsc_acc` 放寄存器、循环末尾再写回，
+      宿主指令 70.7G → 68.5G（-3.1%），但墙钟 9.68s → 10.06s（+4%）。
+      原因是 `cpu_step` 调用前后的寄存器压力和栈槽：少掉的两条内存 RMW
+      抵不过多出来的 spill/reload。保留逐条 RMW。
+    - 惰性取指翻译窗口：缓存「下一条顺序取指 VA→PA」并在同页写入时失效。
+      宿主指令 70.7G → 73.1G（+3.3%），墙钟持平；profile 里 `mem_fetch8`
+      仍是 17.90%（窗口前 16.28%）。内核 text 本来就命中
+      `0xffffffff80000000` 的 direct-map 窗口（两次减法+比较），每字节再加
+      「比较/自增/页尾判断」比省下来的还多。只有走 TLB 的取指才可能受益，
+      占比不够。已回退。
+
+    **(c) 客户机侧命令行（未改默认）**。到 login 的整机墙钟（`--stopt=
+    1500000000`，均 51–52s）：基线 51.72s、`lpj=1000` 51.30s、
+    `nokaslr` 51.90s，差异都在噪声内。`Calibrating delay loop` 本身只占
+    一个 jiffy，560–780M 处的 `delay_loop` 是设备轮询等待而不是
+    `__const_udelay` 的 lpj 循环，所以预设 lpj 省不掉；KASLR 也不是大头。
+    没有把这些参数写进默认 `BOOT_ARGS`。
+
+    **(d) wasm JIT 第一版（实验构建，默认关闭）**。
+
+    目标是在浏览器/Node 的 wasm 构建里把热客户机直线块编译成**动态 wasm
+    模块**，native 继续用解释器——只做一个后端，不写第二套 x86-64 宿主 JIT。
+
+    链路：
+
+    - `JIT=1 ./build.sh wasm` 额外编译 `src/jit_wasm.c`，链接时加
+      `--allow-undefined`；生成模块只 import `js_jit_compile/js_jit_run`
+      两个 JS 钩子。
+    - C6 侧 `sim_jit_block(rip)`（`src/wasm.c6`）调 C 编码器。编码器从
+      `g_m.ram` 逐字节解码 1–16 条客户机指令，在静态 `jit_mod[]` 里拼出
+      wasm 二进制：type/import/function/export/code 五段，导出
+      `run(state_off, ram_off) -> i32`。
+    - JS 钩子用 `new WebAssembly.Module(bytes)` + `new Instance(..., {env:
+      {memory: 主模块 memory, jit_flags_*}})` 实例化；生成模块与主模块
+      **共享同一块线性内存**。CPU 字段偏移用 `offsetof` 在 C 侧算好、
+      烧成 wasm 常量，和 c6sim.h 的布局同源。
+    - `js_jit_run` 调 `run()`；块尾把 RIP 写回 `state + offsetof(cpu.rip)`。
+    - 标志位不自算：生成代码 `call` 主模块导出的
+      `jit_flags_add/sub/logic/inc/dec` 包装，复用 `cpu.c6` 里唯一一份
+      `flags_*` 语义（inc/dec 会恢复 CF）。这样编码器只负责寄存器数据通路。
+
+    当前指令子集：`mov r32,imm32`、`mov r32,r32`、`add/sub/and/or/xor/cmp
+    r32,r32`、`81/83` 的 add/sub/cmp r32,imm、`inc/dec r32`、`nop`；遇到
+    内存操作数、分支、前缀、未支持 opcode 或页边界就收块。每次调用现场
+    编译（POC，还没有块缓存）。
+
+    验收：`./build.sh jit`（自动 `JIT=1` 构建 + 两个 Node 测试）。
+    `tests/jit_poc.js` 覆盖 6 个 imm 的 mov（含 0xdeadbeef/0xffffffff）；
+    `tests/jit_block.js` 用 12 条指令跑完整块，16 个 GPR、RFLAGS、RIP
+    与解释器 `sim_run(12)` 逐位一致（PASS，rax=6、rcx=0xffffffff、
+    flags=0x96、rip=0x101e）。默认 `JIT=0` 的 `web/sim.wasm` 仍是零 import；
+    `wasm_cmp 50M` MATCH、`./build.sh test`、`boot_login.py` 全过。
+
+    **还没做**（下一步）：分支与内存操作数、按 RIP 索引的块缓存、接入
+    `machine_run` 的 `dev_tick`/指令计数/TSC/中断边界、SMC 的页代数失效、
+    批量编译以减少 JS↔wasm 切换。当前块只在测试入口执行，不参与整机引导。
+
+    **(e) 复现命令**：
+
+    ```sh
+    ./build.sh native
+    perf stat -e instructions:u,cycles:u -o /tmp/p.txt \
+      taskset -c 20 build/sim --stopt=200000000 \
+      --cmdline="console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off" \
+      build/firmware.bin > /tmp/serial.bin
+    JIT=1 ./build.sh wasm && node tests/jit_poc.js && node tests/jit_block.js
+    ./build.sh test && node tests/wasm_cmp.js 50000000
+    SIM=build/sim TIMEOUT=1200 python3 tools/boot_login.py
+    ```

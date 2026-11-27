@@ -323,6 +323,40 @@ static void flags_sub(struct CPUState *c, u64 a, u64 b, u64 res, int s)
     c->flags = f | 2;
 }
 
+#if defined(C6_JIT)
+/* wasm JIT 生成代码通过 import 调回这里，复用唯一的一份 flags_* 语义。
+ * 生成端只传 32 位操作数（零扩展）和 32 位结果，所以 s=4。
+ * inc/dec 不影响 CF：调用 flags_add/sub 后把 CF 恢复。 */
+void jit_flags_add(u64 a, u64 b, u64 res)
+{
+    flags_add(&g_m.cpu, a, b, res, 4, 0);
+}
+
+void jit_flags_sub(u64 a, u64 b, u64 res)
+{
+    flags_sub(&g_m.cpu, a, b, res, 4);
+}
+
+void jit_flags_logic(u64 r)
+{
+    flags_logic(&g_m.cpu, r, 4);
+}
+
+void jit_flags_inc(u64 a, u64 res)
+{
+    u64 cf = g_m.cpu.flags & RF_CF;
+    flags_add(&g_m.cpu, a, 1, res, 4, 0);
+    g_m.cpu.flags = (g_m.cpu.flags & ~RF_CF) | cf;
+}
+
+void jit_flags_dec(u64 a, u64 res)
+{
+    u64 cf = g_m.cpu.flags & RF_CF;
+    flags_sub(&g_m.cpu, a, 1, res, 4);
+    g_m.cpu.flags = (g_m.cpu.flags & ~RF_CF) | cf;
+}
+#endif
+
 static int cond(struct CPUState *c, u32 n)
 {
     u64 f = c->flags;

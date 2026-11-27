@@ -225,3 +225,61 @@ u64 sim_dbg_loopshl(u64 v, u64 n)
     }
     return r;
 }
+
+/* ---- wasm JIT POC 入口（JIT=1 构建时 jit_wasm.c 提供 jit_poc）----
+ * 只用于链路验证：把当前 RIP 处的一条 mov eax,imm32 编译成 wasm 块并执行。
+ * 返回值 0 = 成功，负值是编码/编译/执行失败的阶段号。 */
+int sim_jit_poc(u64 rip)
+{
+#if defined(C6_JIT)
+    g_m.cpu.cr[0] = 0;      /* POC 用物理地址直接跑，避开分页 */
+    return jit_poc(rip);
+#else
+    (void)rip;
+    return -99;             /* 默认构建未链接 jit_wasm.c */
+#endif
+}
+
+int sim_jit_block(u64 rip)
+{
+#if defined(C6_JIT)
+    g_m.cpu.cr[0] = 0;      /* POC 用物理地址直接跑，避开分页 */
+    return jit_block(rip);
+#else
+    (void)rip;
+    return -99;             /* 默认构建未链接 jit_wasm.c */
+#endif
+}
+
+u64 sim_get_flags(void)
+{
+    return g_m.cpu.flags;
+}
+
+void sim_set_flags(u64 v)
+{
+    g_m.cpu.flags = v;
+}
+
+u64 sim_get_reg(int i)
+{
+    if (i < 0 || i > 15)
+        return 0;
+    return g_m.cpu.r[i];
+}
+
+void sim_set_reg(int i, u64 v)
+{
+    if (i >= 0 && i < 16)
+        g_m.cpu.r[i] = v;
+}
+
+void sim_set_rip(u64 v)
+{
+    g_m.cpu.rip = v;
+}
+
+u64 sim_get_rip(void)
+{
+    return g_m.cpu.rip;
+}

@@ -240,3 +240,21 @@
       `web/` 站点（<https://c6lang.github.io/x64simc6/> 已部署）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）
+
+## 阶段 12 —— 启动加速与 wasm JIT（2026-11）
+
+- [x] 宿主内联：`build.sh` 在 ctu 产物上给 `reg_read/reg_write/cond/flags_*/
+      shift_op/op_read/op_write` 补 `always_inline`；200M 条整机引导
+      74.6G → 70.7G 宿主指令（-5.3%），墙钟约 -10%，串口输出一致
+      （DESIGN §98a）
+- [x] 反例：计数摊销（宿主 -3.1% 但墙钟 +4%）、惰性取指窗口（宿主 +3.3%、
+      墙钟持平、`mem_fetch8` 仍 17.9%）均已回退；guest cmdline 的
+      `lpj=1000`/`nokaslr` 在噪声内，不改默认（§98b/c）
+- [x] wasm JIT POC：C 编码器生成 wasm 模块、JS 钩子共享线性内存、
+      `mov r32,imm32` 与解释器对拍（`tests/jit_poc.js`）
+- [x] wasm JIT 直线块：mov/ALU/inc/dec/nop + `jit_flags_*` 复用，
+      12 条指令的 16 GPR/RFLAGS/RIP 全部对拍（`tests/jit_block.js`，
+      `./build.sh jit`）
+- [ ] JIT 接入 `machine_run`：按 RIP 的块缓存、dev_tick/指令计数/TSC/
+      中断边界、未覆盖指令回退、SMC 页代数失效
+- [ ] JIT 指令子集扩展：jcc/jmp、内存操作数、REX/64 位、常用 SSE

@@ -249,6 +249,19 @@ int machine_boot_payload(u8 *code, u32 len, u64 addr);
 int machine_run(u64 count);
 void machine_set_cmdline(const char *s);
 
+#if defined(C6_JIT)
+/* jit_wasm.c：wasm 后端 JIT 编码器（默认构建不链接，JIT=1 时启用） */
+int jit_poc(u64 rip);
+int jit_block(u64 rip);
+
+/* cpu.c6：给 wasm JIT 生成代码复用的标志位实现 */
+void jit_flags_add(u64 a, u64 b, u64 res);
+void jit_flags_sub(u64 a, u64 b, u64 res);
+void jit_flags_logic(u64 r);
+void jit_flags_inc(u64 a, u64 res);
+void jit_flags_dec(u64 a, u64 res);
+#endif
+
 /* mem.c6 */
 u8 mem_fetch8(u64 a);
 u8 mem_r8(u64 a);

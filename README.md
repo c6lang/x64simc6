@@ -14,6 +14,7 @@ wasm 后端改用 `clang -O2` 后，浏览器里登录 Alpine 也从 18 分钟�
 ```sh
 ./build.sh all        # native build/sim + web/sim.wasm
 ./build.sh test       # native payload、单元测试、wasm payload 冒烟
+./build.sh jit        # JIT=1 构建 wasm，跑 POC 与直线块对拍
 ./tests/smoke.sh      # 上面的全部检查 + headless Chromium 端到端
 ```
 
@@ -27,6 +28,11 @@ wasm32，`wasm-ld` 链上 c6 的 wasm 运行时（`libtcc1-wasm32.a`）。整机
 原来的 tcc-c6 出码快 15～22 倍，浏览器里登录 Alpine 从 18 分钟降到约 1 分钟。
 没有 clang/wasm-ld 时自动退回 tcc-c6，也可以 `WASM_BACKEND=tcc ./build.sh wasm`
 强制。见 `docs/DESIGN.md` §97。
+
+另有一个实验性的 wasm JIT（`JIT=1` / `./build.sh jit`）：把热直线块现场
+编译成动态 wasm 模块，与主模块共享线性内存；标志位不在生成代码里重算，
+而是调用主模块导出的 `jit_flags_*`，保证与解释器逐位一致。默认构建不
+链接它，目前只覆盖无分支/无内存操作数的指令子集（DESIGN §98d）。
 
 运行手汇编 payload：
 
@@ -158,6 +164,7 @@ ICMP 的缓冲都在 `net_tick()` 里推进，`dev_tick()` 负责把 COM2 的 RX
 
 ```sh
 ./build.sh test                                   # 5 项：payload/单元/CPL3/C6SIM64/wasm 冒烟
+./build.sh jit                                    # wasm JIT POC + 12 条直线块对拍
 SIM=build/sim python3 tools/difftest/difftest.py  # 1236 条指令级差分用例
 node tests/browser_e2e.js                         # fetch/Cache Storage/IndexedDB/hostfs
 node tests/browser_alpine.js                      # 浏览器里跑到 login 并自动登录
@@ -241,4 +248,9 @@ wasm 也从 tcc-c6 换成了同一套「ctu + `clang -O2` + `wasm-ld`」：20M �
 **15.85s → 1.04s（15.2×）**，5M 条 6.55s → 0.29s（22.6×），产物 1.6 MiB →
 116 KiB；headless Chromium 里登录 Alpine 并执行 `uname -m` 从 **1062s 降到
 62s**（Node 里 59s），寄存器/RAM 在 50M 条处与 native MATCH。
+
+2026-11 的宿主内联改动（DESIGN §98a）：200M 条整机引导的宿主指令
+**74.6G → 70.7G（-5.3%）**，best-of-3 墙钟 10.8s → 9.6–9.7s，串口输出
+逐字节一致。计数摊销与惰性取指窗口两个反例（宿主指令更少/更多、墙钟
+都没赢）记在 §98b；实验性的 wasm JIT 见 §98d。
 细节见 `docs/DESIGN.md` §97。

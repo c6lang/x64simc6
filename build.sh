@@ -23,6 +23,9 @@ CC=${CC:-cc}
 # 见 DESIGN §84）。要试别的就 OPT="-O3" ./build.sh native。
 OPT=${OPT:--O2}
 C6_PURE=${C6_PURE:-0}
+# JIT=1：把 src/jit_wasm.c 编进 wasm 模块，并允许 js_jit_compile/js_jit_run
+# 两个 undefined 符号成为 JS import（POC/实验构建；默认关闭保持零 import）。
+JIT=${JIT:-0}
 
 CORE="src/mem.c6 src/dev.c6 src/fpu.c6 src/cpu.c6 src/boot.c6 src/machine.c6 src/host.c6 src/net.c6"
 
@@ -33,6 +36,7 @@ usage() {
   wasm    生成 web/sim.wasm（浏览器用）
   fw      调用 tools/mkfw.py 生成 firmware.bin
   test    跑 c6 test 块与 payload 冒烟
+  jit     用 JIT=1 构建 wasm，并跑 tests/jit_poc.js + tests/jit_block.js
   clean   删除 build/ 与 web/sim.wasm
 环境变量:
   C6_PURE=1  跳过快速路径，直接用 c6c 生成 build/sim（自举验证用）
@@ -42,6 +46,8 @@ usage() {
   WASM_BACKEND=auto|clang|tcc  wasm 后端（默认 auto：有 clang+wasm-ld 就 -O2）
   WASM_CC=... / WASM_LD=...    clang / wasm-ld 路径（默认取 PATH）
   WASM_OPT=...                 wasm 优化级别（默认 -O2）
+  INLINE_HOT=0                 关闭 ctu 产物的热点小函数 always_inline（对照用）
+  JIT=1                        wasm 构建链接 jit_wasm.c（需要 clang/wasm-ld）
 EOF
 }
 
@@ -65,6 +71,28 @@ open(p, 'w').write(s)
 PY
 }
 
+# c6c 不做内联，`step()` 经宿主 cc -O2 编译后约 26 KiB，GCC 不会把这些
+# static 小函数内联进巨型 switch；它们占了 200M 整机引导约 12% 的周期。
+# 这里在 ctu 产物上补 always_inline（只影响默认快速构建，C6_PURE 自举路径
+# 不经过这里）。实测 200M 条：宿主指令 74.6G -> 70.7G，墙钟约 -10%；
+# 只加 reg_read/reg_write/cond/flags_* 时约 -3%，把 shift_op 和
+# op_read/op_write 也带上才到 -10%。sz_mask/sx/parity 已经会被 cc 内联，
+# 再加反而略慢，所以不在列表里。INLINE_HOT=0 可关闭做对照。
+ctu_inline() {
+    [ "${INLINE_HOT:-1}" = "1" ] || return 0
+    python3 - "$1" <<'PY'
+import re, sys
+names = ('reg_read|reg_write|cond|flags_add|flags_sub|flags_logic|'
+         'shift_op|op_read|op_write')
+pat = re.compile(r'^static ([A-Za-z0-9_]+) (' + names + r')\(', re.M)
+p = sys.argv[1]
+s = open(p).read()
+s2 = pat.sub(r'static inline __attribute__((always_inline)) \1 \2(', s)
+if s2 != s:
+    open(p, 'w').write(s2)
+PY
+}
+
 # 快速路径：每个 TU 各自 --emit-ctu → 宿主 cc -O2 → 一次性链接
 native_fast() {
     mkdir -p build/ctu
@@ -72,6 +100,7 @@ native_fast() {
         n=$(basename "$f" .c6)
         "$C6C" --emit-ctu -I src "$f" -o "build/ctu/$n.c"
         ctu_fixup "build/ctu/$n.c"
+        ctu_inline "build/ctu/$n.c"
         "$CC" $OPT -w -c -I src "build/ctu/$n.c" -o "build/ctu/$n.o"
     done
     "$CC" $OPT -o build/sim build/ctu/*.o -lm
@@ -114,17 +143,32 @@ wasm() {
     if [ "$WANT_CLANG" = "1" ]; then
         rm -rf build/ctu-wasm
         mkdir -p build/ctu-wasm
+        JIT_DEF=""
+        if [ "$JIT" = "1" ]; then JIT_DEF="-D C6_JIT=1"; fi
         for f in $CORE src/hostfs.c6 src/wasm.c6; do
             b=$(basename "$f" .c6)
-            "$C6C" --emit-ctu -D C6_WASM=1 -I src "$f" -o "build/ctu-wasm/$b.c"
+            "$C6C" --emit-ctu -D C6_WASM=1 $JIT_DEF -I src "$f" -o "build/ctu-wasm/$b.c"
+            ctu_inline "build/ctu-wasm/$b.c"
             "$WASM_CC" --target=wasm32-unknown-unknown $WASM_CFLAGS "$WASM_OPT" \
                 -c "build/ctu-wasm/$b.c" -o "build/ctu-wasm/$b.o"
         done
-        "$WASM_LD" --no-entry --export-all \
-            --initial-memory=268435456 --max-memory=536870912 \
-            -o web/sim.wasm build/ctu-wasm/*.o "$TCCDIR/libtcc1-wasm32.a"
-        echo "wasm: web/sim.wasm ($(wc -c < web/sim.wasm) bytes, $WASM_CC $WASM_OPT)"
+        if [ "$JIT" = "1" ]; then
+            "$WASM_CC" --target=wasm32-unknown-unknown $WASM_CFLAGS "$WASM_OPT" \
+                -D C6_WASM=1 -D C6_JIT=1 -I src -c src/jit_wasm.c -o build/ctu-wasm/jit_wasm.o
+            "$WASM_LD" --no-entry --export-all --allow-undefined \
+                --initial-memory=268435456 --max-memory=536870912 \
+                -o web/sim.wasm build/ctu-wasm/*.o "$TCCDIR/libtcc1-wasm32.a"
+        else
+            "$WASM_LD" --no-entry --export-all \
+                --initial-memory=268435456 --max-memory=536870912 \
+                -o web/sim.wasm build/ctu-wasm/*.o "$TCCDIR/libtcc1-wasm32.a"
+        fi
+        echo "wasm: web/sim.wasm ($(wc -c < web/sim.wasm) bytes, $WASM_CC $WASM_OPT, JIT=$JIT)"
     else
+        if [ "$JIT" = "1" ]; then
+            echo "wasm: JIT=1 需要 clang + wasm-ld + libtcc1-wasm32.a" >&2
+            exit 1
+        fi
         TCC_CCFLAGS="$WASM_FLAGS" "$TCC" -B "$TCCDIR" -DC6_WASM=1 -I src --target=wasm32-unknown-unknown \
             -o web/sim.wasm $CORE src/hostfs.c6 src/wasm.c6
         echo "wasm: web/sim.wasm ($(wc -c < web/sim.wasm) bytes, tcc-c6)"
@@ -166,6 +210,7 @@ wasm) wasm ;;
 all) native; wasm ;;
 fw) shift; fw "$@" ;;
 test) test_all ;;
+jit) JIT=1 wasm; node tests/jit_poc.js; node tests/jit_block.js ;;
 clean) rm -rf build web/sim.wasm; echo "cleaned" ;;
 -h|--help|help) usage ;;
 *) echo "unknown target: $1" >&2; usage; exit 2 ;;
