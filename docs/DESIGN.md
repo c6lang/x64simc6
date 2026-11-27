@@ -1945,11 +1945,17 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     （指令实际是 `and rdi,[rip+0x153d503]`）定位；改成
     `(op>>1)&1` 后 50M MATCH、900M 串口一致。
 
-    当前覆盖与性能：900M 里 JIT 执行 22.3M 条（2.5%）、489 次编译、
-    14.4M 次块执行；JIT 开 67.8s vs 关 55.6s（+22%）。瓶颈仍是每条
-    缓存块一次 wasm↔JS 切换、内存访问的两个 import 调用，以及子集还
-    缺 push/pop/call/ret/shift/imul。下一步：栈操作与 call/ret（带故障
-    回滚）、内联 flags/条件、修好后的批量链式。默认发布构建仍是 JIT=0。
+    栈操作与调用（本轮补上）：push r64/imm8/imm32/r/m64、pop r64、
+    call rel32、ret、leave。栈访问走 `jit_ld`/`jit_st`；RSP 只在存储/
+    加载成功后更新，缺页时保持原值，和解释器的同步故障回滚一致；
+    call/ret 作为块结束并自己写 RIP。
+
+    当前覆盖与性能：900M 里 JIT 执行 29.9M 条（3.4%）、648 次编译、
+    19.1M 次块执行；JIT 开 68.8s vs 关 55.6s（+24%）。覆盖率比只有
+    内存时翻倍，但每块一次 wasm↔JS 切换（约 19M 次）仍是主要成本，
+    还没到净赢。下一步：shift/imul/movsxd/setcc/cmov/常用 SSE 与
+    rep string ops（继续提覆盖）、生成代码内联 flags、批量链式。默认
+    发布构建仍是 JIT=0。
 
     复现：
 

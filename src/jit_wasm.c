@@ -152,6 +152,7 @@ enum {
     J_NOP = 1, J_MOVI, J_MOVMI, J_MOVRR, J_MOVRM, J_MOVMR,
     J_ADD, J_SUB, J_AND, J_OR, J_XOR, J_CMP, J_TEST,
     J_INC, J_DEC, J_LEA, J_MOVZX, J_MOVSX,
+    J_PUSH, J_POP, J_CALL, J_RET, J_LEAVE,
     J_JMP, J_JCC
 };
 
@@ -161,7 +162,8 @@ struct JIns {
     u8 src;
     u8 sz;       /* 4 或 8 */
     u8 is_imm;
-    u8 branch;   /* 1 = 块的最后一条是分支 */
+    u8 branch;   /* 1 = 块的最后一条是 jmp/jcc */
+    u8 callret;  /* 1 = call/ret，块结束并自己写 RIP */
     u8 cc;       /* jcc 条件码 */
     u8 base;     /* LEA: 0xff = 无 */
     u8 index;    /* LEA: 0xff = 无 */
@@ -428,6 +430,23 @@ static int jit_decode_one(u64 p, struct JIns *in)
         u32 sub = 0;
         mrm = (u8)jit_mr8(p + pos + 1);
         sub = (mrm >> 3) & 7;
+        if (sub == 6) {                   /* push r/m64 */
+            if ((mrm & 0xc0) == 0xc0) {
+                in->op = J_PUSH;
+                in->dst = (u8)((mrm & 7) | ((rex & 1) ? 8 : 0));
+                in->sz = 8;
+                in->len = pos + 2;
+                return 1;
+            }
+            if (!jit_parse_mem(p, pos + 1, rex, in))
+                return 0;
+            in->op = J_PUSH;
+            in->mem = 1;
+            in->mem_src = 1;
+            in->mem_sz = 8;
+            in->sz = 8;
+            return 1;
+        }
         if ((mrm & 0xc0) != 0xc0) {
             if (sub != 0 && sub != 1)
                 return 0;
@@ -487,6 +506,52 @@ static int jit_decode_one(u64 p, struct JIns *in)
             if (sz == 8) in->imm = (u64)(i64)(i32)(u32)in->imm;
             in->len += 4;
         }
+        return 1;
+    }
+    if (op >= 0x50 && op <= 0x57) {       /* push r64 */
+        in->op = J_PUSH;
+        in->dst = (u8)((op & 7) | ((rex & 1) ? 8 : 0));
+        in->sz = 8;
+        in->len = pos + 1;
+        return 1;
+    }
+    if (op >= 0x58 && op <= 0x5f) {       /* pop r64 */
+        in->op = J_POP;
+        in->dst = (u8)((op & 7) | ((rex & 1) ? 8 : 0));
+        in->sz = 8;
+        in->len = pos + 1;
+        return 1;
+    }
+    if (op == 0x6a || op == 0x68) {       /* push imm8/imm32 */
+        in->op = J_PUSH;
+        in->is_imm = 1;
+        in->sz = 8;
+        if (op == 0x6a) {
+            in->imm = (u64)(i64)(i8)jit_mr8(p + pos + 1);
+            in->len = pos + 2;
+        } else {
+            in->imm = (u64)(i64)(i32)jit_rd32(p + pos + 1);
+            in->len = pos + 5;
+        }
+        return 1;
+    }
+    if (op == 0xe8) {                     /* call rel32 */
+        i64 d = (i64)(i32)jit_rd32(p + pos + 1);
+        in->op = J_CALL;
+        in->callret = 1;
+        in->len = pos + 5;
+        in->target = (u64)((i64)p + (i64)in->len + d);
+        return 1;
+    }
+    if (op == 0xc3) {                     /* ret */
+        in->op = J_RET;
+        in->callret = 1;
+        in->len = pos + 1;
+        return 1;
+    }
+    if (op == 0xc9) {                     /* leave */
+        in->op = J_LEAVE;
+        in->len = pos + 1;
         return 1;
     }
     if (op == 0xeb || op == 0xe9) {
@@ -569,7 +634,7 @@ static int jit_decode_block(u64 rip, struct JIns *ins, u64 *end)
         ins[n] = t;
         n++;
         p += (u64)len;
-        if (t.branch)
+        if (t.branch || t.callret)
             break;
     }
     *end = p;
@@ -662,10 +727,13 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
     u32 rax_off = (u32)offsetof(struct Machine, cpu.r[0]);
     u32 rip_off = (u32)offsetof(struct Machine, cpu.rip);
     u32 fl_off = (u32)offsetof(struct Machine, cpu.flags);
+    u32 rsp_off = rax_off + 4u * 8u;
+    u32 rbp_off = rax_off + 5u * 8u;
     struct WBuf out = { jit_mod, 0, JIT_MOD_MAX };
     struct WBuf b;
     int k = 0;
     int has_branch = 0;
+    int has_term = 0;
 
     wb_u8(&out, 0x00); wb_u8(&out, 0x61); wb_u8(&out, 0x73); wb_u8(&out, 0x6d);
     wb_u8(&out, 0x01); wb_u8(&out, 0x00); wb_u8(&out, 0x00); wb_u8(&out, 0x00);
@@ -856,6 +924,51 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
             e_set(&b, 4);
             e_get(&b, 4); e_i32_const(&b, x->sz); e_call(&b, 2);
             break;
+        case J_PUSH:
+            if (x->mem) { e_get(&b, 6); e_set(&b, 4); }
+            else if (x->is_imm) { e_i64_const(&b, x->imm); e_set(&b, 4); }
+            else { e_load64(&b, d); e_set(&b, 4); }
+            e_load64(&b, rsp_off); e_i64_const(&b, 8); wb_u8(&b, 0x7d); e_set(&b, 5);
+            e_get(&b, 5); e_get(&b, 4); e_i64_const(&b, 8); e_i64_const(&b, x->rip);
+            e_call(&b, 7);
+            e_fault_check(&b, rip_off, x->rip, k);
+            e_addr(&b, rsp_off); e_get(&b, 5); e_store64(&b);
+            break;
+        case J_POP:
+            e_load64(&b, rsp_off); e_set(&b, 5);
+            e_get(&b, 5); e_i64_const(&b, 8); e_call(&b, 6); e_set(&b, 6);
+            e_fault_check(&b, rip_off, x->rip, k);
+            e_addr(&b, d); e_get(&b, 6); e_store64(&b);
+            e_addr(&b, rsp_off); e_get(&b, 5); e_i64_const(&b, 8);
+            wb_u8(&b, 0x7c); e_store64(&b);
+            break;
+        case J_CALL:
+            has_term = 1;
+            e_i64_const(&b, x->rip + (u64)x->len); e_set(&b, 4);
+            e_load64(&b, rsp_off); e_i64_const(&b, 8); wb_u8(&b, 0x7d); e_set(&b, 5);
+            e_get(&b, 5); e_get(&b, 4); e_i64_const(&b, 8); e_i64_const(&b, x->rip);
+            e_call(&b, 7);
+            e_fault_check(&b, rip_off, x->rip, k);
+            e_addr(&b, rsp_off); e_get(&b, 5); e_store64(&b);
+            e_addr(&b, rip_off); e_i64_const(&b, x->target); e_store64(&b);
+            break;
+        case J_RET:
+            has_term = 1;
+            e_load64(&b, rsp_off); e_set(&b, 5);
+            e_get(&b, 5); e_i64_const(&b, 8); e_call(&b, 6); e_set(&b, 6);
+            e_fault_check(&b, rip_off, x->rip, k);
+            e_addr(&b, rip_off); e_get(&b, 6); e_store64(&b);
+            e_addr(&b, rsp_off); e_get(&b, 5); e_i64_const(&b, 8);
+            wb_u8(&b, 0x7c); e_store64(&b);
+            break;
+        case J_LEAVE:
+            e_load64(&b, rbp_off); e_set(&b, 5);
+            e_get(&b, 5); e_i64_const(&b, 8); e_call(&b, 6); e_set(&b, 6);
+            e_fault_check(&b, rip_off, x->rip, k);
+            e_addr(&b, rbp_off); e_get(&b, 6); e_store64(&b);
+            e_addr(&b, rsp_off); e_get(&b, 5); e_i64_const(&b, 8);
+            wb_u8(&b, 0x7c); e_store64(&b);
+            break;
         default:
             /* 二操作数 ALU */
             if (x->mem_dst) { e_get(&b, 6); e_set(&b, 2); }
@@ -910,7 +1023,7 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
             wb_u8(&b, 0x1b);          /* select */
             e_store64(&b);
         }
-    } else {
+    } else if (!has_term) {
         e_addr(&b, rip_off); e_i64_const(&b, end_rip); e_store64(&b);
     }
     e_i32_const(&b, 0);
@@ -952,7 +1065,7 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
         return -1;
     h = js_jit_compile((u32)(unsigned long)jit_mod, len,
                        (u32)rip, (u32)(rip >> 32), (u32)n,
-                       *pa_page, *gen, (u32)ins[n - 1].branch);
+                       *pa_page, *gen, (u32)(ins[n - 1].branch || ins[n - 1].callret));
     if (h < 0)
         return -1;
     jit_compiles++;
@@ -1099,7 +1212,7 @@ int jit_block(u64 rip)
     }
     h = js_jit_compile((u32)(unsigned long)jit_mod, len,
                        (u32)rip, (u32)(rip >> 32), (u32)n, pg, gen,
-                       (u32)ins[n - 1].branch);
+                       (u32)(ins[n - 1].branch || ins[n - 1].callret));
     if (h < 0)
         return -4;
     if (js_jit_run(h, (u32)(unsigned long)&g_m,

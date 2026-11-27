@@ -264,6 +264,8 @@
       默认仍单块直跑，`JIT_CHAIN_FALL=0` 保留为诊断开关
 - [x] JIT 内存操作数与缺页回退：mov/ALU 两方向/cmp/test/inc/movzx/
       movsx 的 [mem] 形式，base/index*scale+disp/RIP 相对；50M MATCH、
-      900M 串口与指令数一致（commit 待记）
-- [ ] JIT 栈操作与调用：push/pop/call/ret（含故障回滚）、shift/imul
+      900M 串口与指令数一致（commit 6eca7cd）
+- [x] JIT 栈操作与调用：push/pop/call/ret/leave（含故障回滚）；
+      900M JIT 执行 29.9M 条（3.4%），开/关串口一致
+- [ ] JIT 子集再扩：shift/imul/movsxd/setcc/cmov/常用 SSE、rep string ops
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用
