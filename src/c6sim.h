@@ -250,6 +250,47 @@ int machine_boot_payload(u8 *code, u32 len, u64 addr);
 int machine_run(u64 count);
 void machine_set_cmdline(const char *s);
 
+#if defined(C6_JIT)
+/* jit_wasm.c：wasm 后端 JIT 编码器（默认构建不链接，JIT=1 时启用） */
+int jit_poc(u64 rip);
+int jit_block(u64 rip);
+int jit_try(u64 rip);
+int jit_try2(u64 rip, u32 max_ins);
+int jit_try_sample(u64 rip, u32 max_ins);
+int jit_compile_only(u64 rip);
+void jit_flush(void);
+void jit_set_on(int v);
+void jit_set_window(u64 lo, u64 hi);
+extern int g_jit_on;
+extern u8 g_jit_bad[524288];
+extern u8 g_jit_good[524288];
+extern int g_jit_trace;
+extern u32 g_jit_trace_n;
+extern u64 g_jit_bad_boundary;
+extern u64 g_jit_bad_budget;
+
+/* mem.c6：按物理页的写代数，JIT 用它做 SMC 失效 */
+extern u32 jit_page_gen[32768];
+
+/* cpu.c6：给 wasm JIT 生成代码复用的标志位/条件实现 */
+void jit_flags_add(u64 a, u64 b, u64 res, int s);
+void jit_flags_sub(u64 a, u64 b, u64 res, int s);
+void jit_flags_logic(u64 r, int s);
+void jit_flags_inc(u64 a, u64 res, int s);
+void jit_flags_dec(u64 a, u64 res, int s);
+int jit_cond(u64 flags, u64 cc);
+u64 jit_ld(u64 a, u64 sz);
+void jit_st(u64 a, u64 v, u64 sz, u64 rip);
+int jit_faulted(void);
+u64 jit_shift(int fn, u64 val, u64 cnt, int s);
+u64 jit_imul(u64 a, u64 b, int s);
+u64 jit_stat(int i);
+int jit_synth_chain(u64 a, u64 b, u32 ia, u32 ib, u32 mode);
+void jit_set_trace(int v);
+void jit_set_mask(int v);
+extern int g_jit_mask;
+#endif
+
 /* mem.c6 */
 u8 mem_fetch8(u64 a);
 u8 mem_r8(u64 a);

@@ -9,6 +9,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { makeJitEnv } = require('./jit_hooks');
 const ROOT = path.dirname(__dirname);
 const MAX = Number(process.env.MAX_INSNS || 3000000000);
 const CHUNK = Number(process.env.CHUNK || 2000000);
@@ -19,9 +20,14 @@ const CAP = 1 << 16;
 
 (async () => {
   const fw = fs.readFileSync(path.join(ROOT, 'build', 'firmware.bin'));
-  const { instance } = await WebAssembly.instantiate(
-    fs.readFileSync(path.join(ROOT, 'web', 'sim.wasm')), {});
+  const mod = new WebAssembly.Module(fs.readFileSync(path.join(ROOT, 'web', 'sim.wasm')));
+  const hasJit = WebAssembly.Module.imports(mod).some(
+    (i) => i.module === 'env' && i.name === 'js_jit_compile');
+  let instance = null;
+  const jit = makeJitEnv(() => instance);
+  instance = await WebAssembly.instantiate(mod, hasJit ? { env: jit.env } : {});
   const w = instance.exports;
+  if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
   const mem = new Uint8Array(w.memory.buffer);
   if (STAGE + fw.length > mem.length) throw new Error('stage overflow');
   mem.set(fw, STAGE);
@@ -71,6 +77,10 @@ const CAP = 1 << 16;
   const insns = Number(w.sim_insns());
   const ok = text.indexOf('MARK-OK') >= 0;
   if (process.env.SERIAL_OUT) fs.writeFileSync(process.env.SERIAL_OUT, text);
+  if (hasJit) {
+    console.log(`[wasm_login] jit runs=${w.sim_jit_stat(0)} hits=${w.sim_jit_stat(1)} ` +
+                `compiles=${w.sim_jit_stat(3)} insns=${w.sim_jit_stat(6)}`);
+  }
   console.log(`[wasm_login] insns=${insns} text=${text.length}B ` +
               `loops=${loops} 用时=${((Date.now() - t0) / 1000).toFixed(0)}s`);
   console.log(ok ? 'WASM LOGIN OK (MARK-OK)' : 'WASM LOGIN 未达成');

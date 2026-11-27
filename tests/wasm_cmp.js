@@ -9,6 +9,7 @@
  */
 const fs = require('fs');
 const { execFileSync } = require('child_process');
+const { makeJitEnv } = require('./jit_hooks');
 
 const N = Number(process.argv[2] || 1000000);
 const QUIET = process.argv.includes('--quiet');
@@ -52,8 +53,13 @@ function nativeSnapshot() {
 async function wasmSnapshot() {
   const buf = fs.readFileSync('web/sim.wasm');
   const mod = await WebAssembly.compile(buf);
-  const inst = await WebAssembly.instantiate(mod, {});
+  const imports = WebAssembly.Module.imports(mod);
+  const hasJit = imports.some((i) => i.module === 'env' && i.name === 'js_jit_compile');
+  let inst = null;
+  const jit = makeJitEnv(() => inst);
+  inst = await WebAssembly.instantiate(mod, hasJit ? { env: jit.env } : {});
   const w = inst.exports;
+  if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
   const STAGE = 0x0d800000;
   const fw = new Uint8Array(fs.readFileSync(FW));
   const mem = new Uint8Array(w.memory.buffer);
@@ -63,6 +69,8 @@ async function wasmSnapshot() {
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
   w.sim_set_stopt(BigInt(N));
+  if (hasJit && process.env.JIT_TRACE === '1' && w.sim_set_jit_trace) w.sim_set_jit_trace(1);
+  if (hasJit && process.env.JIT_MASK && w.sim_set_jit_mask) w.sim_set_jit_mask(Number(process.env.JIT_MASK));
   // 一次跑够；里面会在 stopt 处自己停
   let guard = 0;
   while (Number(w.sim_insns()) < N && guard++ < 2000) w.sim_run(2000000);
@@ -90,9 +98,23 @@ async function wasmSnapshot() {
     fs.writeFileSync(process.env.DUMP_OUT || '/tmp/wasm_mem.txt', outN);
     console.log('wasm mem dump ->', process.env.DUMP_OUT || '/tmp/wasm_mem.txt');
   }
+  if (process.env.JIT_TRACE === '1' && w.__c6_wasm_con_ptr) {
+    const cp = Number(w.__c6_wasm_con_ptr());
+    const cl = Number(w.__c6_wasm_con_len());
+    if (cp && cl) {
+      console.error('[trace]\n' +
+        new TextDecoder().decode(new Uint8Array(w.memory.buffer, cp, cl)));
+    }
+  }
   const regs = [];
   for (let i = 0; i < 16; i++)
     regs.push(BigInt.asUintN(64, w.sim_cpu_reg(i)).toString(16));
+  if (hasJit && process.env.JIT_STATS === '1') {
+    console.error(
+      `[jit] runs=${w.sim_jit_stat(0)} hits=${w.sim_jit_stat(1)} ` +
+      `compiles=${w.sim_jit_stat(3)} insns=${w.sim_jit_stat(6)}`
+    );
+  }
   return { regs, rip: BigInt.asUintN(64, w.sim_last_rip()).toString(16),
            flags: BigInt.asUintN(64, w.sim_cpu_flags()).toString(16),
            insns: Number(w.sim_insns()),

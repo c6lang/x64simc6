@@ -173,7 +173,7 @@
       （`rcpps/rsqrtps` 故意给精确值，与硬件的 12 位近似不同但不超 SDM 误差界）
 - [ ] wasm 代理下的 HTTPS：guest 的 ClientHello 已到代理、直接重放能拿到
       完整 ServerHello，但 example.com 的 CDN 边缘 ~2.4s 后直接关闭连接
-      （native HTTPS 正常）；待查（DESIGN §98）。测试暂只断言 HTTP/ICMP
+      （native HTTPS 正常）；待查（DESIGN §101）。测试暂只断言 HTTP/ICMP
 - [ ] 引导期偶发的「跳进 0x48/0x4a/0x4d 填充页」`#UD`（`--udtrace` 可见，
       进程被 SIGILL 但整机继续跑；引导、登录、`top` 都不受影响）。下一步用
       `--udtrace` + `dmesg` 的 `traps:` 行定位是哪条跳转把 RIP 带进数据页。
@@ -247,6 +247,44 @@
 - [x] wasm 真上网：`--netshim`（native SLIP↔NAT 网关，复用 `src/net.c6`）+
       wasm COM2/`sim_net_rx/tx` + `tools/ws_slip_proxy.js` + 页面「网络代理」；
       `tests/wasm_net_proxy.js` 里 guest 登录 + `ping 10.0.2.2` +
-      `wget http://example.com/` 全过（DESIGN §98）
+      `wget http://example.com/` 全过（DESIGN §101）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）
+
+## 阶段 12 —— 启动加速与 wasm JIT（2026-11）
+
+- [x] 宿主内联：`build.sh` 在 ctu 产物上给 `reg_read/reg_write/cond/flags_*/
+      shift_op/op_read/op_write` 补 `always_inline`；200M 条整机引导
+      74.6G → 70.7G 宿主指令（-5.3%），墙钟约 -10%，串口输出一致
+      （DESIGN §98a）
+- [x] 反例：计数摊销（宿主 -3.1% 但墙钟 +4%）、惰性取指窗口（宿主 +3.3%、
+      墙钟持平、`mem_fetch8` 仍 17.9%）均已回退；guest cmdline 的
+      `lpj=1000`/`nokaslr` 在噪声内，不改默认（§98b/c）
+- [x] wasm JIT POC：C 编码器生成 wasm 模块、JS 钩子共享线性内存、
+      `mov r32,imm32` 与解释器对拍（`tests/jit_poc.js`）
+- [x] wasm JIT 直线块：mov/ALU/inc/dec/nop + `jit_flags_*` 复用，
+      12 条指令的 16 GPR/RFLAGS/RIP 全部对拍（`tests/jit_block.js`，
+      `./build.sh jit`）
+- [x] JIT 接入 `machine_run`：RIP 直接映射缓存 + 热块阈值、dev_tick/
+      指令计数/TSC 边界、未覆盖指令回退、SMC 页写代数、64 位与
+      jcc/jmp；900M 引导 JIT 开/关的指令数与串口逐字节一致
+      （876,201,405 条，`c67ca2a0…`，DESIGN §100）
+- [x] JIT 批量链式执行（JS 按 RIP 连跑）：flush 代数清 `byRip` 后，
+      210M/900M 与解释器一致；但全链式 900M 71.3s vs 单块直跑 66.8s，
+      默认仍单块直跑，`JIT_CHAIN_FALL=0` 保留为诊断开关
+- [x] JIT 内存操作数与缺页回退：mov/ALU 两方向/cmp/test/inc/movzx/
+      movsx 的 [mem] 形式，base/index*scale+disp/RIP 相对；50M MATCH、
+      900M 串口与指令数一致（commit 6eca7cd）
+- [x] JIT 栈操作与调用：push/pop/call/ret/leave（含故障回滚）；
+      900M JIT 执行 29.9M 条（3.4%），开/关串口一致
+- [x] JIT 子集：shift/imul/movsxd/98-99/cmovcc/pushfq-popfq/endbr64
+      （块测试全过；900M 开/关串口一致）
+- [ ] JIT 子集再扩：setcc/xchg/cmpxchg/bswap、常用 SSE、rep movs/stos
+- [x] JIT 采样编译 + good/bad RIP 位图、去 CR0/CR4 flush：900M 覆盖
+      107.5M 条（12.3%），墙钟 +24% → +14%，串口/指令数一致
+- [ ] JIT 链式分发 bug：JIT_CHAIN_FALL=0 在 18M MATCH/19M 分叉；
+      mask 64（push reg）、8192（call）、262144（ret）各自都能恢复
+      MATCH，pop/push imm/push mem/leave 不行；19M RAM 差异是内核 text
+      补丁字节（路径不同），待 19M RIP/块 trace 对齐
+- [ ] JIT 调采样间隔/编译预算，目标把 +14% 继续压低
+- [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用

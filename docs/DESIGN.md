@@ -1742,7 +1742,272 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     链接产物仍是 export-all 的 wasm，浏览器 API 一个没变；clang 默认会用到
     bulk-memory 等较新的 wasm 特性，需要近几年的浏览器。
 
-98. **wasm 真上网：`--netshim` + WebSocket SLIP 代理**。背景：wasm 里没有
+98. **启动加速实测与 wasm JIT 第一版**。
+
+    **(a) 宿主内联（已落地）**。c6c 不做内联，`step()` 经宿主 `cc -O2`
+    编译后约 26 KiB，GCC 不会把 `reg_read/reg_write/cond/flags_add/
+    flags_sub/flags_logic/shift_op/op_read/op_write` 这些 static 小函数
+    内联进巨型 switch；200M 条整机引导里它们约占 12% 的周期。`build.sh`
+    在 c6c 产物上补 `static inline __attribute__((always_inline))`
+    （native 与 wasm 的 ctu 路径都做，`INLINE_HOT=0` 可关闭做对照；
+    C6_PURE 自举路径不经过这里）。
+
+    200M 条 guest、`--stopt=200000000`、固定核：
+
+    | 版本 | 宿主 instructions:u | best-of-3 墙钟 |
+    | --- | --- | --- |
+    | P0 基线 | 74,644,973,526 | 10.8s |
+    | +always_inline | **70,710,388,920（-5.3%）** | **9.6–9.7s（约 -10%）** |
+
+    串口输出 SHA256 完全一致（`2c1da2ba…`）。分项实测：只内联
+    reg_read/reg_write/cond 约 -3%；再加 flags_* 约 -3.3%；把 shift_op 和
+    op_read/op_write 也带上才到 -5.3%。sz_mask/sx/parity/sign_bit 已经被
+    cc 内联，再加反而略慢，所以不在列表里。
+
+    **(b) 两个反例（已回退，记录避免重走）**。
+
+    - 计数摊销：把 `g_m.instructions`/`g_tsc_acc` 放寄存器、循环末尾再写回，
+      宿主指令 70.7G → 68.5G（-3.1%），但墙钟 9.68s → 10.06s（+4%）。
+      原因是 `cpu_step` 调用前后的寄存器压力和栈槽：少掉的两条内存 RMW
+      抵不过多出来的 spill/reload。保留逐条 RMW。
+    - 惰性取指翻译窗口：缓存「下一条顺序取指 VA→PA」并在同页写入时失效。
+      宿主指令 70.7G → 73.1G（+3.3%），墙钟持平；profile 里 `mem_fetch8`
+      仍是 17.90%（窗口前 16.28%）。内核 text 本来就命中
+      `0xffffffff80000000` 的 direct-map 窗口（两次减法+比较），每字节再加
+      「比较/自增/页尾判断」比省下来的还多。只有走 TLB 的取指才可能受益，
+      占比不够。已回退。
+
+    **(c) 客户机侧命令行（未改默认）**。到 login 的整机墙钟（`--stopt=
+    1500000000`，均 51–52s）：基线 51.72s、`lpj=1000` 51.30s、
+    `nokaslr` 51.90s，差异都在噪声内。`Calibrating delay loop` 本身只占
+    一个 jiffy，560–780M 处的 `delay_loop` 是设备轮询等待而不是
+    `__const_udelay` 的 lpj 循环，所以预设 lpj 省不掉；KASLR 也不是大头。
+    没有把这些参数写进默认 `BOOT_ARGS`。
+
+    **(d) wasm JIT 第一版（实验构建，默认关闭）**。
+
+    目标是在浏览器/Node 的 wasm 构建里把热客户机直线块编译成**动态 wasm
+    模块**，native 继续用解释器——只做一个后端，不写第二套 x86-64 宿主 JIT。
+
+    链路：
+
+    - `JIT=1 ./build.sh wasm` 额外编译 `src/jit_wasm.c`，链接时加
+      `--allow-undefined`；生成模块只 import `js_jit_compile/js_jit_run`
+      两个 JS 钩子。
+    - C6 侧 `sim_jit_block(rip)`（`src/wasm.c6`）调 C 编码器。编码器从
+      `g_m.ram` 逐字节解码 1–16 条客户机指令，在静态 `jit_mod[]` 里拼出
+      wasm 二进制：type/import/function/export/code 五段，导出
+      `run(state_off, ram_off) -> i32`。
+    - JS 钩子用 `new WebAssembly.Module(bytes)` + `new Instance(..., {env:
+      {memory: 主模块 memory, jit_flags_*}})` 实例化；生成模块与主模块
+      **共享同一块线性内存**。CPU 字段偏移用 `offsetof` 在 C 侧算好、
+      烧成 wasm 常量，和 c6sim.h 的布局同源。
+    - `js_jit_run` 调 `run()`；块尾把 RIP 写回 `state + offsetof(cpu.rip)`。
+    - 标志位不自算：生成代码 `call` 主模块导出的
+      `jit_flags_add/sub/logic/inc/dec` 包装，复用 `cpu.c6` 里唯一一份
+      `flags_*` 语义（inc/dec 会恢复 CF）。这样编码器只负责寄存器数据通路。
+
+    当前指令子集：`mov r32,imm32`、`mov r32,r32`、`add/sub/and/or/xor/cmp
+    r32,r32`、`81/83` 的 add/sub/cmp r32,imm、`inc/dec r32`、`nop`；遇到
+    内存操作数、分支、前缀、未支持 opcode 或页边界就收块。每次调用现场
+    编译（POC，还没有块缓存）。
+
+    验收：`./build.sh jit`（自动 `JIT=1` 构建 + 两个 Node 测试）。
+    `tests/jit_poc.js` 覆盖 6 个 imm 的 mov（含 0xdeadbeef/0xffffffff）；
+    `tests/jit_block.js` 用 12 条指令跑完整块，16 个 GPR、RFLAGS、RIP
+    与解释器 `sim_run(12)` 逐位一致（PASS，rax=6、rcx=0xffffffff、
+    flags=0x96、rip=0x101e）。默认 `JIT=0` 的 `web/sim.wasm` 仍是零 import；
+    `wasm_cmp 50M` MATCH、`./build.sh test`、`boot_login.py` 全过。
+
+    **还没做**（下一步）：第一版只做到这里。块缓存、machine_run 接入、
+    SMC、64 位与分支翻译已经在 §100 补上；性能上还不是净赢。
+
+    **(e) 复现命令**：
+
+    ```sh
+    ./build.sh native
+    perf stat -e instructions:u,cycles:u -o /tmp/p.txt \
+      taskset -c 20 build/sim --stopt=200000000 \
+      --cmdline="console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off" \
+      build/firmware.bin > /tmp/serial.bin
+    JIT=1 ./build.sh wasm && node tests/jit_poc.js && node tests/jit_block.js
+    ./build.sh test && node tests/wasm_cmp.js 50000000
+    SIM=build/sim TIMEOUT=1200 python3 tools/boot_login.py
+    ```
+
+99. **P1 热指令快通道扩展（已落地）**。
+
+    `step()` 顶部原有 nop / MOV r,r / Jcc rel8 / JMP rel8|rel32 快通道。
+    这次补了内核里最常见的四类，全部只在「不碰内存、不会缺页」的编码上：
+
+    - `MOV r32/r64, imm32/imm64`（B8-BF，含 REX.B/W）
+    - 32/64 位 ALU reg,reg：add/or/and/sub/xor/cmp（排除 adc/sbb 与字节形式）
+    - `TEST r32/r64, r32/r64`（85，mod=3）
+    - `Jcc rel32`（0F 80-8F）
+
+    ALU 快通道复用主路径的 `flags_add/flags_sub/flags_logic/reg_read/
+    reg_write`，没有第二套标志位公式。命中时只多一次 modrm 比较。
+
+    200M 条整机引导（固定核，`--stopt=200000000`）：
+
+    | 版本 | instructions:u | cycles:u（无争用配对） | best-of-3 墙钟 |
+    | --- | --- | --- | --- |
+    | 只有 §98a 内联 | 70,710,397,444 | 约 26.6G | 9.60s |
+    | + 快通道扩展 | **66,397,426,607（-6.10%）** | 约 25.4G | **9.33s（-2.9%）** |
+
+    墙钟受共享机器负载影响很大（同一配对里见过 9.3–28.9s），所以主指标
+    用 instructions:u；-6.1% 在三轮里稳定到 0.001% 以内。配对最好的三次：
+    base 9.602/9.750/9.774s，fast 9.328/9.527/9.633s。
+
+    正确性：串口输出 SHA256 与内联版一致（`2c1da2ba…`）；
+    `tools/difftest` **1252/1252**；`wasm_cmp 50M` MATCH；
+    `./build.sh test`、`boot_login.py` PASS。
+
+    顺带确认了一个**改动前就有**的现象：native 跑到 1B 条时，同一个二进制
+    两次运行的串口首行时间戳（`[0.686666]` vs `[0.683333]`）和 halt 行的
+    irq4 计数会差一点，其余字节完全相同。这是设备/宿主时序的既有抖动，
+    不是快通道引入的（同一二进制复跑即可复现）。所以全量引导的逐字节对比
+    取 200M 确定性窗口 + wasm_cmp；JIT 验收走 wasm 路径（无宿主
+    net_tick/节流），不把 native 的墙钟序当确定性基准。
+
+100. **wasm JIT 接入 machine_run（MVP）**。
+
+    §98d 的块编码器现在接进了运行循环；编译目标只有 wasm，native 不受影响。
+
+    - **触发与预算**：`machine_run` 每轮在解释指令前调
+      `jit_try2(rip, max_ins)`。只在 `g_jit_on`、无调试、无 pending 异常/
+      HLT、RIP 落在内核 text 窗口 `[0xffffffff80000000,
+      0xffffffffc0000000)`、且不跨 `(instructions & 0x3ffff)==0` 的
+      dev_tick 边界时尝试。`max_ins = min(循环剩余, stopt 剩余, 到边界距离)`；
+      块比预算长就不跑。成功后按 jn 一次补 `g_m.instructions` 和
+      `g_tsc_acc/g_m.tsc`（整除/取模，和逐条累加结果完全一致），跳过本轮
+      解释器；中断/异常仍只在边界交给解释器。
+    - **缓存**：2048 项直接映射，键 RIP。8192 项 seen 表做热块阈值：同一个
+      块先让解释器跑 64 次才编译，编译上限 2048。900M 引导实际只编译 291
+      个块，避免了把冷块全编一遍（无阈值时 50M 就编满 16384 个，反而 +3%）。
+    - **SMC**：`mem_w8/16/32/64` 每次写 RAM 把 `jit_page_gen[pa>>12]++`；
+      缓存项存代码物理页和写代数，命中时比对，变了就重翻译。INVLPG 不刷
+      整个 JIT 缓存（内核 text 是全局映射，用户页 INVLPG 很频繁；刷了会让
+      50M 之后 0 命中），只有 CR0/CR4 改分页模式才整体失效并重置编译预算。
+    - **指令子集**：在 §98d 的 32 位基础上加了 REX.W（mov imm64/C7、ALU、
+      inc/dec、test）、jmp/jcc rel8/rel32（块尾用 `select` 选 target/next）。
+      标志位/条件仍 call 回主模块的 `jit_flags_*`/`jit_cond`（signature 加
+      操作数宽度），没有第二份语义。
+    - 顺带修了 wasm `sim_init` 没把 `g_m.watch_fd` 置 -1 的问题：BSS 默认 0
+      会让 `dbg_any` 恒真，JIT/快通道永远不触发。
+
+    **正确性**（同一份 JIT=1 wasm，开/关对比）：
+
+    - `wasm_cmp 50M`：寄存器/RIP/RFLAGS/RAM 与 native **MATCH**。
+    - `tests/jit_poc.js`、`tests/jit_block.js`、`tests/jit_block64.js` 全
+      PASS（含 64 位 ALU、jcc taken/not-taken）。
+    - 900M 引导（`tests/wasm_login.js`，实际 876,201,405 条到 shell）：
+      JIT 开/关的指令数完全一样，串口 646 字节 SHA256 都是
+      `c67ca2a0…`，两次都 `WASM LOGIN OK`。
+
+    **性能与链式实验**（Node，同机）：
+
+    | 负载 | JIT 关 | JIT 开（默认单块直跑） |
+    | --- | --- | --- |
+    | 900M 引导 | 56.6s | 66.8s（+18%） |
+    | 50M 引导 | 15.9s | 16.4–16.9s（+3–6%） |
+    | 210M 固定 stopt | RAM `dedbf9f2` | RAM `dedbf9f2`（一致） |
+
+    为了摊薄 wasm↔JS 切换，在 JS 侧按 RIP 连跑多个块（`JIT_CHAIN_FALL=0`
+    打开）。最初 205M–210M 的固定 stopt 对比发现 JIT 开/关的 RAM 分叉
+    （串口首行时间戳差 10ms、login PID 502/503；tsc/PIT 计数一致，
+    badBoundary/badBudget=0）。根因是 CR0/CR4 变更时 `jit_flush` 只清了
+    C 侧缓存，JS 的 `byRip` 映射仍指向 flush 前的 handle，分支链会执行到
+    这些旧块；把 flush 代数传进 JS（变化时清空 `byRip`）后，210M 的 RAM
+    恢复一致，900M 全链式也做到 876,201,405 条、串口 SHA256
+    `c67ca2a0…` 一致。全链式仍比单块直跑慢（900M 71.3s vs 66.8s），所以
+    默认仍是单块直跑，链式作为诊断/后续优化开关。
+
+    - 期间修了一个 simple 路径不检查 `max_ins` 的 bug：块长于预算时会
+      在 `machine_run` 里让 n 下溢，整机跑飞（实测 13.7B 条）。
+    - 新增 LEA（SIB/RIP 相对/32 位）与 movzx/movsx（含无 REX 的
+      AH/CH/DH/BH）、64 位/分支的块测试，以及 `jit_chain.js`、
+      `wasm_fixed.js`（固定 stopt 对比串口/RAM/tsc/PIT）。
+
+    内存操作数（本轮补上）：支持 base+index*scale+disp 与 RIP 相对地址，
+    覆盖 `mov r,[m]` / `[m],r` / `[m],imm32`、ALU/cmp/test 两个方向、
+    `inc/dec [m]`、`movzx/movsx [m]`。生成代码通过 `jit_ld`/`jit_st`
+    访问（和解释器同一套 mem_r/mem_w），每次访问后查 `jit_faulted`：
+    缺页时写回该指令 RIP 并 `return k+1`（把这次尝试计入指令数），
+    `machine_run` 下一次看到 exc_pending 就回退解释器重试；加载在写
+    寄存器前检查，存储在算完标志后检查，和解释器的故障回滚顺序一致。
+
+    调试内存时抓到一个方向 bug：ALU 内存形式用了 `op & 1` 判断
+    mem_dst/mem_src（0x01 和 0x03 都是奇数），导致 `and rdi,[rip+…]`
+    （0x23）被翻成对内存的存储，35M 处把内核页表的一个 PTE 改成
+    0x8000000000000063。用 `JIT_TRACE=1` 的 `[JST]` 存储日志
+    （rip=ffffffff810a0c06、va=ffffffff825de110）加反汇编
+    （指令实际是 `and rdi,[rip+0x153d503]`）定位；改成
+    `(op>>1)&1` 后 50M MATCH、900M 串口一致。
+
+    栈操作与调用（本轮补上）：push r64/imm8/imm32/r/m64、pop r64、
+    call rel32、ret、leave。栈访问走 `jit_ld`/`jit_st`；RSP 只在存储/
+    加载成功后更新，缺页时保持原值，和解释器的同步故障回滚一致；
+    call/ret 作为块结束并自己写 RIP。
+
+    指令集再扩（本轮）：C1/D1/D3 移位（复用 shift_op，含 CL 计数）、
+    0F AF/69/6B imul（69/6B 按解释器不更新标志）、0x63 movsxd、
+    98/99 cdqe/cqo、0F 40-4F cmovcc（修了 select 参数顺序）、9C/9D
+    pushfq/popfq、F3 0F 1E FA endbr64、0F 1F nop r/m。
+
+    只扩指令集时：900M 里 JIT 执行 31.1M 条（3.5%）、654 次编译、
+    19.2M 次块执行；JIT 开 69.1s vs 关 55.6s（+24%）。扩指令集本身
+    提升有限：热块平均只有约 1.6 条指令（解码很快碰到未覆盖指令）。
+
+    采样编译（本轮）：之前 `machine_run` 每条指令都调 `jit_try2`
+    （876M 次），绝大多数 RIP 不可翻译/未编译。改成三层过滤：
+
+    - good 位图（已编译块的 RIP）：直接跑；
+    - 每 64 条指令在当前 RIP 采样一次，采样路径跳过 64 次热块阈值；
+    - bad 位图：解码失败的 RIP 永久跳过。
+
+    同时去掉 CR0/CR4 变更时的整体 flush（生成代码不依赖 CR0/CR4；
+    内存访问走 helper；代码页变化由 SMC 写代数兜底），缓存不再被频繁
+    清空。900M：JIT 执行 107.5M 条（12.3%）、8192 次编译、20.1M 次
+    块执行；墙钟 63.4s vs 关 55.6s（+14%，从 +24% 降下来），串口和
+    指令数仍一致。链式路径（`JIT_CHAIN_FALL=0`）在 20M 与 native 分叉；
+    `JIT_BATCH_ONE=1`（只跑批内第一块）MATCH，说明 bug 在“链到下一块”
+    的 JS 分发；继续二分到 18M MATCH、19M DIFF，call/ret 的合成链测试
+    能过，怀疑与链中的缺页/采样块有关。默认仍是单块直跑（SIMPLE），
+    链式保留诊断。下一步：补内存/缺页链测试定位，再调采样间隔/编译
+    预算把 +14% 继续压下去、SSE/rep string ops。默认发布构建仍是 JIT=0。
+
+    链式二分：用 `JIT_MASK` 按指令组禁用后，mask 64（push/pop/call/ret/
+    leave）使 19M 恢复 MATCH，问题就在这一组。期间修了 `pop %rsp` 的
+    顺序（目的写入必须在 RSP+=8 之后，否则 pop %rsp 的最终 RSP 会错），
+    并补了 leave/push [mem] 的单块测试；合成 call/ret 链（无缺页）通过，
+    所以更像是栈/调用链里的缺页路径，下一步用 paging 故障链或 19M 的
+    RIP/块 trace 定位。把 mask 再拆细到单个形式：mask 64（只 push
+    reg）、8192（只 call）、262144（只 ret）各自都能让 19M 恢复 MATCH；
+    关 pop/push imm/push [mem]/leave 都不行。19M 的 RAM 差异集中在内核
+    text 的补丁字节（ftrace/static call 一类），看起来是不同路径走到了
+    不同补丁阶段，而不是单个错误存储。更像是 push reg + call/ret 出现
+    在链里改变了后续路径/覆盖，下一步用 19M 的 RIP/块 trace 对齐。
+
+    又修了一个缺失的投递：JIT 块的最后一条缺页时，machine_run 过去会
+    `continue`，把异常留到下一轮再重试一条指令；现在块结束后若
+    exc_pending 就立刻 `cpu_deliver`，和解释器循环尾一致。
+    `tests/jit_pagefault.js`（4 级页表 + guard 栈 + call/ret 链）PASS：
+    JIT 开/关都停在 RIP=ret、RSP=guard、halted=1。
+
+    复现：
+
+    ```sh
+    ./build.sh jit                 # JIT=1 + 三个块测试
+    JIT=1 ./build.sh wasm
+    JIT_STATS=1 node tests/wasm_cmp.js 50000000
+    node tests/wasm_login.js                  # JIT 开（默认单块直跑）
+    JIT_OFF=1 node tests/wasm_login.js        # JIT 关
+    JIT_CHAIN_FALL=0 node tests/wasm_login.js # 链式诊断（分支链有已知差异）
+    node tests/wasm_fixed.js 210000000        # 固定 stopt 对比
+    ```
+
+101. **wasm 真上网：`--netshim` + WebSocket SLIP 代理**。背景：wasm 里没有
     宿主 socket，native 那套 SLIP + 用户态 NAT（`src/net.c6`）又依赖模拟器的
     PIC/串口状态，不能原样搬进浏览器。做法是把 NAT 留在 native，wasm 只负责
     “串口字节 ↔ JS”，中间用 WebSocket 代理把两边接起来：
