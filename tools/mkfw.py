@@ -155,7 +155,7 @@ def main():
     ap.add_argument('--modules',
                     help='内核模块树（build/alpine/lib 或 lib/modules/<kver>），'
                          '注入 slip/slhc 并自动配置外网')
-    ap.add_argument('--cmdline', default='console=ttyS0,115200 earlyprintk=ttyS0,115200 panic=-1')
+    ap.add_argument('--cmdline', default='console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=off')
     ap.add_argument('--out', default='build/firmware.bin')
     a = ap.parse_args()
     kernel, kpaddr = extract_vmlinux(a.kernel)

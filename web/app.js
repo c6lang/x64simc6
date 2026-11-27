@@ -9,7 +9,7 @@ const FW_MAX = 48 << 20;      // 与 src/wasm.c6 的 g_fw_stage 一致
 const NET_RX = SCRATCH + 4 * 0x100000;   // 252 MiB：代理 -> wasm 的收包缓冲
 const NET_TX = NET_RX + 65536;            // 252 MiB + 64 KiB：wasm -> 代理
 const FS_CAP = 1 << 20;
-const WASM_VER = '1.8';   // 换 wasm 时同步 bump：Cache Storage 按 URL 缓存
+const WASM_VER = '1.9';   // 换 wasm 时同步 bump：Cache Storage 按 URL 缓存
 
 let wasm = null;
 let mem = null;
