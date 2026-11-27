@@ -78,5 +78,9 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+      # 上传刚 finalize 时 deploy-pages 偶尔查不到 artifact（Found 0
+      # artifact(s)），等几秒让元数据可见
+      - name: 等 artifact 元数据就绪
+        run: sleep 5
       - id: deploy
         uses: actions/deploy-pages@v4
