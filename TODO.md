@@ -267,5 +267,8 @@
       900M 串口与指令数一致（commit 6eca7cd）
 - [x] JIT 栈操作与调用：push/pop/call/ret/leave（含故障回滚）；
       900M JIT 执行 29.9M 条（3.4%），开/关串口一致
-- [ ] JIT 子集再扩：shift/imul/movsxd/setcc/cmov/常用 SSE、rep string ops
+- [x] JIT 子集：shift/imul/movsxd/98-99/cmovcc/pushfq-popfq/endbr64
+      （块测试全过；900M 开/关串口一致）
+- [ ] JIT 子集再扩：setcc/xchg/cmpxchg/bswap、常用 SSE、rep movs/stos
+- [ ] JIT 编译策略：降低热块阈值/提高编译预算，量化编译成本与覆盖率
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用

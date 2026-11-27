@@ -1950,12 +1950,19 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     加载成功后更新，缺页时保持原值，和解释器的同步故障回滚一致；
     call/ret 作为块结束并自己写 RIP。
 
-    当前覆盖与性能：900M 里 JIT 执行 29.9M 条（3.4%）、648 次编译、
-    19.1M 次块执行；JIT 开 68.8s vs 关 55.6s（+24%）。覆盖率比只有
-    内存时翻倍，但每块一次 wasm↔JS 切换（约 19M 次）仍是主要成本，
-    还没到净赢。下一步：shift/imul/movsxd/setcc/cmov/常用 SSE 与
-    rep string ops（继续提覆盖）、生成代码内联 flags、批量链式。默认
-    发布构建仍是 JIT=0。
+    指令集再扩（本轮）：C1/D1/D3 移位（复用 shift_op，含 CL 计数）、
+    0F AF/69/6B imul（69/6B 按解释器不更新标志）、0x63 movsxd、
+    98/99 cdqe/cqo、0F 40-4F cmovcc（修了 select 参数顺序）、9C/9D
+    pushfq/popfq、F3 0F 1E FA endbr64、0F 1F nop r/m。
+
+    当前覆盖与性能：900M 里 JIT 执行 31.1M 条（3.5%）、654 次编译、
+    19.2M 次块执行；JIT 开 69.1s vs 关 55.6s（+24%）。**扩指令集本身
+    提升有限**：热块平均只有约 1.6 条指令（解码很快碰到未覆盖指令），
+    编译策略（64 次热块阈值 + 2048 上限）只编了 654 块，覆盖率上不去；
+    即使覆盖上去，每块一次 wasm↔JS 切换（约 19M 次）仍是主要成本。
+    下一步优先级调整为：(a) SSE/`rep movs/stos`/setcc/xchg/cmpxchg 等
+    把热块拉长；(b) 降低热块阈值/提高编译预算，量化编译成本 vs 覆盖率；
+    (c) 用提高后的覆盖再试批量链式/内联 flags。默认发布构建仍是 JIT=0。
 
     复现：
 

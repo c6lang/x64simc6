@@ -277,6 +277,8 @@ int jit_cond(u64 flags, u64 cc);
 u64 jit_ld(u64 a, u64 sz);
 void jit_st(u64 a, u64 v, u64 sz, u64 rip);
 int jit_faulted(void);
+u64 jit_shift(int fn, u64 val, u64 cnt, int s);
+u64 jit_imul(u64 a, u64 b, int s);
 u64 jit_stat(int i);
 int jit_synth_chain(u64 a, u64 b, u32 ia, u32 ib, u32 mode);
 void jit_set_trace(int v);

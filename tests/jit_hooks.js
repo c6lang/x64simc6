@@ -39,6 +39,8 @@ function makeJitEnv(getInst) {
             jit_ld: inst.exports.jit_ld,
             jit_st: inst.exports.jit_st,
             jit_faulted: inst.exports.jit_faulted,
+            jit_shift: inst.exports.jit_shift,
+            jit_imul: inst.exports.jit_imul,
           },
         });
         const h = handles.length;
@@ -46,6 +48,7 @@ function makeJitEnv(getInst) {
         byRip.set(ripLo >>> 0, { h, hi: ripHi >>> 0, rip: ripLo >>> 0 });
         return h;
       } catch (e) {
+        if (process.env.JIT_DEBUG === '1') console.error('[jit_compile]', e && e.message);
         return -1;
       }
     },

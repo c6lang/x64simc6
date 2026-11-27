@@ -153,6 +153,7 @@ enum {
     J_ADD, J_SUB, J_AND, J_OR, J_XOR, J_CMP, J_TEST,
     J_INC, J_DEC, J_LEA, J_MOVZX, J_MOVSX,
     J_PUSH, J_POP, J_CALL, J_RET, J_LEAVE,
+    J_SHIFT, J_IMUL, J_MOVSXD, J_SEXT, J_SEXT_D, J_CMOV, J_PUSHF, J_POPF,
     J_JMP, J_JCC
 };
 
@@ -164,6 +165,7 @@ struct JIns {
     u8 is_imm;
     u8 branch;   /* 1 = 块的最后一条是 jmp/jcc */
     u8 callret;  /* 1 = call/ret，块结束并自己写 RIP */
+    u8 cnt_cl;   /* 移位计数来自 CL */
     u8 cc;       /* jcc 条件码 */
     u8 base;     /* LEA: 0xff = 无 */
     u8 index;    /* LEA: 0xff = 无 */
@@ -289,6 +291,112 @@ static int jit_decode_one(u64 p, struct JIns *in)
             return 0;                 /* 带 REX.B 的 90 是 xchg */
         in->op = J_NOP;
         in->len = pos + 1;
+        return 1;
+    }
+    if (op == 0xf3) {                 /* F3 0F 1E FA：endbr64，当 NOP */
+        u8 b1 = (u8)jit_mr8(p + 1);
+        if (b1 == 0x0f && (u8)jit_mr8(p + 2) == 0x1e) {
+            (void)jit_mr8(p + 3);
+            in->op = J_NOP;
+            in->len = 4;
+            return 1;
+        }
+        return 0;
+    }
+    if (op == 0x98) {                 /* cbw/cwde/cdqe */
+        in->op = J_SEXT;
+        in->sz = (rex & 8) ? 8 : 4;
+        in->len = pos + 1;
+        return 1;
+    }
+    if (op == 0x99) {                 /* cwd/cdq/cqo */
+        in->op = J_SEXT_D;
+        in->sz = (rex & 8) ? 8 : 4;
+        in->len = pos + 1;
+        return 1;
+    }
+    if (op == 0x9c) {                 /* pushfq */
+        in->op = J_PUSHF;
+        in->sz = 8;
+        in->len = pos + 1;
+        return 1;
+    }
+    if (op == 0x9d) {                 /* popfq */
+        in->op = J_POPF;
+        in->sz = 8;
+        in->len = pos + 1;
+        return 1;
+    }
+    if (op == 0x63) {                 /* movsxd r64, r/m32 */
+        mrm = (u8)jit_mr8(p + pos + 1);
+        in->op = J_MOVSXD;
+        in->dst = (u8)(((mrm >> 3) & 7) | ((rex & 4) ? 8 : 0));
+        in->sz = 8;
+        if ((mrm >> 6) == 3) {
+            in->src = (u8)((mrm & 7) | ((rex & 1) ? 8 : 0));
+            in->len = pos + 2;
+            return 1;
+        }
+        if (!jit_parse_mem(p, pos + 1, rex, in))
+            return 0;
+        in->mem = 1;
+        in->mem_src = 1;
+        in->mem_sz = 4;
+        return 1;
+    }
+    if (op == 0xc1 || op == 0xd1 || op == 0xd3) {   /* shl/shr/sar/rol/... */
+        u32 fn = 0;
+        mrm = (u8)jit_mr8(p + pos + 1);
+        fn = (mrm >> 3) & 7;
+        if (fn == 6) fn = 4;
+        in->op = J_SHIFT;
+        in->from = (u8)fn;
+        in->sz = (rex & 8) ? 8 : 4;
+        if ((mrm >> 6) == 3) {
+            in->dst = (u8)((mrm & 7) | ((rex & 1) ? 8 : 0));
+            in->len = pos + 2;
+        } else {
+            if (!jit_parse_mem(p, pos + 1, rex, in))
+                return 0;
+            in->mem = 1;
+            in->mem_dst = 1;
+            in->mem_sz = in->sz;
+        }
+        if (op == 0xc1) {
+            in->imm = (u64)jit_mr8(p + in->len);
+            in->len += 1;
+        } else if (op == 0xd3) {
+            in->cnt_cl = 1;
+        } else {
+            in->imm = 1;
+        }
+        return 1;
+    }
+    if (op == 0x69 || op == 0x6b) {   /* imul r, r/m, imm */
+        mrm = (u8)jit_mr8(p + pos + 1);
+        in->op = J_IMUL;
+        in->dst = (u8)(((mrm >> 3) & 7) | ((rex & 4) ? 8 : 0));
+        in->sz = sz;
+        in->is_imm = 1;
+        if ((mrm >> 6) == 3) {
+            in->src = (u8)((mrm & 7) | ((rex & 1) ? 8 : 0));
+            in->len = pos + 2;
+        } else {
+            if (!jit_parse_mem(p, pos + 1, rex, in))
+                return 0;
+            in->mem = 1;
+            in->mem_src = 1;
+            in->mem_sz = sz;
+        }
+        if (op == 0x6b) {
+            u32 b2 = (u32)jit_mr8(p + in->len);
+            if (b2 & 0x80u) b2 |= 0xffffff00u;
+            in->imm = (u64)(i64)(i32)b2;
+            in->len += 1;
+        } else {
+            in->imm = (u64)(i64)(i32)(u32)jit_rd32(p + in->len);
+            in->len += 4;
+        }
         return 1;
     }
     if (op >= 0xb8 && op <= 0xbf) {
@@ -588,6 +696,53 @@ static int jit_decode_one(u64 p, struct JIns *in)
             in->target = (u64)((i64)p + (i64)in->len + d);
             return 1;
         }
+        if (op2 == 0xaf) {            /* imul r, r/m */
+            u8 m = (u8)jit_mr8(p + pos + 2);
+            in->op = J_IMUL;
+            in->dst = (u8)(((m >> 3) & 7) | ((rex & 4) ? 8 : 0));
+            in->sz = sz;
+            if ((m >> 6) == 3) {
+                in->src = (u8)((m & 7) | ((rex & 1) ? 8 : 0));
+                in->len = pos + 3;
+                return 1;
+            }
+            if (!jit_parse_mem(p, pos + 2, rex, in))
+                return 0;
+            in->mem = 1;
+            in->mem_src = 1;
+            in->mem_sz = sz;
+            return 1;
+        }
+        if (op2 >= 0x40 && op2 <= 0x4f) {   /* cmovcc */
+            u8 m = (u8)jit_mr8(p + pos + 2);
+            in->op = J_CMOV;
+            in->cc = (u8)(op2 - 0x40);
+            in->dst = (u8)(((m >> 3) & 7) | ((rex & 4) ? 8 : 0));
+            in->sz = sz;
+            if ((m >> 6) == 3) {
+                in->src = (u8)((m & 7) | ((rex & 1) ? 8 : 0));
+                in->len = pos + 3;
+                return 1;
+            }
+            if (!jit_parse_mem(p, pos + 2, rex, in))
+                return 0;
+            in->mem = 1;
+            in->mem_src = 1;
+            in->mem_sz = sz;
+            return 1;
+        }
+        if (op2 == 0x1f || op2 == 0x1e) {   /* nop r/m / endbr */
+            u8 m = (u8)jit_mr8(p + pos + 2);
+            in->op = J_NOP;
+            if ((m >> 6) == 3) {
+                in->len = pos + 3;
+                return 1;
+            }
+            if (!jit_parse_mem(p, pos + 2, rex, in))
+                return 0;
+            in->mem = 0;              /* 只吃地址字节，不访问 */
+            return 1;
+        }
         if (op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf) {
             u8 m = (u8)jit_mr8(p + pos + 2);
             in->op = (op2 == 0xb6 || op2 == 0xb7) ? J_MOVZX : J_MOVSX;
@@ -743,7 +898,7 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
      *       5=(i64,i64)->i64 (jit_ld); 6=(i64,i64,i64)->() (jit_st);
      *       7=()->i32 (jit_faulted) */
     b.p = t1; b.n = 0; b.cap = sizeof(t1);
-    wb_u8(&b, 0x08);
+    wb_u8(&b, 0x0a);
     wb_u8(&b, 0x60); wb_u8(&b, 0x02); wb_u8(&b, 0x7f); wb_u8(&b, 0x7f);
     wb_u8(&b, 0x01); wb_u8(&b, 0x7f);
     wb_u8(&b, 0x60); wb_u8(&b, 0x04); wb_u8(&b, 0x7e); wb_u8(&b, 0x7e);
@@ -758,13 +913,17 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
     wb_u8(&b, 0x60); wb_u8(&b, 0x04); wb_u8(&b, 0x7e); wb_u8(&b, 0x7e);
     wb_u8(&b, 0x7e); wb_u8(&b, 0x7e); wb_u8(&b, 0x00);
     wb_u8(&b, 0x60); wb_u8(&b, 0x00); wb_u8(&b, 0x01); wb_u8(&b, 0x7f);
+    wb_u8(&b, 0x60); wb_u8(&b, 0x04); wb_u8(&b, 0x7f); wb_u8(&b, 0x7e);
+    wb_u8(&b, 0x7e); wb_u8(&b, 0x7f); wb_u8(&b, 0x01); wb_u8(&b, 0x7e);
+    wb_u8(&b, 0x60); wb_u8(&b, 0x03); wb_u8(&b, 0x7e); wb_u8(&b, 0x7e);
+    wb_u8(&b, 0x7f); wb_u8(&b, 0x01); wb_u8(&b, 0x7e);
     wb_section(&out, 0x01, &b);
 
     /* import: memory + flags/cond/ld/st/faulted。
      * 函数索引：add=0, sub=1, logic=2, inc=3, dec=4, cond=5,
      *           ld=6, st=7, faulted=8。 */
     b.p = t2; b.n = 0; b.cap = sizeof(t2);
-    wb_u8(&b, 0x0a);
+    wb_u8(&b, 0x0c);
     wb_name(&b, "env"); wb_name(&b, "memory");
     wb_u8(&b, 0x02); wb_u8(&b, 0x01); wb_leb(&b, 0); wb_leb(&b, 65536);
     wb_name(&b, "env"); wb_name(&b, "jit_flags_add");   wb_u8(&b, 0x00); wb_leb(&b, 1);
@@ -776,17 +935,19 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
     wb_name(&b, "env"); wb_name(&b, "jit_ld");          wb_u8(&b, 0x00); wb_leb(&b, 5);
     wb_name(&b, "env"); wb_name(&b, "jit_st");          wb_u8(&b, 0x00); wb_leb(&b, 6);
     wb_name(&b, "env"); wb_name(&b, "jit_faulted");     wb_u8(&b, 0x00); wb_leb(&b, 7);
+    wb_name(&b, "env"); wb_name(&b, "jit_shift");       wb_u8(&b, 0x00); wb_leb(&b, 8);
+    wb_name(&b, "env"); wb_name(&b, "jit_imul");        wb_u8(&b, 0x00); wb_leb(&b, 9);
     wb_section(&out, 0x02, &b);
 
-    /* function: 一个函数，类型 0（索引 9） */
+    /* function: 一个函数，类型 0（索引 11） */
     b.p = t3; b.n = 0; b.cap = sizeof(t3);
     wb_u8(&b, 0x01); wb_leb(&b, 0);
     wb_section(&out, 0x03, &b);
 
-    /* export: "run" -> func 9 */
+    /* export: "run" -> func 11 */
     b.p = t4; b.n = 0; b.cap = sizeof(t4);
     wb_u8(&b, 0x01); wb_name(&b, "run");
-    wb_u8(&b, 0x00); wb_leb(&b, 9);
+    wb_u8(&b, 0x00); wb_leb(&b, 11);
     wb_section(&out, 0x07, &b);
 
     /* code：local 2/3/4=a/b/res，5=地址，6=内存读出值（均 i64） */
@@ -966,6 +1127,100 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
             e_get(&b, 5); e_i64_const(&b, 8); e_call(&b, 6); e_set(&b, 6);
             e_fault_check(&b, rip_off, x->rip, k);
             e_addr(&b, rbp_off); e_get(&b, 6); e_store64(&b);
+            e_addr(&b, rsp_off); e_get(&b, 5); e_i64_const(&b, 8);
+            wb_u8(&b, 0x7c); e_store64(&b);
+            break;
+        case J_SHIFT:
+            if (x->mem) { e_get(&b, 6); e_set(&b, 2); }
+            else { e_load64(&b, d); e_set(&b, 2); }
+            e_i32_const(&b, (u32)x->from);
+            e_get(&b, 2);
+            if (x->cnt_cl) e_load64(&b, rax_off + 8u);
+            else e_i64_const(&b, x->imm);
+            e_i32_const(&b, x->sz);
+            e_call(&b, 9);
+            e_set(&b, 4);
+            if (x->mem) e_mem_store(&b, x, k, rip_off);
+            else { e_addr(&b, d); e_get(&b, 4); e_store64(&b); }
+            break;
+        case J_IMUL:
+            if (x->is_imm) {
+                if (x->mem) { e_get(&b, 6); e_set(&b, 2); }
+                else { e_load64(&b, s); e_set(&b, 2); }
+                e_i64_const(&b, x->imm); e_set(&b, 3);
+                if (x->sz == 8) {
+                    e_get(&b, 2); e_get(&b, 3); wb_u8(&b, 0x7e);
+                } else {
+                    e_get(&b, 2); e_wrap(&b);
+                    e_get(&b, 3); e_wrap(&b);
+                    wb_u8(&b, 0x6c); e_ext_u(&b);
+                }
+                e_set(&b, 4);
+            } else {
+                e_load64(&b, d); e_set(&b, 2);
+                if (x->mem) { e_get(&b, 6); e_set(&b, 3); }
+                else { e_load64(&b, s); e_set(&b, 3); }
+                e_get(&b, 2); e_get(&b, 3); e_i32_const(&b, x->sz);
+                e_call(&b, 10);
+                e_set(&b, 4);
+            }
+            e_addr(&b, d); e_get(&b, 4); e_store64(&b);
+            break;
+        case J_MOVSXD:
+            if (x->mem) e_get(&b, 6);
+            else e_load64(&b, s);
+            e_wrap(&b);
+            wb_u8(&b, 0xac);
+            e_set(&b, 4);
+            e_addr(&b, d); e_get(&b, 4); e_store64(&b);
+            break;
+        case J_SEXT:
+            e_load64(&b, rax_off); e_wrap(&b);
+            if (x->sz == 8) wb_u8(&b, 0xac);
+            else { wb_u8(&b, 0xc1); e_ext_u(&b); }
+            e_set(&b, 4);
+            e_addr(&b, rax_off); e_get(&b, 4); e_store64(&b);
+            break;
+        case J_SEXT_D:
+            if (x->sz == 8) {
+                e_load64(&b, rax_off); e_i64_const(&b, 63); wb_u8(&b, 0x87);
+            } else {
+                e_load64(&b, rax_off); e_wrap(&b); e_i32_const(&b, 31);
+                wb_u8(&b, 0x75); e_ext_u(&b);
+            }
+            e_set(&b, 4);
+            e_addr(&b, rax_off + 16u); e_get(&b, 4); e_store64(&b);
+            break;
+        case J_CMOV:
+            if (x->mem) { e_get(&b, 6); e_set(&b, 3); }
+            else { e_load64(&b, s); e_set(&b, 3); }
+            e_load64(&b, d); e_set(&b, 2);
+            if (x->sz == 4) {
+                e_get(&b, 2); e_wrap(&b); e_ext_u(&b); e_set(&b, 2);
+                e_get(&b, 3); e_wrap(&b); e_ext_u(&b); e_set(&b, 3);
+            }
+            e_get(&b, 3); e_get(&b, 2);   /* select: cond 真取 src */
+            e_load64(&b, fl_off); e_i64_const(&b, (u64)x->cc);
+            e_call(&b, 5);
+            wb_u8(&b, 0x1b);
+            e_set(&b, 4);
+            e_addr(&b, d); e_get(&b, 4); e_store64(&b);
+            break;
+        case J_PUSHF:
+            e_load64(&b, fl_off); e_set(&b, 4);
+            e_load64(&b, rsp_off); e_i64_const(&b, 8); wb_u8(&b, 0x7d); e_set(&b, 5);
+            e_get(&b, 5); e_get(&b, 4); e_i64_const(&b, 8); e_i64_const(&b, x->rip);
+            e_call(&b, 7);
+            e_fault_check(&b, rip_off, x->rip, k);
+            e_addr(&b, rsp_off); e_get(&b, 5); e_store64(&b);
+            break;
+        case J_POPF:
+            e_load64(&b, rsp_off); e_set(&b, 5);
+            e_get(&b, 5); e_i64_const(&b, 8); e_call(&b, 6); e_set(&b, 6);
+            e_fault_check(&b, rip_off, x->rip, k);
+            e_get(&b, 6); e_i64_const(&b, 2); wb_u8(&b, 0x84);
+            e_set(&b, 4);
+            e_addr(&b, fl_off); e_get(&b, 4); e_store64(&b);
             e_addr(&b, rsp_off); e_get(&b, 5); e_i64_const(&b, 8);
             wb_u8(&b, 0x7c); e_store64(&b);
             break;

@@ -755,6 +755,34 @@ static void mul128s(i64 x, i64 y, u64 *lo, u64 *hi)
     *hi = h;
 }
 
+#if defined(C6_JIT)
+u64 jit_imul(u64 a, u64 b, int s)
+{
+    u64 low = 0;
+    if (s == 8) {
+        u64 lo = 0, hi = 0;
+        mul128s((i64)a, (i64)b, &lo, &hi);
+        g_m.cpu.flags = (g_m.cpu.flags & ~(RF_CF | RF_OF)) |
+            (((hi == 0 && (lo & sign_bit(8)) == 0) ||
+              (hi == ~((u64)0) && (lo & sign_bit(8)) != 0)) ? 0 : (RF_CF | RF_OF));
+        low = lo;
+    } else {
+        i64 p = (i64)sx(a, s * 8) * (i64)sx(b, s * 8);
+        low = (u64)p & sz_mask(s);
+        g_m.cpu.flags = (g_m.cpu.flags & ~(RF_CF | RF_OF)) |
+            (((i64)sx(low, s * 8) != p) ? (RF_CF | RF_OF) : 0);
+    }
+    {
+        u64 r = low & sz_mask(s);
+        g_m.cpu.flags &= ~(RF_PF | RF_ZF | RF_SF);
+        g_m.cpu.flags |= parity(r & 0xff);
+        if (r == 0) g_m.cpu.flags |= RF_ZF;
+        if (r & sign_bit(s)) g_m.cpu.flags |= RF_SF;
+    }
+    return low & sz_mask(s);
+}
+#endif
+
 static u64 div128_64(u64 hi, u64 lo, u64 d, u64 *rem)
 {
     u64 q = 0, r = hi;
@@ -1002,6 +1030,15 @@ static void shift_op(struct CPUState *c, int fn, u64 *v, u64 cnt, int s)
     *v = r;
     c->flags = f | 2;
 }
+
+#if defined(C6_JIT)
+u64 jit_shift(int fn, u64 val, u64 cnt, int s)
+{
+    u64 v = val;
+    shift_op(&g_m.cpu, fn, &v, cnt, s);
+    return v & sz_mask(s);
+}
+#endif
 
 /* 快通道的收尾：必须复刻 step() 尾部的故障回滚。
  * 快通道只可能改 RIP（不碰 RSP/RSI/RDI/RCX/标志），所以取指在页边界上
