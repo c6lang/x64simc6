@@ -2,7 +2,9 @@
  * 与 wasm 之间只通过导出的 C 函数 + 共享线性内存通信，不依赖 wasm import。 */
 const $ = (id) => document.getElementById(id);
 const status = (s) => { $('status').textContent = s; };
-const SCRATCH = 0x0f800000;   // 位于 256 MiB 初始内存中，且在 128 MiB guest RAM 之后
+const SCRATCH = 0x0f800000;   // 248 MiB：hostfs/串口的小缓冲（初始 256 MiB 内）
+const FW_STAGE = 0x10000000;  // 256 MiB：大固件 staging；不够就先把内存扩到 512 MiB
+const FW_MAX = 48 << 20;      // 与 src/wasm.c6 的 g_fw_stage 一致
 const FS_CAP = 1 << 20;
 
 let wasm = null;
@@ -135,9 +137,16 @@ async function loadFirmware() {
   const url = $('fwurl').value.trim();
   try {
     const fw = await fetchAsset(url);
-    if (fw.length > (4 << 20)) throw new Error('固件超过 4 MiB staging 上限');
-    put(SCRATCH, fw);
-    const rc = wasm.sim_init(SCRATCH, fw.length);
+    if (fw.length > FW_MAX) throw new Error(`固件超过 ${FW_MAX >> 20} MiB staging 上限`);
+    const need = FW_STAGE + fw.length;
+    if (need > wasm.memory.buffer.byteLength) {
+      const pages = Math.ceil((need - wasm.memory.buffer.byteLength) / 65536);
+      if (wasm.memory.grow(pages) < 0)
+        throw new Error(`内存不足：固件需要 ${need} 字节线性内存`);
+      mem = wasm.memory;
+    }
+    put(FW_STAGE, fw);
+    const rc = wasm.sim_init(FW_STAGE, fw.length);
     if (rc !== 0) throw new Error(`sim_init 返回 ${rc}`);
     $('console').textContent = '';
     status(`固件已加载：${fw.length} 字节`);
@@ -158,7 +167,13 @@ function pumpSerial() {
 function loop() {
   if (!running) return;
   const before = Number(wasm.sim_stat_insns());
-  wasm.sim_run(20000);
+  // 按时间预算跑：固定 20000 条/帧会把 wasm 限制在 ~1.2M 条/秒，
+  // 白白浪费 clang -O2 的 15M 条/秒。每帧最多占 12ms，UI 仍可交互。
+  const t0 = performance.now();
+  do {
+    wasm.sim_run(100000);
+    if (wasm.sim_status() !== 0) break;
+  } while (performance.now() - t0 < 12);
   totalInsns = Number(wasm.sim_stat_insns());
   pumpSerial();
   if (totalInsns - before === 0 || wasm.sim_status() !== 0) {

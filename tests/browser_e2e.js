@@ -1,10 +1,25 @@
 /* 用 headless Chromium + CDP 验证 web/app.js 的真实 fetch / Cache Storage / IndexedDB / wasm 桥。 */
 const { spawn } = require('child_process');
 const http = require('http');
+const fs = require('fs');
+const net = require('net');
 
-const PORT = 8123;
-const CDP_PORT = 9223;
+let PORT = 0;
+let CDP_PORT = 0;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/* 取一个空闲端口：固定端口会和上一次遗留的 Chromium/http.server 抢，
+ * 拿到的可能是别的进程（旧 app.js），表现就是测试结果和源码不一致。 */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.on('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
 
 function getJson(url) {
   return new Promise((resolve, reject) => {
@@ -17,8 +32,13 @@ function getJson(url) {
 }
 
 async function main() {
+  PORT = await freePort();
+  CDP_PORT = await freePort();
   const server = spawn('python3', ['-m', 'http.server', String(PORT), '--bind', '127.0.0.1'],
                        { cwd: 'web', stdio: 'ignore' });
+  // 每次用干净的 profile：否则会命中上一次的 HTTP 缓存（旧 app.js/sim.wasm）
+  fs.rmSync('build/chrome-e2e', { recursive: true, force: true });
+  fs.mkdirSync('build/chrome-e2e', { recursive: true });
   const chrome = spawn('chromium', [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
     `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=build/chrome-e2e`, 'about:blank'
@@ -112,6 +132,31 @@ async function main() {
     const get = await evaluate(`(() => { document.getElementById('get').click(); return document.getElementById('fileresult').textContent; })()`);
     if (!get.includes('hello')) throw new Error('hostfs get UI 失败: ' + get);
     console.log('[browser] wasm hostfs get OK:', get);
+
+    // 页面自身的「加载固件」路径：真实 Alpine 固件约 34 MiB，要能扩内存 staging
+    const loaded = await evaluate(`(async () => {
+      document.getElementById('fwurl').value = 'firmware.bin';
+      document.getElementById('load').click();
+      for (let i = 0; i < 300; i++) {
+        const s = document.getElementById('status').textContent || '';
+        if (s.includes('已加载') || s.includes('失败')) return s;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return document.getElementById('status').textContent || '';
+    })()`);
+    if (!(loaded || '').includes('已加载')) throw new Error('页面加载 34 MiB 固件失败: ' + loaded);
+    console.log('[browser] 页面加载 34 MiB 固件 OK:', loaded);
+
+    // 页面「启动」后每帧要按时间预算跑（旧实现固定 20000 条/帧 → ~1.2M/s）
+    const tput = await evaluate(`(async () => {
+      const before = Number(wasm.sim_stat_insns());
+      document.getElementById('start').click();
+      await new Promise(r => setTimeout(r, 1500));
+      document.getElementById('pause').click();
+      return Number(wasm.sim_stat_insns()) - before;
+    })()`);
+    if (tput < 4000000) throw new Error('页面运行吞吐过低（1.5s 只跑了 ' + tput + ' 条）');
+    console.log('[browser] 页面 1.5s 跑 ' + tput + ' 条指令 OK');
     console.log('browser_e2e: all checks passed');
   } finally {
     if (ws) ws.close();
