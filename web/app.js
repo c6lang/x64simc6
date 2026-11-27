@@ -9,6 +9,7 @@ const FW_MAX = 48 << 20;      // 与 src/wasm.c6 的 g_fw_stage 一致
 const NET_RX = SCRATCH + 4 * 0x100000;   // 252 MiB：代理 -> wasm 的收包缓冲
 const NET_TX = NET_RX + 65536;            // 252 MiB + 64 KiB：wasm -> 代理
 const FS_CAP = 1 << 20;
+const WASM_VER = '1.8';   // 换 wasm 时同步 bump：Cache Storage 按 URL 缓存
 
 let wasm = null;
 let mem = null;
@@ -159,7 +160,7 @@ async function initWasm() {
     return;
   }
   status('加载 wasm…');
-  const bytesWasm = await fetchAsset('sim.wasm');
+  const bytesWasm = await fetchAsset('sim.wasm?v=' + WASM_VER);
   const module = await WebAssembly.compile(bytesWasm);
   const inst = await WebAssembly.instantiate(module, {});
   wasm = inst.exports;
@@ -328,6 +329,16 @@ function connectProxy() {
 /* ---------- UI ---------- */
 $('netconnect').onclick = connectProxy;
 $('netdisconnect').onclick = disconnectProxy;
+$('clearcache').onclick = async () => {
+  if (!confirm('清空缓存的 wasm/固件（页面存储的文件不会删除）并重新加载？')) return;
+  try {
+    const names = await caches.keys();
+    for (const n of names) if (n.indexOf('c6sim') === 0) await caches.delete(n);
+    localStorage.removeItem('c6sim.insns');
+    status('缓存已清空，正在重新加载…');
+    setTimeout(() => location.reload(), 300);
+  } catch (e) { status('清空缓存失败：' + e.message); }
+};
 window.addEventListener('beforeunload', disconnectProxy);
 $('load').onclick = loadFirmware;
 $('start').onclick = () => {

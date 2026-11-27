@@ -101,7 +101,7 @@ async function main() {
     if (net !== 200) throw new Error('fetch 状态 ' + net);
     console.log('[browser] 真实 fetch OK: HTTP', net);
 
-    const cache = await evaluate(`caches.open('c6sim-assets-v1').then(c => c.match('sim.wasm')).then(r => !!r)`);
+    const cache = await evaluate(`caches.open('c6sim-assets-v1').then(c => c.keys()).then(ks => ks.some(k => k.url.indexOf('sim.wasm') >= 0))`);
     if (!cache) throw new Error('Cache Storage 未缓存 sim.wasm');
     console.log('[browser] Cache Storage OK');
 

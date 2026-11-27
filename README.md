@@ -55,6 +55,10 @@ cd web && python3 -m http.server 8000
 guest。`tests/browser_tty_login.js` 会从页面点「加载固件」「启动」，在 xterm
 里等到 `login:`、输入 `root` 和 `uname -m`，验证整条 UI + 键盘 + 串口链路。
 
+「固件与网络」里还有**清空缓存并重载**：清掉 `c6sim-*` 的 Cache Storage
+（缓存的 wasm/固件），保留页面存储里的文件；`sim.wasm` 按版本号 URL
+（`sim.wasm?v=…`）取，换构建时 bump 版本即可避免用到旧缓存。
+
 要注意的两点（也是“点了没反应”的常见原因）：
 
 - **先点一下终端再打字**（终端里出现光标），键盘才会进 guest；页面启动后
