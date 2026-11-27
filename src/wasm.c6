@@ -293,6 +293,15 @@ int sim_jit_try2(u64 rip, u32 max_ins)
 #endif
 }
 
+void sim_set_jit_min_n(int n)
+{
+#if defined(C6_JIT)
+    jit_set_min_n(n);
+#else
+    (void)n;
+#endif
+}
+
 void sim_set_jit_mask(int v)
 {
 #if defined(C6_JIT)

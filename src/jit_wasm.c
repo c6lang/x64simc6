@@ -57,6 +57,7 @@ u8 g_jit_bad[524288];
 u8 g_jit_good[524288];   /* 64K 个 64-bit 位图：不可翻译的 RIP，C 侧快速跳过 */
 int g_jit_trace = 0;
 int g_jit_mask = 0;   /* 诊断：按组禁用指令 */
+int g_jit_min_n = 1;  /* 只编译 >= n 条指令的长块（短块每次 JS 切换不划算） */
 u32 g_jit_trace_n = 0;
 u64 g_jit_bad_budget = 0;
 
@@ -1356,6 +1357,8 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
     n = jit_decode_block(rip, ins, &end);
     if (n <= 0)
         return -1;                    /* 真的译不了：标 bad */
+    if (n < g_jit_min_n)
+        return -1;                    /* 短块净亏：标 bad，交给解释器 */
     if (g_m.cpu.exc_pending)
         return -2;                    /* 取指缺页：交给解释器 */
     pa = mem_translate(rip, 0, 0, 0);
@@ -1495,6 +1498,11 @@ void jit_flush(void)
         g_jit_good[i] = 0;
     jit_compiles = 0;      /* 失效后允许重新编译热块 */
     g_jit_flush_gen++;
+}
+
+void jit_set_min_n(int n)
+{
+    g_jit_min_n = n < 1 ? 1 : n;
 }
 
 void jit_set_mask(int v)
