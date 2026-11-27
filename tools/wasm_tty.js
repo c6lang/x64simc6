@@ -36,6 +36,7 @@ const FW_MAX = 48 << 20;
     await WebAssembly.compile(wasmBuf), {});
   const w = inst.exports;
   if (w.__wasm_call_ctors) w.__wasm_call_ctors();
+  if (w.sim_set_rtc) w.sim_set_rtc(Math.floor(Date.now() / 1000));
 
   const fw = fs.readFileSync(FW);
   if (fw.length > FW_MAX) throw new Error(`固件超过 ${FW_MAX >> 20} MiB staging 上限`);

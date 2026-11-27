@@ -164,6 +164,8 @@ async function initWasm() {
   const inst = await WebAssembly.instantiate(module, {});
   wasm = inst.exports;
   mem = wasm.memory;
+  if (typeof wasm.sim_set_rtc === 'function')
+    wasm.sim_set_rtc(Math.floor(Date.now() / 1000));
   initTerm();
   db = await openDB();
   const files = await idbOp('files', 'readonly', s => s.getAll());

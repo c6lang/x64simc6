@@ -171,6 +171,9 @@
       `unpckl/h`、`movmskps/pd`、打包 `cvtdq2ps/cvtps2dq/cvttps2dq`、
       `rcp/rsqrt`（DESIGN §90）；与本机 CPU 对拍 1553 条逐位相同
       （`rcpps/rsqrtps` 故意给精确值，与硬件的 12 位近似不同但不超 SDM 误差界）
+- [ ] wasm 代理下的 HTTPS：guest 的 ClientHello 已到代理、直接重放能拿到
+      完整 ServerHello，但 example.com 的 CDN 边缘 ~2.4s 后直接关闭连接
+      （native HTTPS 正常）；待查（DESIGN §98）。测试暂只断言 HTTP/ICMP
 - [ ] 引导期偶发的「跳进 0x48/0x4a/0x4d 填充页」`#UD`（`--udtrace` 可见，
       进程被 SIGILL 但整机继续跑；引导、登录、`top` 都不受影响）。下一步用
       `--udtrace` + `dmesg` 的 `traps:` 行定位是哪条跳转把 RIP 带进数据页。

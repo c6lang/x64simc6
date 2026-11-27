@@ -135,7 +135,9 @@ server.on('upgrade', (req, socket) => {
                'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n');
 
   const ws = new Ws(socket);
-  const shim = spawn(SIM, ['--netshim'], { stdio: ['pipe', 'pipe', 'inherit'] });
+  // NETSHIM_ARGS 可给 --netshim 传调试参数（例如 --nettrace）
+  const extra = (process.env.NETSHIM_ARGS || '').split(/\s+/).filter(Boolean);
+  const shim = spawn(SIM, ['--netshim'].concat(extra), { stdio: ['pipe', 'pipe', 'inherit'] });
   console.error('[ws_slip_proxy] 客户端接入，启动 ' + SIM + ' --netshim');
 
   ws.onmessage = (buf) => {

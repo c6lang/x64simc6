@@ -9,6 +9,10 @@
  *   ping -c1 10.0.2.2          （本地网关，走 COM2 + shim 回包）
  *   wget http://example.com/   （DNS + TCP + HTTP，真的出外网）
  *
+ * HTTPS 也走同一条 TCP 中继，但 2026-11-27 实测 wasm guest 的 TLS
+ * ClientHello 到达代理后，example.com 的 CDN 边缘会直接关闭连接
+ * （native 的 HTTPS 正常）；这里不把 HTTPS 作为断言，见 DESIGN §98。
+ *
  * 用法：node tests/wasm_net_proxy.js
  */
 const fs = require('fs');
@@ -45,6 +49,7 @@ function freePort() {
   const w = (await WebAssembly.instantiate(
     await WebAssembly.compile(fs.readFileSync('web/sim.wasm')), {})).exports;
   if (w.__wasm_call_ctors) w.__wasm_call_ctors();
+  if (w.sim_set_rtc) w.sim_set_rtc(Math.floor(Date.now() / 1000));
   const fw = fs.readFileSync('build/firmware.bin');
   const need = STAGE + fw.length;
   if (need > w.memory.buffer.byteLength)

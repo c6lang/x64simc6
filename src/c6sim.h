@@ -315,6 +315,7 @@ void pic_raise(struct Machine *m, u8 irq);
 int serial2_space(void);
 int serial2_feed(const u8 *buf, u32 n);
 int serial2_out_take(u8 *dst, int cap);
+void rtc_set_epoch(u64 t);
 
 /* net.c6：用户态 SLIP 网关（native） */
 #if !defined(C6_WASM)

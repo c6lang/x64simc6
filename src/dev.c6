@@ -409,6 +409,15 @@ static void pit_write(u32 port, u8 v)
  */
 static u8 g_cmos_idx = 0;
 
+/* 页面/Node 前端可以调 sim_set_rtc() 把宿主时间传进来（wasm 没有
+ * CLOCK_REALTIME；固定常量会让 HTTPS 证书随时间过期）。 */
+static u64 g_rtc_override = 0;
+
+void rtc_set_epoch(u64 t)
+{
+    g_rtc_override = t;
+}
+
 #if !defined(C6_WASM)
 struct rtc_ts { long tv_sec; long tv_nsec; };
 extern int clock_gettime(int clk, struct rtc_ts *ts);
@@ -417,12 +426,15 @@ extern int clock_gettime(int clk, struct rtc_ts *ts);
 static u64 rtc_epoch(void)
 {
     struct rtc_ts ts = {0};
+    if (g_rtc_override != 0) return g_rtc_override;
     if (clock_gettime(RTC_CLOCK_REALTIME, &ts) != 0) return 0;
     return (u64)ts.tv_sec;
 }
 #else
-/* wasm 侧没有 CLOCK_REALTIME：给 2026 年的常量，证书不会"未生效" */
-static u64 rtc_epoch(void) { return 1795000000ull; }
+static u64 rtc_epoch(void)
+{
+    return g_rtc_override ? g_rtc_override : 1795000000ull;
+}
 #endif
 
 static u8 rtc_bcd(u32 v)

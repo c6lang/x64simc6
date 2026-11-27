@@ -188,6 +188,14 @@ int sim_net_tx(u8 *dst, int cap)
     return serial2_out_take(dst, cap);
 }
 
+/* 宿主时间（Unix 秒）：页面启动时传进来，guest 的 CMOS RTC 用它，
+ * HTTPS 证书校验不会因为固定常量过期。 */
+int sim_set_rtc(u32 t)
+{
+    rtc_set_epoch((u64)t);
+    return 0;
+}
+
 int sim_set_cmdline(const char *s)
 {
     machine_set_cmdline(s);

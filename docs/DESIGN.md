@@ -1791,6 +1791,18 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     1.4KB/480B）。`tests/wasm_net_proxy.js` 一条命令覆盖这条链路；
     `browser_e2e` 覆盖页面「连接」按钮到 WS 代理。
 
+    **代理模式的一个细节**：shim 不在 SYN 时立刻连宿主，而是等 guest 的
+    第一个数据段再 `connect()`。guest 的 TLS/CRNG 首次可能要几十秒才发出
+    ClientHello，先连会被服务器的握手超时踢掉；HTTP/HTTPS 都是客户端先
+    说话，这个延迟没有副作用（native 仍是立即连）。
+
+    **已知问题**：**HTTPS 在 wasm 代理下还不稳定**。同一条 TCP 中继在
+    native guest 里 HTTPS 正常（§96），wasm guest 的 TLS ClientHello 也确实
+    到了代理（抓包 + 直接重放能拿到完整 ServerHello/Certificate），但
+    example.com 的 CDN 边缘在收到后约 2.4s 直接关闭连接、不回任何数据；
+    怀疑和 CDN 对该 ClientHello/连接时序的策略有关，待查。测试只把
+    HTTP/ICMP 作为断言，HTTPS 留作后续。
+
     **限制与安全**：`--netshim` 等于把宿主的网络能力开放给 guest，默认只绑
     `127.0.0.1`，不要暴露到公网（没有认证/白名单）；HTTPS 页面连
     `ws://127.0.0.1` 受浏览器混合内容策略影响（各版本不同），本地

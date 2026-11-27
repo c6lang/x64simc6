@@ -86,7 +86,8 @@ wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
 `--netshim` 不跑 guest，只把 stdin/stdout 上的 SLIP 帧接到 `src/net.c6` 里
 **和 native 完全相同的用户态 NAT**（DNS/TCP/UDP/ICMP），所以 wasm 和 native
 的上网行为一致。`node tests/wasm_net_proxy.js` 会把这条链路完整跑一遍
-（登录 + ping + wget）。
+（登录 + ping + wget http）。HTTPS 走同一条 TCP 中继，但 wasm guest 目前
+实测会被 CDN 边缘关闭连接（native 的 HTTPS 正常），见 DESIGN §98 的已知问题。
 
 注意：`--netshim` 把宿主的网络能力开放给 guest（默认只绑 127.0.0.1，
 不要暴露到公网）；GitHub Pages 是 HTTPS，浏览器对 `ws://127.0.0.1` 的
