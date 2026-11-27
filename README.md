@@ -41,6 +41,13 @@ cd web && python3 -m http.server 8000
 # 打开 http://localhost:8000/
 ```
 
+也可以托管到 GitHub Pages（`sim.wasm` / `firmware.bin` 是构建产物，不在 git
+里，所以 Pages workflow 直接从 release 资产取）：仓库 Settings → Pages →
+Source 选「GitHub Actions」，手动跑一次 `pages` workflow（之后每次 release
+也会自动触发）。它会把**该 release 的** `sim.wasm`、`firmware.bin` 与
+`web/` 组装成站点，打开 <https://c6lang.github.io/x64simc6/> 即可。固件
+34 MB，首次加载后会存进 Cache Storage。
+
 构建 Alpine 固件（需要联网；Alpine 3.20 CDN）：
 
 ```sh

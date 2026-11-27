@@ -1,0 +1,75 @@
+name: pages
+
+# 把 web/ 发布到 GitHub Pages。站点内容用「最新 release 的 tag」组装，保证
+# app.js/index.html 与 sim.wasm 版本一致；sim.wasm 与 firmware.bin 直接取
+# release 资产（都是构建产物，不在 git 里）。
+#
+# 一次性设置：仓库 Settings → Pages → Build and deployment → Source 选
+# 「GitHub Actions」，然后手动跑一次本 workflow（或等下一次 release 自动触发）。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: 解析 release tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "发布 $TAG"
+
+      - name: 取出该 tag 的站点源码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rel.outputs.tag }}
+
+      - name: 下载该 release 的 sim.wasm 与 firmware.bin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/rel/dist /tmp/rel/fw
+          gh release download "${{ steps.rel.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern '*-dist.tar.gz' --pattern '*-firmware.tar.gz' \
+            --dir /tmp/rel --clobber
+          tar xzf /tmp/rel/*-dist.tar.gz -C /tmp/rel/dist
+          tar xzf /tmp/rel/*-firmware.tar.gz -C /tmp/rel/fw
+          ls -lh /tmp/rel/dist/sim.wasm /tmp/rel/fw/firmware.bin
+
+      - name: 组装站点
+        run: |
+          mkdir -p _site
+          cp -r web/. _site/
+          rm -f _site/firmware.bin _site/sim.wasm
+          cp /tmp/rel/dist/sim.wasm _site/sim.wasm
+          cp /tmp/rel/fw/firmware.bin _site/firmware.bin
+          ls -lh _site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
