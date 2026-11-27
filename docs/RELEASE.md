@@ -1,8 +1,14 @@
 # x64simc6 发布说明
 
-## v1.2 变更（开发版，相对 v1.1）
+## v1.2 变更（相对 v1.1）
 
-**外网访问**：Alpine guest 可以真正访问互联网（DNS + TCP/HTTP + ICMP），
+发布日期：2026-11-27
+
+网络版本：guest 通过 COM2 上的 **SLIP + 用户态 NAT** 真正访问外网
+（DNS / TCP / HTTP / HTTPS / ICMP），并修掉 bswap、HLT 空闲快进、CMOS RTC
+三个模拟器缺陷。指令语义不变（difftest 1252/1252）。
+
+**外网访问**：Alpine guest 可以真正访问互联网（DNS + TCP/HTTP/HTTPS + ICMP），
 不需要 root/tap，也不依赖 libslirp。
 
 - **设备**：`src/dev.c6` 增加 COM2 16550A（`0x2f8..0x2ff` / IRQ3 →
@@ -41,10 +47,20 @@
 `SIGSTKSZ` 不是常量导致的编译失败，本机可以直接跑 difftest。
 
 验收：`./build.sh test` 全绿（native payload/单元/CPL3/pcache/wasm 冒烟）、
+`./tests/smoke.sh` 通过（含 headless Chromium 端到端）、
 `tools/boot_login.py` PASS、difftest **1252/1252**、guest 内
 `ping -c1 10.0.2.2` / `ping -c1 10.0.2.3` 0% loss、
 `wget http://example.com/` 成功、`wget https://qq.com/` 证书校验通过
-（RTC 对时后，132 KiB）。
+（RTC 对时后，132 KiB）；源码包解压后独立 `./build.sh test` 全过。
+
+### 产物（`build/release/v1.2/`）
+
+| 文件 | 内容 |
+| --- | --- |
+| `x64simc6-1.2-src.tar.gz` | 源码（git archive，不含 build/） |
+| `x64simc6-1.2-dist.tar.gz` | `sim`（native）+ `sim.wasm` + `web/` + 文档 |
+| `x64simc6-1.2-firmware.tar.gz` | `build/firmware.bin`（Alpine 内核 + 带 slip/slhc 的 initrd，34 MB） |
+| `SHA256SUMS` | 上面三件的校验和 |
 
 ## v1.1 变更（相对 v1.0.2）
 

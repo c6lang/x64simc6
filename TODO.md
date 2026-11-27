@@ -210,6 +210,8 @@
       停在 1999-11-30 导致 `wget https://…` 证书校验失败（DESIGN §96）
 - [x] HTTPS 验证：guest `date -u` 与宿主一致，`wget https://qq.com/` 证书
       校验通过（132 KiB）；HTTP/DNS/ping 同时正常
+- [x] 发布 v1.2（tag v1.2 + src/dist/firmware 三件产物 + SHA256SUMS，
+      产物在 `build/release/v1.2/`；源码包解压后独立 `./build.sh test` 全过）
 - [ ] 后续（未做）：IPv6、DHCP、TCP 窗口缩放/拥塞控制（现在固定窗口，
       MSS 1460）、UDP 的严格无状态 NAT（现在是逐流表）；wasm 路径没有
       真实 socket，浏览器端仍走 `hostfs`/fetch 桥，不做 SLIP

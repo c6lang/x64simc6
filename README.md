@@ -1,10 +1,12 @@
-# x64simc6 v1.1
+# x64simc6 v1.2
 
 用 C6 语言实现的 x86-64 模拟器，可在 native 与浏览器 wasm 两种形态运行；浏览器端通过真实 `fetch()` + Cache Storage + IndexedDB 提供网络与“页面存储当文件系统”。
 
-**当前状态（v1.1）**：原生 Alpine Linux 固件在 native、wasm（Node 驱动）和
+**当前状态（v1.2）**：原生 Alpine Linux 固件在 native、wasm（Node 驱动）和
 headless Chromium 三条路径上都已引导到 `(none) login:`，自动输入 `root` 后
-执行 `uname -m` 得到 `x86_64`。发布说明见 [`docs/RELEASE.md`](docs/RELEASE.md)。
+执行 `uname -m` 得到 `x86_64`；native 版还能通过 COM2 上的 **SLIP + 用户态
+NAT** 真正访问外网（DNS / TCP / HTTP / HTTPS / ICMP，见下文「外网访问」）。
+发布说明见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
 ## 快速开始
 
