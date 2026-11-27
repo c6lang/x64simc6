@@ -120,6 +120,41 @@ Load average: 1.12 1.23 0.52 1/57 445
 新增调试开关 `--udtrace`：遇到未实现的编码时打印 RIP、opcode 和 8 字节
 指令，配合 `objdump -d` 能在几分钟内定位下一条要补的指令。
 
+### 4. 整套 x87 FPU（`awk` 的十进制结果与真机一致）
+
+SSE 只覆盖了 musl 的 `printf` 一小半：十进制**解析**（`strtod`）和 `%g` 的
+数字生成走的是 `long double` + x87。新增 `src/fpu.c6` 把协处理器补齐：
+8 层栈、六种宽度存取、四则、比较、`fsqrt/frndint/fscale/fprem/fxtract`、
+常量、超越函数、控制/状态字（`D8..DF` 全部逃逸码）。
+
+两个关键点：
+
+1. **精度**：c6c 自举路径的 `long double` 其实只是 `double`，但
+   `c6c --emit-ctu` 生成的是真 C，交给宿主 `cc` 就是 80 位扩展精度。于是
+   `fpu_real` 在默认构建取 `long double`（64 位尾数、m80 按位搬），
+   `C6_PURE`/wasm 回退 `double`。用 `double` 存 x87 时，`0.1` 会被解析成
+   `0.099999999999994315`、`awk 'BEGIN{print 22/7}'` 印成 `3.14285`。
+2. **舍入模式**：`fistp`/`frndint` 必须按 `cw` 的 RC 位走。musl 会临时
+   `fldcw` 到向零截断再 `fistp` 取数字；只做就近偶数会让残差符号翻转，
+   循环里的值越滚越大，最终 `fistp` 撞出不定值、`-inf`、死循环写爆栈 ——
+   这正是 `awk 'BEGIN{print 22/7}'` 段错误的根因。
+
+现在 guest 里：
+
+```
+(none):~# awk "BEGIN{printf "%.17g %.17g\n", 0.1, 0.1+0.2}"
+0.10000000000000001 0.30000000000000004
+(none):~# awk "BEGIN{print 22/7, sqrt(2), 1/3}"
+3.14286 1.41421 0.333333
+(none):~# awk "BEGIN{printf "%.12f\n", sqrt(2)}"
+1.414213562373
+```
+
+与真机逐位一致。x87 的验证方式是把同一段机器码分别喂给模拟器和本机 CPU
+（`tools/difftest` 的 blob 机制）比寄存器/数据页哈希：四则、`fild/fistp`、
+`fcomip/fnstsw`、m80 往返、`fsqrt`，以及 musl 那个“每轮乘 1e9 取 9 位数字”
+的循环（39 轮逐位相同）。
+
 ### 验收
 
 | 项 | 命令 | 结果 |
@@ -128,6 +163,7 @@ Load average: 1.12 1.23 0.52 1/57 445
 | 指令差分 | `tools/difftest/difftest.py` | 1236/1236，自举与默认两种构建各跑一遍 |
 | 900M 引导 | `build/sim firmware.bin --stopt=900000000` | `ser_out=309 irq4=181`，逐字节一致 |
 | 浮点/`top` | 登录后 `top -b -n1` | 正常输出（含 `Load average` 浮点格式化） |
+| x87/十进制 | `awk 'BEGIN{printf "%.17g", 0.1+0.2}'` | `0.30000000000000004`，与真机一致 |
 | 登录验收 | `tools/boot_login.py` | 两种构建都 PASS（`uname -m` → `x86_64`） |
 
 ---

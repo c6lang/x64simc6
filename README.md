@@ -43,8 +43,9 @@ cd web && python3 -m http.server 8000
 在真实终端里跑时模拟器会把终端切到 raw：输入不会显示两遍，`Ctrl-C` 原样
 送给 guest，**`Ctrl-]` 退出**。约 1 分钟出现 `(none) login:`，输入 `root`
 回车进 shell；`/root` 是空的（`ls` 自然没有输出），可以试 `ls /`、
-`cat /etc/os-release`、`uname -a`、`df -h`、`top -b -n1`（v1.1 补上了 SSE
-浮点指令，`top` 的 `Load average` 等 `%f` 输出与真机一致）。
+`cat /etc/os-release`、`uname -a`、`df -h`、`top -b -n1`（v1.1 补上了 SSE 浮点，
+x87 FPU 也整套实现了：`awk 'BEGIN{print 22/7, sqrt(2)}'`、`printf "%.17g"`
+这类十进制转换与真机逐位一致，`top` 的 `Load average` 等 `%f` 输出正常）。
 遇到不认识的指令可以用 `--udtrace` 打印 RIP 和指令字节。
 
 ## 验证
@@ -63,8 +64,14 @@ node tests/wasm_login.js                          # wasm 里跑到 login 并自�
   `C6_PURE=1` 自举构建约 17 分钟；wasm（tcc-c6 出码）约 11 分钟。
 - wasm 路径禁用 `interface` / `err` / `f-string` 与自定义 import；64 位一律用
   `unsigned long long`（详见 `docs/DESIGN.md` §13）。
-- SSE 浮点只做到 `add/sub/mul/div/sqrt`、比较和整/浮转换：MXCSR、FXSAVE、
-  `sqrt` 的末位和 `0x2d` 的舍入模式不建模，够 `printf`/`top` 用。
+- SSE 浮点做到了 `add/sub/mul/div/sqrt`、比较、整/浮转换和 `cvtss2sd` 一族：
+  MXCSR、FXSAVE、`sqrt` 的末位和 `0x2d` 的舍入模式不建模，够 `printf`/`top`
+  用；min/max、`cmpps`、shuffle/unpack、`movmskps`、打包转换与 `rcp/rsqrt`
+  还没补（真机代码若用到会 `#UD`，可用 `--udtrace` 定位）。
+- x87 的精度取决于构建路径：默认构建（`--emit-ctu` + 宿主 `cc`）的
+  `fpu_real` 是宿主的 `long double`（真 80 位、64 位尾数），`C6_PURE=1`
+  自举和 wasm 路径的 `long double` 只是 `double`，x87 最后 1～2 位有效数字
+  可能与真机不同（十进制解析/格式化的末位会差；`docs/DESIGN.md` §89）。
 - 浏览器 virtio-net / c6blk 是 MMIO 寄存器桩；真正的网络与文件系统走
   `hostfs` 桥（`fetch()` / Cache Storage / IndexedDB），已由 `browser_e2e` 验证。
 

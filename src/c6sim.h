@@ -11,6 +11,19 @@ typedef short i16;
 typedef int i32;
 typedef long long i64;
 
+/* x87 寄存器用的实数类型。
+ *   默认构建（c6c --emit-ctu → 宿主 cc）：long double 就是宿主的 80 位 x87，
+ *   于是 fadd/fmul/fdiv/fsqrt 直接吃宿主的扩展精度，64 位尾数、80 位语义都对
+ *   —— musl 的 strtod/printf 十进制转换依赖 64 位尾数，用 double 会算错末几位。
+ *   c6c 自举路径和 tcc-c6 的 wasm 后端把 long double 当 double（实测 c6c 只
+ *   生成 double 指令），那里退回 double。两条路径的差异只体现在 x87 的最后
+ *   一两位有效数字上（见 DESIGN §89）。 */
+#if defined(C6_PURE) || defined(C6_WASM)
+typedef double fpu_real;
+#else
+typedef long double fpu_real;
+#endif
+
 
 /* 客户机物理内存布局 */
 #define RAM_SIZE        0x08000000u   /* 128 MiB */
@@ -126,6 +139,12 @@ struct CPUState {
     u64 xmm[16][2];
     u32 mxcsr;
     u8 fxdata[512];
+    /* x87：ST(0..7) 用 fpu_real（默认路径是宿主 long double = 真 80 位，
+     * 自举/wasm 路径回退 double），见 DESIGN §89 */
+    fpu_real st[8];
+    u16 fpcw;
+    u16 fpsw;
+    u8 ftop;
 };
 
 struct SerialState {
@@ -235,6 +254,14 @@ void mem_w64(u64 a, u64 v);
 void mem_copy_from(u64 dst, const u8 *src, u64 n);
 u64 mem_translate(u64 va, u32 write, u32 user, u32 *pf_ec);
 void mem_tlb_flush(void);
+
+/* fpu.c6：位型 ↔ 宿主浮点、sqrt（cpu.c6 的 SSE 与 x87 共用） */
+double x64_bits_to_d(u64 a);
+u64 x64_d_to_bits(double x);
+float x64_bits_to_f(u32 a);
+u32 x64_f_to_bits(float x);
+double x64_sqrt_d(double x);
+void fpu_op(struct CPUState *c, u8 esc, u8 modrm, struct Operand *o);
 void raise_irq(struct CPUState *c, u32 vec);
 
 /* cpu.c6 */

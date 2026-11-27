@@ -16,7 +16,7 @@ CC=${CC:-cc}
 OPT=${OPT:--O2}
 C6_PURE=${C6_PURE:-0}
 
-CORE="src/mem.c6 src/dev.c6 src/cpu.c6 src/boot.c6 src/machine.c6 src/host.c6"
+CORE="src/mem.c6 src/dev.c6 src/fpu.c6 src/cpu.c6 src/boot.c6 src/machine.c6 src/host.c6"
 
 usage() {
     cat <<'EOF'
@@ -68,7 +68,7 @@ native_fast() {
 }
 
 native_pure() {
-    "$C6C" -I src $CORE src/main.c6 -o build/sim
+    "$C6C" -DC6_PURE=1 -I src $CORE src/main.c6 -o build/sim
     echo "native: build/sim (c6c 自举)"
 }
 

@@ -143,9 +143,22 @@
       不写软浮点，DESIGN §87）；顺手修 `movsd/movss` 多写 8 字节的内存踩踏（§88）
 - [x] `--udtrace` 调试开关：打印未实现编码的 RIP/opcode/指令字节
 - [x] Alpine 里 `top -b -n1` 正常输出（`Load average` 等 `%f` 与真机一致）
+- [x] 整套 x87 FPU（`src/fpu.c6`）：8 层栈、`m32/m64/m80/m16/m32int/m64int`
+      存取、四则、比较、`fsqrt/frndint/fscale/fprem/fxtract`、常量、超越函数、
+      控制/状态字；`fpu_real` 默认取宿主 `long double`（真 80 位、64 位尾数），
+      自举/wasm 回退 `double`（DESIGN §89）
+- [x] `fistp/frndint` 按 `cw` 的 RC 位舍入（修 `awk 'BEGIN{print 22/7}'`
+      段错误：RC=3 截断被当成就近偶数，残差滚大 → 死循环写爆栈）
+- [x] guest 十进制与真机逐位一致：`0.1`、`0.1+0.2`、`22/7`、`sqrt(2)`、
+      `printf "%.17g"`；`awk 'BEGIN{print 22/7, sqrt(2), 1/3}'` →
+      `3.14286 1.41421 0.333333`
 
 ## 阶段 9 —— 未结问题
 
+- [ ] SSE 浮点还缺：`min/max`(`5d/5f`)、`cmpss/cmp*_ps/pd`(`c2`)、
+      `shufps/pshufd`(`c6/70`)、`unpcklps/unpckhps`(`14/15`)、`movmskps`(`50`)、
+      `cvtdq2ps/cvtps2dq`(`5b/5a` 打包形式)、`rcp/rsqrt`(`53/52`)；
+      真机代码用到会 `#UD`，用 `--udtrace` 定位。
 - [ ] 引导期偶发的「跳进 0x48/0x4a/0x4d 填充页」`#UD`（`--udtrace` 可见，
       进程被 SIGILL 但整机继续跑；引导、登录、`top` 都不受影响）。下一步用
       `--udtrace` + `dmesg` 的 `traps:` 行定位是哪条跳转把 RIP 带进数据页。

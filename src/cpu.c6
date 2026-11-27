@@ -986,58 +986,13 @@ static void ud_report(u64 start, u32 two, u32 op, u32 rex)
 
 /* ===== SSE 浮点运算 =====
  * c6 自带 double/float，直接把位型当宿主浮点算：NaN、±0、次正规数、舍入
- * 全部由 x86-64 的 SSE2 指令完成，和真机一致。c6c 自举路径同样支持浮点。 */
-union FpD { u64 u; double d; };
-union FpF { u32 u; float f; };
-
-static double fp_d_get(u64 a)
-{
-    union FpD v = {0};
-    v.u = a;
-    return v.d;
-}
-
-static u64 fp_d_put(double x)
-{
-    union FpD v = {0};
-    v.d = x;
-    return v.u;
-}
-
-static float fp_f_get(u32 a)
-{
-    union FpF v = {0};
-    v.u = a;
-    return v.f;
-}
-
-static u32 fp_f_put(float x)
-{
-    union FpF v = {0};
-    v.f = x;
-    return v.u;
-}
-
-/* 不链 libm（自举路径没有 -lm），牛顿迭代到 1ulp 以内足够 printf 用 */
-static double fp_d_sqrt(double x)
-{
-    double r = 0.0;
-    u64 b = 0;
-    u32 i = 0;
-    if (x != x)
-        return x;                              /* NaN */
-    if (x < 0.0)
-        return (x - x) / (x - x);              /* 负数开方 → NaN */
-    if (x == 0.0)
-        return x;                              /* ±0 */
-    b = fp_d_put(x);
-    if ((b & 0x7ff0000000000000ull) == 0x7ff0000000000000ull)
-        return x;                              /* +inf */
-    r = fp_d_get((b >> 1) + 0x1ff8000000000000ull);
-    for (i = 0; i < 6; i++)
-        r = 0.5 * (r + x / r);
-    return r;
-}
+ * 全部由 x86-64 的 SSE2 指令完成，和真机一致。位型转换和 sqrt 在 fpu.c6
+ * （x87 也用同一份）。 */
+#define fp_d_get x64_bits_to_d
+#define fp_d_put x64_d_to_bits
+#define fp_f_get x64_bits_to_f
+#define fp_f_put x64_f_to_bits
+#define fp_d_sqrt x64_sqrt_d
 
 /* opc：0x58 加、0x59 乘、0x5c 减、0x5e 除、0x51 开方 */
 static u64 fp_d_bin(u32 opc, u64 a, u64 b)
@@ -2511,25 +2466,10 @@ int step(struct CPUState *c)
         }
         case 0xd8: case 0xd9: case 0xda: case 0xdb:
         case 0xdc: case 0xdd: case 0xde: case 0xdf: {
-            /* x87：引导期只用到状态管理，寄存器运算按 NOP 处理 */
+            /* x87：实现在 fpu.c6（ST 栈 + m32/m64/m80 存取 + 四则/比较/超越）*/
             u8 m1 = fetch8(c);
-            u32 mod1 = (u32)m1 >> 6;
-            u32 regf = (u32)(m1 >> 3) & 7;
-            if (mod1 != 3) {
-                rm = decode_modrm(c, m1, rex, addrsz);
-                if (op == 0xd9 && regf == 5) {
-                    (void)mem_r16(rm.addr);          /* fldcw */
-                } else if (op == 0xd9 && regf == 7) {
-                    mem_w16(rm.addr, 0x037f);        /* fnstcw */
-                } else if (op == 0xdd && regf == 7) {
-                    mem_w16(rm.addr, 0);             /* fnstsw */
-                }
-            } else {
-                if (op == 0xdd && m1 == 0xe0)
-                    c->r[0] = (c->r[0] & ~(u64)0xffff) | 0;   /* fnstsw ax */
-                if (op == 0xdf && m1 == 0xe0)
-                    c->r[0] = (c->r[0] & ~(u64)0xffff) | 0;
-            }
+            struct Operand xo = decode_modrm(c, m1, rex, addrsz);
+            fpu_op(c, (u8)op, m1, &xo);
             break;
         }
         case 0x9b: break;   /* fwait */
@@ -2800,6 +2740,9 @@ void cpu_init(struct CPUState *c)
     }
     c->msr_apicbase = 0xfee00800u;
     c->mxcsr = 0x1f80;
+    c->fpcw = 0x037f;
+    c->fpsw = 0;
+    c->ftop = 0;
     c->exc_pending = 0;
     c->exc_vec = 0;
     c->exc_ec = 0;

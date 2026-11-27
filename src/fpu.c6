@@ -1,0 +1,1097 @@
+/* fpu.c6 —— x87 浮点单元
+ *
+ * 实现范围（够 musl 的 strtod/printf 和 busybox 的 awk/top 用）：
+ *   - ST(0..7) 栈：压栈/弹栈/fxch/ffree/fdecstp/fincstp
+ *   - 存取：m32fp / m64fp / m80fp / m16int / m32int / m64int
+ *   - 四则：fadd/fsub/fsubr/fmul/fdiv/fdivr（m32/m64 与 ST(i) 形式，含 *p 弹栈形式）
+ *   - 比较：fcom/fcomp/fcompp/fucom/fucomp/fcomi/fcomip/fucomi/fucomip/ftst
+ *   - 一元/常量：fld1/fldz/fldpi/fldl2t/fldl2e/fldlg2/fldln2/fabs/fchs/fsqrt/
+ *                frndint/fscale/fprem/fprem1/fxtract
+ *   - 超越函数：f2xm1/fyl2x/fyl2xp1/fpatan/fsin/fcos/fsincos/fptan
+ *   - 控制/状态字：fldcw/fnstcw/fnstsw
+ *
+ * 精度：ST 用宿主 double 存 —— 80 位扩展精度没有建模（c6c 自举路径的
+ * long double 运行时不正确，见 DESIGN §89）；m80 存取按 double ↔ 扩展精度
+ * 手工转换。舍入模式/精度控制/浮点异常标志不建模（一律按就近偶数算）。
+ * 超越函数用自写级数（自举路径不链 libm），精度 ~1e-15。
+ */
+#include <stdio.h>
+
+#include "c6sim.h"
+
+/* ---------------- 位型 ↔ 宿主浮点（cpu.c6 的 SSE 也用这几个） ---------------- */
+
+union FpBitsD { u64 u; double d; };
+
+union FpBitsF { u32 u; float f; };
+
+double x64_bits_to_d(u64 a)
+{
+    union FpBitsD v = {0};
+    v.u = a;
+    return v.d;
+}
+
+u64 x64_d_to_bits(double x)
+{
+    union FpBitsD v = {0};
+    v.d = x;
+    return v.u;
+}
+
+float x64_bits_to_f(u32 a)
+{
+    union FpBitsF v = {0};
+    v.u = a;
+    return v.f;
+}
+
+u32 x64_f_to_bits(float x)
+{
+    union FpBitsF v = {0};
+    v.f = x;
+    return v.u;
+}
+
+/* ---------- 正确舍入的 sqrt（不链 libm）----------
+ * 牛顿迭代先给 ~1ulp 的近似，再用「精确比较中点」决定舍入方向：
+ * r = R·2^(er-52)、x = X·2^(ex-52)，中点 m = (2R±1)·2^(er-53)，
+ * 比较 m² 与 x 等价于比较 (2R±1)² 与 X·2^d（d = ex-2er+54），
+ * 用 64×64→128 的整数乘法做精确比较。 */
+
+static void fpu_mul64(u64 a, u64 b, u64 *hi, u64 *lo)
+{
+    u64 a0 = a & 0xffffffffull, a1 = a >> 32;
+    u64 b0 = b & 0xffffffffull, b1 = b >> 32;
+    u64 p00 = a0 * b0, p01 = a0 * b1, p11 = a1 * b1;
+    u64 p10 = a1 * b0;
+    u64 mid = (p00 >> 32) + (p01 & 0xffffffffull) + (p10 & 0xffffffffull);
+    *lo = (mid << 32) | (p00 & 0xffffffffull);
+    *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+}
+
+static u32 fpu_cmp128(u64 ah, u64 al, u64 bh, u64 bl)
+{
+    if (ah != bh)
+        return ah > bh ? 1u : 0u;      /* 返回 1 表示 a > b，下面用 2 表示 < */
+    if (al == bl)
+        return 3u;                      /* 相等 */
+    return al > bl ? 1u : 0u;
+}
+
+/* 把 128 位值左移 n（n <= 63） */
+static void fpu_shl128(u64 *hi, u64 *lo, u32 n)
+{
+    u64 h = *hi, l = *lo;
+    if (n == 0)
+        return;
+    *hi = (h << n) | (l >> (64 - n));
+    *lo = l << n;
+}
+
+/* x 与 ((2R+num)·2^(er-53))² 的精确比较：2=m²<x，3=相等，1=m²>x，0=算不了 */
+static u32 fpu_cmp_mid(u64 R, i32 er, u64 X, i32 ex, i32 num)
+{
+    u64 a2 = 0, a1 = 0, a0 = 0, b1 = 0, b0 = 0;
+    i32 d = 0;
+    u64 t = 0;
+    if (num > 0)
+        t = 2 * R + 1;
+    else
+        t = 2 * R - 1;
+    fpu_mul64(t, t, &a1, &a0);          /* (2R±1)² ≤ 2^108 */
+    d = ex - 2 * er + 54;
+    if (d >= 0) {
+        if (d > 60)
+            return 0;
+        b1 = X >> (64 - d);
+        b0 = X << d;
+        if (d == 0) { b1 = 0; b0 = X; }
+    } else {
+        if (d < -60)
+            return 0;
+        a2 = a1;
+        fpu_shl128(&a1, &a0, (u32)(-d));
+        if (a2 != 0)
+            return 1;                   /* 左边溢出 128 位 → 必然更大 */
+    }
+    if (a1 != b1)
+        return a1 > b1 ? 1u : 2u;
+    if (a0 != b0)
+        return a0 > b0 ? 1u : 2u;
+    return 3u;
+}
+
+/* 取 double 的 53 位尾数（含隐含位）与无偏阶码；非正规/Inf/NaN 返回 0 */
+static u32 fpu_get_mant(double v, u64 *M, i32 *E)
+{
+    u64 b = 0;
+    u32 ef = 0;
+    b = x64_d_to_bits(v);
+    ef = (u32)((b >> 52) & 0x7ff);
+    if (ef == 0 || ef == 0x7ff)
+        return 0;
+    *M = (b & 0xfffffffffffffull) | (1ull << 52);
+    *E = (i32)ef - 1023;
+    return 1;
+}
+
+static double fpu_ulp_up(double v)
+{
+    u64 b = x64_d_to_bits(v);
+    if (v < 0.0)
+        b = b - 1;
+    else
+        b = b + 1;
+    return x64_bits_to_d(b);
+}
+
+static double fpu_ulp_down(double v)
+{
+    u64 b = x64_d_to_bits(v);
+    if (v < 0.0)
+        b = b + 1;
+    else
+        b = b - 1;
+    return x64_bits_to_d(b);
+}
+
+double x64_sqrt_d(double x)
+{
+    double r = 0.0;
+    u64 b = 0, X = 0, R = 0;
+    i32 ex = 0, er = 0;
+    u32 i = 0, c = 0;
+    if (x != x)
+        return x;
+    if (x < 0.0)
+        return x64_bits_to_d(0x7ff8000000000000ull);
+    if (x == 0.0)
+        return x;
+    b = x64_d_to_bits(x);
+    if ((b & 0x7ff0000000000000ull) == 0x7ff0000000000000ull)
+        return x;
+    r = x64_bits_to_d((b >> 1) + 0x1ff8000000000000ull);
+    for (i = 0; i < 7; i++)
+        r = 0.5 * (r + x / r);
+    /* 用精确中点比较把最后 1ulp 定下来 */
+    if (fpu_get_mant(r, &R, &er) != 0 && fpu_get_mant(x, &X, &ex) != 0) {
+        c = fpu_cmp_mid(R, er, X, ex, 1);
+        if (c == 2)
+            r = fpu_ulp_up(r);
+        else if (c == 3 && (R & 1) != 0)
+            r = fpu_ulp_up(r);
+        else if (c == 1) {
+            c = fpu_cmp_mid(R, er, X, ex, -1);
+            if (c == 2)
+                r = fpu_ulp_down(r);
+            else if (c == 3 && (R & 1) != 0)
+                r = fpu_ulp_down(r);
+        }
+    }
+    return r;
+}
+
+/* ---------------- 常量与数学辅助 ---------------- */
+
+static fpu_real fpu_pi(void)
+{
+    return 3.14159265358979323846;
+}
+
+static fpu_real fpu_ln2(void)
+{
+    return 0.69314718055994530942;
+}
+
+static fpu_real fpu_nan(void)
+{
+    return x64_bits_to_d(0x7ff8000000000000ull);
+}
+
+static fpu_real fpu_inf(void)
+{
+    return x64_bits_to_d(0x7ff0000000000000ull);
+}
+
+static fpu_real fpu_abs_v(fpu_real v)
+{
+    if (v < 0.0)
+        return -v;
+    if (v == 0.0)
+        return 0.0;                 /* -0 → +0 */
+    return v;
+}
+
+/* 2^k，k 先夹到 fpu_real 正规范围 */
+static fpu_real fpu_pow2(i32 k)
+{
+    u64 u = 0;
+    if (k > 1023)
+        k = 1023;
+    if (k < -1022)
+        k = -1022;
+    u = ((u64)(u32)(k + 1023)) << 52;
+    return x64_bits_to_d(u);
+}
+
+static fpu_real fpu_scalbn(fpu_real v, i32 k)
+{
+    while (k > 1000) {
+        v = v * fpu_pow2(1000);
+        k = k - 1000;
+    }
+    while (k < -1000) {
+        v = v * fpu_pow2(-1000);
+        k = k + 1000;
+    }
+    return v * fpu_pow2(k);
+}
+
+/* x87 的 fsqrt：80 位精度用 fpu_real 做牛顿迭代（种子取 double sqrt） */
+static fpu_real fpu_sqrt_r(fpu_real x)
+{
+    fpu_real y = 0.0;
+    fpu_real r = 0.0;
+    i32 m = 0;
+    u32 i = 0;
+    if (x != x)
+        return x;
+    if (x < 0.0)
+        return fpu_nan();
+    if (x == 0.0)
+        return x;
+    y = x;
+    while (y > 1e300) {                 /* 超出 double 表示范围先缩 */
+        y = y * fpu_pow2(-1000);
+        m = m + 500;
+    }
+    while (y < 1e-300) {
+        y = y * fpu_pow2(1000);
+        m = m - 500;
+    }
+    r = (fpu_real)x64_sqrt_d((double)y);
+    for (i = 0; i < 3; i++)
+        r = 0.5 * (r + y / r);
+    if (m != 0)
+        r = fpu_scalbn(r, m);
+    return r;
+}
+
+/* 就近偶数取整（x87 的 frndint / fistp 默认舍入） */
+/* 按 cw 的舍入模式取整：RC=0 就近偶数、1 向下、2 向上、3 向零。
+ * musl 的 printf/strtod 会用 fldcw 临时切到 RC=3（截断）再做 fistp，
+ * 这里必须跟着 cw 走，否则十进制数字会串。 */
+static fpu_real fpu_rnd_dir(fpu_real v, u32 rc)
+{
+    i64 fi = 0;
+    fpu_real f = 0.0;
+    fpu_real r = 0.0;
+    if (v != v)
+        return v;
+    if (v >= 9.007199254740992e15 || v <= -9.007199254740992e15)
+        return v;                              /* 已超出整数精度 */
+    fi = (i64)v;                               /* C 转换 = 向零截断 */
+    f = (fpu_real)fi;
+    r = v - f;                                 /* r 与 v 同号，|r| < 1 */
+    if (rc == 3) return f;                     /* 向零 */
+    if (rc == 1) return (r > 0.0) ? f - 1.0 : f;   /* 向下 */
+    if (rc == 2) return (r < 0.0) ? f + 1.0 : f;   /* 向上 */
+    if (r > 0.5)
+        f = f + 1.0;
+    else if (r < -0.5)
+        f = f - 1.0;
+    else if (r == 0.5 && (fi & 1) != 0)
+        f = f + 1.0;
+    else if (r == -0.5 && (fi & 1) != 0)
+        f = f - 1.0;
+    return f;
+}
+
+static fpu_real fpu_rndint(struct CPUState *c, fpu_real v)
+{
+    return fpu_rnd_dir(v, (u32)((c->fpcw >> 10) & 3));
+}
+
+/* ln(x)：拆指数 + atanh 级数 */
+static fpu_real fpu_ln(fpu_real x)
+{
+    u64 b = 0;
+    i32 e = 0;
+    fpu_real m = 0.0;
+    fpu_real z = 0.0, z2 = 0.0, s = 0.0, term = 0.0;
+    u32 n = 0;
+    if (x != x)
+        return x;
+    if (x == 0.0)
+        return -fpu_inf();
+    if (x < 0.0)
+        return fpu_nan();
+    if (x == fpu_inf())
+        return x;
+    b = x64_d_to_bits(x);
+    e = (i32)((b >> 52) & 0x7ff) - 1023;
+    m = x64_bits_to_d((b & 0xfffffffffffffull) | 0x3ff0000000000000ull);
+    if (m > 1.4142135623730951) {
+        m = m * 0.5;
+        e = e + 1;
+    }
+    z = (m - 1.0) / (m + 1.0);
+    z2 = z * z;
+    s = 0.0;
+    term = z;
+    for (n = 1; n <= 41; n = n + 2) {
+        s = s + term / (fpu_real)n;
+        term = term * z2;
+    }
+    return 2.0 * s + (fpu_real)e * fpu_ln2();
+}
+
+/* exp(t) - 1，|t| 不大时用泰勒（f2xm1 只要求 |t| <= ln2） */
+static fpu_real fpu_expm1(fpu_real t)
+{
+    fpu_real s = 0.0;
+    fpu_real term = 0.0;
+    u32 n = 0;
+    s = t;
+    term = t;
+    for (n = 2; n <= 20; n++) {
+        term = term * t / (fpu_real)n;
+        s = s + term;
+    }
+    return s;
+}
+
+/* 浮点取余（fprem/fprem1）：逐次按 2 的幂减 */
+static fpu_real fpu_fmod(fpu_real a, fpu_real b)
+{
+    fpu_real r = 0.0;
+    fpu_real d = 0.0;
+    fpu_real t = 0.0;
+    u32 n = 0;
+    if (a != a || b != b)
+        return fpu_nan();
+    if (b == 0.0)
+        return fpu_nan();
+    if (a == fpu_inf() || a == -fpu_inf())
+        return fpu_nan();
+    r = a;
+    d = b;
+    if (d < 0.0)
+        d = -d;
+    if (r < 0.0)
+        r = -r;
+    n = 0;
+    while (r >= d) {
+        t = d;
+        while (t * 2.0 <= r && t * 2.0 > t)
+            t = t * 2.0;
+        r = r - t;
+        n = n + 1;
+        if (n > 4000)
+            break;
+    }
+    if (a < 0.0)
+        r = -r;
+    return r;
+}
+
+/* atan：|x|>1 用 pi/2-atan(1/x)，再 4 次半角把区间压到 ~0.06 后用级数 */
+static fpu_real fpu_atan(fpu_real x)
+{
+    fpu_real s = 0.0;
+    fpu_real term = 0.0;
+    fpu_real x2 = 0.0;
+    fpu_real y = 0.0;
+    u32 n = 0, k = 0;
+    i32 neg = 0;
+    if (x != x)
+        return x;
+    if (x < 0.0) {
+        neg = 1;
+        x = -x;
+    }
+    if (x > 1.0) {
+        y = fpu_atan(1.0 / x);
+        if (neg)
+            return -(fpu_pi() * 0.5 - y);
+        return fpu_pi() * 0.5 - y;
+    }
+    for (k = 0; k < 4; k++)
+        x = x / (1.0 + fpu_sqrt_r(1.0 + x * x));
+    x2 = x * x;
+    s = 0.0;
+    term = x;
+    for (n = 1; n <= 41; n = n + 2) {
+        s = s + term / (fpu_real)n;
+        term = -term * x2;
+    }
+    s = s * 16.0;
+    if (neg)
+        return -s;
+    return s;
+}
+
+/* 把参数化到 [-pi, pi] */
+static fpu_real fpu_reduce2pi(fpu_real x)
+{
+    fpu_real t = 0.0;
+    if (x != x)
+        return x;
+    if (x == fpu_inf() || x == -fpu_inf())
+        return fpu_nan();
+    t = fpu_fmod(x, fpu_pi() * 2.0);
+    if (t > fpu_pi())
+        t = t - fpu_pi() * 2.0;
+    if (t < -fpu_pi())
+        t = t + fpu_pi() * 2.0;
+    return t;
+}
+
+static fpu_real fpu_sin(fpu_real x)
+{
+    fpu_real t = 0.0, s = 0.0, term = 0.0, x2 = 0.0;
+    u32 n = 0;
+    t = fpu_reduce2pi(x);
+    if (t != t)
+        return t;
+    x2 = t * t;
+    s = t;
+    term = t;
+    for (n = 3; n <= 25; n = n + 2) {
+        term = -term * x2 / ((fpu_real)n * (fpu_real)(n - 1));
+        s = s + term;
+    }
+    return s;
+}
+
+static fpu_real fpu_cos(fpu_real x)
+{
+    fpu_real t = 0.0, s = 0.0, term = 0.0, x2 = 0.0;
+    u32 n = 0;
+    t = fpu_reduce2pi(x);
+    if (t != t)
+        return t;
+    x2 = t * t;
+    s = 1.0;
+    term = 1.0;
+    for (n = 2; n <= 26; n = n + 2) {
+        term = -term * x2 / ((fpu_real)n * (fpu_real)(n - 1));
+        s = s + term;
+    }
+    return s;
+}
+
+/* ---------------- x87 栈 ---------------- */
+
+static u32 fpu_idx(struct CPUState *c, u32 i)
+{
+    return (c->ftop + i) & 7;
+}
+
+static fpu_real fpu_get(struct CPUState *c, u32 i)
+{
+    return c->st[fpu_idx(c, i)];
+}
+
+static void fpu_set(struct CPUState *c, u32 i, fpu_real v)
+{
+    c->st[fpu_idx(c, i)] = v;
+}
+
+static void fpu_push(struct CPUState *c, fpu_real v)
+{
+    c->ftop = (c->ftop + 7) & 7;
+    c->st[c->ftop] = v;
+}
+
+static void fpu_pop(struct CPUState *c)
+{
+    c->ftop = (c->ftop + 1) & 7;
+}
+
+static u16 fpu_status(struct CPUState *c)
+{
+    return (u16)((c->fpsw & (u16)~0x3800) | (u16)((c->ftop & 7) << 11));
+}
+
+/* 比较结果写状态字 C0/C2/C3（fcom/fucom/ftst 用） */
+static void fpu_cmp_sw(struct CPUState *c, u32 un, u32 lt, u32 eq)
+{
+    u16 f = 0;
+    f = (u16)(c->fpsw & (u16)~0x4700);
+    if (un)
+        f = (u16)(f | 0x4100);        /* C3|C2|C0 */
+    else if (lt)
+        f = (u16)(f | 0x0100);        /* C0 */
+    else if (eq)
+        f = (u16)(f | 0x4000);        /* C3 */
+    c->fpsw = f;
+}
+
+/* 比较结果写整数标志（fcomi/fucomi 用，语义同 comisd） */
+static void fpu_cmp_int(struct CPUState *c, u32 un, u32 lt, u32 eq)
+{
+    c->flags &= ~(RF_CF | RF_PF | RF_ZF | RF_OF | RF_SF | RF_AF);
+    if (un)
+        c->flags |= RF_CF | RF_PF | RF_ZF;
+    else if (lt)
+        c->flags |= RF_CF;
+    else if (eq)
+        c->flags |= RF_ZF;
+}
+
+/* 一次比较：un/lt/eq → 状态字，可选整数标志与弹栈 */
+static void fpu_cmp_full(struct CPUState *c, fpu_real a, fpu_real b, u32 setint, u32 pop)
+{
+    u32 un = 0, lt = 0, eq = 0;
+    if (a != a || b != b)
+        un = 1;
+    else if (a < b)
+        lt = 1;
+    else if (a == b)
+        eq = 1;
+    fpu_cmp_sw(c, un, lt, eq);
+    if (setint)
+        fpu_cmp_int(c, un, lt, eq);
+    if (pop)
+        fpu_pop(c);
+}
+
+/* ---------------- 80 位扩展精度 ---------------- */
+
+static fpu_real fpu_from80(u64 man, u16 se)
+{
+#if defined(C6_PURE) || defined(C6_WASM)
+    /* 自举/wasm：long double 就是 double，手工拼 80 位 → double */
+    u32 sign = 0, e80 = 0;
+    i32 e = 0;
+    fpu_real m = 0.0;
+    sign = (u32)(se >> 15);
+    e80 = (u32)(se & 0x7fff);
+    if (e80 == 0x7fff) {
+        if (man == 0x8000000000000000ull)
+            return sign ? -fpu_inf() : fpu_inf();
+        return fpu_nan();
+    }
+    if (man == 0)
+        return sign ? -0.0 : 0.0;
+    if (e80 == 0)
+        return sign ? -0.0 : 0.0;
+    e = (i32)e80 - 16383 - 63;
+    m = (fpu_real)man;
+    if (sign)
+        m = -m;
+    return fpu_scalbn(m, e);
+#else
+    /* 默认路径：宿主 x87 的 long double 就是 80 位扩展精度，按位搬即可 */
+    union { u64 w[2]; fpu_real v; } u = { 0 };
+    u.w[0] = man;
+    u.w[1] = (u64)se;
+    return u.v;
+#endif
+}
+
+static void fpu_to80(fpu_real v, u64 *man, u16 *se)
+{
+#if defined(C6_PURE) || defined(C6_WASM)
+    u64 b = 0;
+    u32 sign = 0, e = 0, p = 0, i = 0;
+    u64 frac = 0;
+    u64 m = 0;
+    b = x64_d_to_bits((double)v);
+    sign = (u32)(b >> 63);
+    e = (u32)((b >> 52) & 0x7ff);
+    frac = b & 0xfffffffffffffull;
+    if (e == 0x7ff) {
+        *se = (u16)((sign << 15) | 0x7fff);
+        if (frac == 0)
+            *man = 0x8000000000000000ull;
+        else
+            *man = 0xc000000000000000ull | (frac << 11);
+        return;
+    }
+    if (e == 0) {
+        if (frac == 0) {
+            *se = (u16)(sign << 15);
+            *man = 0;
+            return;
+        }
+        p = 0;
+        for (i = 64; i > 0; i--) {
+            if (((frac >> (i - 1)) & 1) != 0) {
+                p = i - 1;
+                break;
+            }
+        }
+        m = frac << (63 - p);
+        *se = (u16)((sign << 15) | (u16)(p + 15309));
+        *man = m;
+        return;
+    }
+    *se = (u16)((sign << 15) | (u16)(e + 16383 - 1023));
+    *man = (frac | 0x10000000000000ull) << 11;
+#else
+    union { u64 w[2]; fpu_real v; } u = { 0 };
+    u.v = v;
+    *man = u.w[0];
+    *se = (u16)(u.w[1] & 0xffff);
+#endif
+}
+
+/* ---------------- 整型存取 ---------------- */
+
+static i64 fpu_m_int(u64 addr, u32 s)
+{
+    if (s == 2)
+        return (i64)(i16)mem_r16(addr);
+    if (s == 4)
+        return (i64)(i32)mem_r32(addr);
+    return (i64)mem_r64(addr);
+}
+
+static void fpu_w_int(u64 addr, u32 s, i64 v)
+{
+    if (s == 2)
+        mem_w16(addr, (u16)v);
+    else if (s == 4)
+        mem_w32(addr, (u32)v);
+    else
+        mem_w64(addr, (u64)v);
+}
+
+/* ---------------- 各 escape 的实现 ---------------- */
+
+/* D8：m32fp 与 ST(i) 形式，目的都是 ST(0) */
+static void fpu_d8(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    fpu_real a = 0.0, b = 0.0;
+    a = fpu_get(c, 0);
+    if (mod != 3) {
+        b = (fpu_real)x64_bits_to_f((u32)mem_r32(o->addr));
+        if (c->fault_abort)
+            return;
+    } else {
+        b = fpu_get(c, i);
+    }
+    if (regf == 0) { fpu_set(c, 0, a + b); return; }
+    if (regf == 1) { fpu_set(c, 0, a * b); return; }
+    if (regf == 2) { fpu_cmp_full(c, a, b, 0, 0); return; }
+    if (regf == 3) { fpu_cmp_full(c, a, b, 0, 1); return; }
+    if (regf == 4) { fpu_set(c, 0, a - b); return; }
+    if (regf == 5) { fpu_set(c, 0, b - a); return; }
+    if (regf == 6) { fpu_set(c, 0, a / b); return; }
+    fpu_set(c, 0, b / a);
+}
+
+/* D9：m32fp 存取、控制字、常量、一元运算、超越函数 */
+static void fpu_d9(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    u32 p = regf * 8 + i;
+    fpu_real v = 0.0, w = 0.0;
+    u64 man = 0;
+    u16 se = 0;
+    if (mod != 3) {
+        if (regf == 0) {
+            v = (fpu_real)x64_bits_to_f((u32)mem_r32(o->addr));
+            if (!c->fault_abort)
+                fpu_push(c, v);
+            return;
+        }
+        if (regf == 2) {
+            mem_w32(o->addr, x64_f_to_bits((float)fpu_get(c, 0)));
+            return;
+        }
+        if (regf == 3) {
+            v = fpu_get(c, 0);
+            mem_w32(o->addr, x64_f_to_bits((float)v));
+            fpu_pop(c);
+            return;
+        }
+        if (regf == 5) { c->fpcw = mem_r16(o->addr); return; }   /* fldcw */
+        if (regf == 7) { mem_w16(o->addr, c->fpcw); return; }    /* fnstcw */
+        return;                                                  /* fldenv/fnstenv 不建模 */
+    }
+    if (p <= 7) { fpu_push(c, fpu_get(c, i)); return; }          /* fld st(i) */
+    if (p >= 8 && p <= 15) {                                     /* fxch st(i) */
+        u32 ja = fpu_idx(c, i);
+        u32 jb = fpu_idx(c, 0);
+        fpu_real t = c->st[jb];
+        c->st[jb] = c->st[ja];
+        c->st[ja] = t;
+        return;
+    }
+    if (p == 16) return;                                         /* fnop */
+    if (p == 32) { fpu_set(c, 0, -fpu_get(c, 0)); return; }       /* fchs */
+    if (p == 33) { fpu_set(c, 0, fpu_abs_v(fpu_get(c, 0))); return; }  /* fabs */
+    if (p == 36) { fpu_cmp_full(c, fpu_get(c, 0), 0.0, 0, 0); return; }  /* ftst */
+    if (p == 37) {                                               /* fxam：只标出符号/零 */
+        v = fpu_get(c, 0);
+        fpu_cmp_sw(c, (v != v) ? 1 : 0, (v < 0.0) ? 1 : 0, (v == 0.0) ? 1 : 0);
+        return;
+    }
+    if (p == 40) { fpu_push(c, 1.0); return; }                   /* fld1 */
+    if (p == 41) { fpu_push(c, 3.32192809488736234787); return; } /* fldl2t */
+    if (p == 42) { fpu_push(c, 1.44269504088896340736); return; } /* fldl2e */
+    if (p == 43) { fpu_push(c, fpu_pi()); return; }              /* fldpi */
+    if (p == 44) { fpu_push(c, 0.30102999566398119521); return; } /* fldlg2 */
+    if (p == 45) { fpu_push(c, fpu_ln2()); return; }             /* fldln2 */
+    if (p == 46) { fpu_push(c, 0.0); return; }                   /* fldz */
+    if (p == 48) {                                               /* f2xm1：2^x - 1 */
+        v = fpu_get(c, 0);
+        if (v < -1.0 || v > 1.0) { fpu_set(c, 0, fpu_nan()); return; }
+        fpu_set(c, 0, fpu_expm1(v * fpu_ln2()));
+        return;
+    }
+    if (p == 49) {                                               /* fyl2x：st1*log2(st0) */
+        v = fpu_get(c, 0);
+        w = fpu_get(c, 1);
+        fpu_set(c, 1, w * (fpu_ln(v) / fpu_ln2()));
+        fpu_pop(c);
+        return;
+    }
+    if (p == 50) {                                               /* fptan：st0=tan，压 1.0 */
+        v = fpu_get(c, 0);
+        fpu_set(c, 0, fpu_sin(v) / fpu_cos(v));
+        fpu_push(c, 1.0);
+        return;
+    }
+    if (p == 51) {                                               /* fpatan：atan2(st1,st0) */
+        v = fpu_get(c, 1);
+        w = fpu_get(c, 0);
+        if (w > 0.0)
+            fpu_set(c, 1, fpu_atan(v / w));
+        else if (w < 0.0 && v >= 0.0)
+            fpu_set(c, 1, fpu_atan(v / w) + fpu_pi());
+        else if (w < 0.0)
+            fpu_set(c, 1, fpu_atan(v / w) - fpu_pi());
+        else if (v > 0.0)
+            fpu_set(c, 1, fpu_pi() * 0.5);
+        else if (v < 0.0)
+            fpu_set(c, 1, -fpu_pi() * 0.5);
+        else
+            fpu_set(c, 1, 0.0);
+        fpu_pop(c);
+        return;
+    }
+    if (p == 52) {                                               /* fxtract */
+        v = fpu_get(c, 0);
+        if (v == 0.0 || v != v) {
+            fpu_push(c, 0.0);
+            return;
+        }
+        /* 指数（按 floor(log2|v|)+1 的整数）与规格化尾数 */
+        v = fpu_abs_v(v);
+        w = 0.0;
+        while (v >= 2.0) { v = v * 0.5; w = w + 1.0; }
+        while (v < 1.0) { v = v * 2.0; w = w - 1.0; }
+        fpu_push(c, w);
+        fpu_set(c, 1, v);
+        return;
+    }
+    if (p == 54) { c->ftop = (c->ftop + 7) & 7; return; }         /* fdecstp */
+    if (p == 55) { c->ftop = (c->ftop + 1) & 7; return; }         /* fincstp */
+    if (p == 56 || p == 53) {                                     /* fprem / fprem1 */
+        v = fpu_get(c, 0);
+        w = fpu_get(c, 1);
+        fpu_set(c, 0, fpu_fmod(v, w));
+        return;
+    }
+    if (p == 57) {                                                /* fyl2xp1：st1*log2(st0+1) */
+        v = fpu_get(c, 0);
+        w = fpu_get(c, 1);
+        fpu_set(c, 1, w * (fpu_ln(v + 1.0) / fpu_ln2()));
+        fpu_pop(c);
+        return;
+    }
+    if (p == 58) { fpu_set(c, 0, fpu_sqrt_r(fpu_get(c, 0))); return; }  /* fsqrt */
+    if (p == 59) {                                                /* fsincos */
+        v = fpu_get(c, 0);
+        fpu_set(c, 0, fpu_sin(v));
+        fpu_push(c, fpu_cos(v));
+        return;
+    }
+    if (p == 60) { fpu_set(c, 0, fpu_rndint(c, fpu_get(c, 0))); return; }  /* frndint */
+    if (p == 61) {                                                /* fscale */
+        v = fpu_get(c, 0);
+        w = fpu_get(c, 1);
+        if (!(w > -2100.0 && w < 2100.0)) {
+            fpu_set(c, 0, v * fpu_pow2((i32)w));
+            return;
+        }
+        fpu_set(c, 0, fpu_scalbn(v, (i32)w));
+        return;
+    }
+    if (p == 62) { fpu_set(c, 0, fpu_sin(fpu_get(c, 0))); return; }    /* fsin */
+    if (p == 63) { fpu_set(c, 0, fpu_cos(fpu_get(c, 0))); return; }    /* fcos */
+    man = 0;
+    se = 0;
+    /* 其余（fldenv/fnstenv 之外的冷门编码）按 NOP 放过 */
+}
+
+/* DA：m32int 四则 + fcmov */
+static void fpu_da(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    fpu_real a = 0.0, b = 0.0;
+    u32 p = regf * 8 + i;
+    if (mod == 3) {                    /* fcmovcc st0, st(i) */
+        if (p >= 0 && p <= 7) { if ((c->flags & RF_CF) != 0) fpu_set(c, 0, fpu_get(c, i)); return; }
+        if (p >= 8 && p <= 15) { if ((c->flags & RF_ZF) != 0) fpu_set(c, 0, fpu_get(c, i)); return; }
+        if (p >= 16 && p <= 23) { if ((c->flags & (RF_CF | RF_ZF)) != 0) fpu_set(c, 0, fpu_get(c, i)); return; }
+        if (p >= 24 && p <= 31) { if ((c->flags & RF_PF) != 0) fpu_set(c, 0, fpu_get(c, i)); return; }
+        if (p >= 32 && p <= 39) { if ((c->flags & RF_CF) == 0) fpu_set(c, 0, fpu_get(c, i)); return; }
+        if (p >= 40 && p <= 47) { if ((c->flags & RF_ZF) == 0) fpu_set(c, 0, fpu_get(c, i)); return; }
+        if (p >= 48 && p <= 55) { if ((c->flags & (RF_CF | RF_ZF)) == 0) fpu_set(c, 0, fpu_get(c, i)); return; }
+        if ((c->flags & RF_PF) == 0) fpu_set(c, 0, fpu_get(c, i));
+        return;
+    }
+    a = fpu_get(c, 0);
+    b = (fpu_real)fpu_m_int(o->addr, 4);
+    if (c->fault_abort)
+        return;
+    if (regf == 0) { fpu_set(c, 0, a + b); return; }
+    if (regf == 1) { fpu_set(c, 0, a * b); return; }
+    if (regf == 2) { fpu_cmp_full(c, a, b, 0, 0); return; }
+    if (regf == 3) { fpu_cmp_full(c, a, b, 0, 1); return; }
+    if (regf == 4) { fpu_set(c, 0, a - b); return; }
+    if (regf == 5) { fpu_set(c, 0, b - a); return; }
+    if (regf == 6) { fpu_set(c, 0, a / b); return; }
+    fpu_set(c, 0, b / a);
+}
+
+/* DB：m32int 存取、m80fp 存取、fucomi/fcomi */
+static void fpu_db(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    u32 p = regf * 8 + i;
+    fpu_real v = 0.0;
+    u64 man = 0;
+    u16 se = 0;
+    if (mod != 3) {
+        if (regf == 0) {                       /* fild m32int */
+            v = (fpu_real)fpu_m_int(o->addr, 4);
+            if (!c->fault_abort)
+                fpu_push(c, v);
+            return;
+        }
+        if (regf == 2) {                       /* fist m32int */
+            fpu_w_int(o->addr, 4, (i64)fpu_rndint(c, fpu_get(c, 0)));
+            return;
+        }
+        if (regf == 3) {                       /* fistp m32int */
+            fpu_w_int(o->addr, 4, (i64)fpu_rndint(c, fpu_get(c, 0)));
+            fpu_pop(c);
+            return;
+        }
+        if (regf == 5) {                       /* fld m80fp */
+            man = mem_r64(o->addr);
+            se = mem_r16(o->addr + 8);
+            if (!c->fault_abort)
+                fpu_push(c, fpu_from80(man, se));
+            return;
+        }
+        if (regf == 7) {                       /* fstp m80fp */
+            v = fpu_get(c, 0);
+            fpu_to80(v, &man, &se);
+            mem_w64(o->addr, man);
+            mem_w16(o->addr + 8, se);
+            fpu_pop(c);
+            return;
+        }
+        return;
+    }
+    if (p >= 40 && p <= 47) {                  /* fucomi st0, st(i) */
+        fpu_cmp_full(c, fpu_get(c, 0), fpu_get(c, i), 1, 0);
+        return;
+    }
+    if (p >= 48 && p <= 55) {                  /* fcomi st0, st(i) */
+        fpu_cmp_full(c, fpu_get(c, 0), fpu_get(c, i), 1, 0);
+        return;
+    }
+}
+
+/* DC：m64fp 四则 + 目的为 ST(i) 的寄存器形式 */
+static void fpu_dc(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    fpu_real a = 0.0, b = 0.0;
+    a = fpu_get(c, 0);
+    if (mod != 3) {
+        b = x64_bits_to_d(mem_r64(o->addr));
+        if (c->fault_abort)
+            return;
+        if (regf == 0) { fpu_set(c, 0, a + b); return; }
+        if (regf == 1) { fpu_set(c, 0, a * b); return; }
+        if (regf == 2) { fpu_cmp_full(c, a, b, 0, 0); return; }
+        if (regf == 3) { fpu_cmp_full(c, a, b, 0, 1); return; }
+        if (regf == 4) { fpu_set(c, 0, a - b); return; }
+        if (regf == 5) { fpu_set(c, 0, b - a); return; }
+        if (regf == 6) { fpu_set(c, 0, a / b); return; }
+        fpu_set(c, 0, b / a);
+        return;
+    }
+    b = fpu_get(c, i);
+    if (regf == 0) { fpu_set(c, i, b + a); return; }        /* fadd st(i), st0 */
+    if (regf == 1) { fpu_set(c, i, b * a); return; }        /* fmul st(i), st0 */
+    if (regf == 2) { fpu_cmp_full(c, a, b, 0, 0); return; } /* fcom st(i) */
+    if (regf == 3) { fpu_cmp_full(c, a, b, 0, 1); return; } /* fcomp st(i) */
+    if (regf == 4) { fpu_set(c, i, a - b); return; }        /* fsubr st(i), st0 */
+    if (regf == 5) { fpu_set(c, i, b - a); return; }        /* fsub st(i), st0 */
+    if (regf == 6) { fpu_set(c, i, a / b); return; }        /* fdivr st(i), st0 */
+    fpu_set(c, i, b / a);                                   /* fdiv st(i), st0 */
+}
+
+/* DD：m64fp 存取、ffree/fst/fstp/fucom/fucomp */
+static void fpu_dd(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    u32 p = regf * 8 + i;
+    fpu_real v = 0.0;
+    if (mod != 3) {
+        if (regf == 0) {
+            v = x64_bits_to_d(mem_r64(o->addr));
+            if (!c->fault_abort)
+                fpu_push(c, v);
+            return;
+        }
+        if (regf == 2) { mem_w64(o->addr, x64_d_to_bits((double)fpu_get(c, 0))); return; }
+        if (regf == 3) {
+            v = fpu_get(c, 0);
+            mem_w64(o->addr, x64_d_to_bits(v));
+            fpu_pop(c);
+            return;
+        }
+        if (regf == 7) { mem_w16(o->addr, fpu_status(c)); return; }   /* fnstsw m16 */
+        return;
+    }
+    if (p <= 7) { c->st[fpu_idx(c, i)] = 0.0; return; }              /* ffree st(i) */
+    if (p >= 16 && p <= 23) { fpu_set(c, i, fpu_get(c, 0)); return; } /* fst st(i) */
+    if (p >= 24 && p <= 31) {                                        /* fstp st(i) */
+        fpu_set(c, i, fpu_get(c, 0));
+        fpu_pop(c);
+        return;
+    }
+    if (p >= 32 && p <= 39) { fpu_cmp_full(c, fpu_get(c, 0), fpu_get(c, i), 0, 0); return; }
+    if (p >= 40 && p <= 47) { fpu_cmp_full(c, fpu_get(c, 0), fpu_get(c, i), 0, 1); return; }
+}
+
+/* DE：m16int 四则 + *p 弹栈形式 */
+static void fpu_de(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    u32 p = regf * 8 + i;
+    fpu_real a = 0.0, b = 0.0;
+    a = fpu_get(c, 0);
+    if (mod != 3) {
+        b = (fpu_real)fpu_m_int(o->addr, 2);
+        if (c->fault_abort)
+            return;
+        if (regf == 0) { fpu_set(c, 0, a + b); return; }
+        if (regf == 1) { fpu_set(c, 0, a * b); return; }
+        if (regf == 2) { fpu_cmp_full(c, a, b, 0, 0); return; }
+        if (regf == 3) { fpu_cmp_full(c, a, b, 0, 1); return; }
+        if (regf == 4) { fpu_set(c, 0, a - b); return; }
+        if (regf == 5) { fpu_set(c, 0, b - a); return; }
+        if (regf == 6) { fpu_set(c, 0, a / b); return; }
+        fpu_set(c, 0, b / a);
+        return;
+    }
+    b = fpu_get(c, i);
+    if (p >= 0 && p <= 7) {                 /* faddp st(i), st0 */
+        fpu_set(c, i, b + a);
+        fpu_pop(c);
+        return;
+    }
+    if (p >= 8 && p <= 15) {                /* fmulp st(i), st0 */
+        fpu_set(c, i, b * a);
+        fpu_pop(c);
+        return;
+    }
+    if (p == 25) {                          /* fcompp */
+        fpu_cmp_full(c, a, b, 0, 0);
+        fpu_pop(c);
+        fpu_pop(c);
+        return;
+    }
+    if (p >= 32 && p <= 39) {               /* fsubrp st(i), st0 */
+        fpu_set(c, i, a - b);
+        fpu_pop(c);
+        return;
+    }
+    if (p >= 40 && p <= 47) {               /* fsubp st(i), st0 */
+        fpu_set(c, i, b - a);
+        fpu_pop(c);
+        return;
+    }
+    if (p >= 48 && p <= 55) {               /* fdivrp st(i), st0 */
+        fpu_set(c, i, a / b);
+        fpu_pop(c);
+        return;
+    }
+    if (p >= 56 && p <= 63) {               /* fdivp st(i), st0 */
+        fpu_set(c, i, b / a);
+        fpu_pop(c);
+        return;
+    }
+}
+
+/* DF：m16int/m64int 存取、fnstsw ax、fucomip/fcomip */
+static void fpu_df(struct CPUState *c, u32 mod, u32 regf, u32 i, struct Operand *o)
+{
+    u32 p = regf * 8 + i;
+    fpu_real v = 0.0;
+    if (mod != 3) {
+        if (regf == 0) {                     /* fild m16int */
+            v = (fpu_real)fpu_m_int(o->addr, 2);
+            if (!c->fault_abort)
+                fpu_push(c, v);
+            return;
+        }
+        if (regf == 2) {                     /* fist m16int */
+            fpu_w_int(o->addr, 2, (i64)fpu_rndint(c, fpu_get(c, 0)));
+            return;
+        }
+        if (regf == 3) {                     /* fistp m16int */
+            fpu_w_int(o->addr, 2, (i64)fpu_rndint(c, fpu_get(c, 0)));
+            fpu_pop(c);
+            return;
+        }
+        if (regf == 5) {                     /* fild m64int */
+            v = (fpu_real)(i64)mem_r64(o->addr);
+            if (!c->fault_abort)
+                fpu_push(c, v);
+            return;
+        }
+        if (regf == 7) {                     /* fistp m64int */
+            fpu_w_int(o->addr, 8, (i64)fpu_rndint(c, fpu_get(c, 0)));
+            fpu_pop(c);
+            return;
+        }
+        return;
+    }
+    if (p == 32) {                           /* fnstsw ax */
+        c->r[0] = (c->r[0] & ~(u64)0xffff) | (u64)fpu_status(c);
+        return;
+    }
+    if (p >= 40 && p <= 47) {                /* fucomip st0, st(i) */
+        fpu_cmp_full(c, fpu_get(c, 0), fpu_get(c, i), 1, 1);
+        return;
+    }
+    if (p >= 48 && p <= 55) {                /* fcomip st0, st(i) */
+        fpu_cmp_full(c, fpu_get(c, 0), fpu_get(c, i), 1, 1);
+        return;
+    }
+}
+
+void fpu_op(struct CPUState *c, u8 esc, u8 modrm, struct Operand *o)
+{
+    u32 mod = (u32)modrm >> 6;
+    u32 regf = (u32)(modrm >> 3) & 7;
+    u32 i = (u32)modrm & 7;
+    if (c->fault_abort)
+        return;
+    if (esc == 0xd8) { fpu_d8(c, mod, regf, i, o); return; }
+    if (esc == 0xd9) { fpu_d9(c, mod, regf, i, o); return; }
+    if (esc == 0xda) { fpu_da(c, mod, regf, i, o); return; }
+    if (esc == 0xdb) { fpu_db(c, mod, regf, i, o); return; }
+    if (esc == 0xdc) { fpu_dc(c, mod, regf, i, o); return; }
+    if (esc == 0xdd) { fpu_dd(c, mod, regf, i, o); return; }
+    if (esc == 0xde) { fpu_de(c, mod, regf, i, o); return; }
+    fpu_df(c, mod, regf, i, o);
+}

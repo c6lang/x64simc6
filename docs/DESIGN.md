@@ -1426,3 +1426,52 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     `movaps/movups` 一样当 16 字节搬，**存储时会多写 8 字节**，直接踩坏
     guest 内存。浮点代码一多（musl 的 `printf` 到处 `movsd`）这个 bug 就会
     放大，所以和 §87 一起修。
+
+89. **x87 FPU：整套协处理器 + 80 位精度的取法**。SSE 补完 `top` 能跑之后，
+    浮点还剩“真·x87”这一半：musl 的 `strtod`（十进制解析）和 `printf` 的
+    数字生成走的是 `long double` + x87 指令（`fld/fstp tbyte`、`fild/fistp`、
+    `faddp/fmulp/fsubp/fdivp`、`fucomi`、`fldcw`…），一条不认就 `#UD`，认错
+    一个就是错数。实现落在新增的 `src/fpu.c6`（约 1100 行），`cpu.c6` 的
+    `D8..DF` 逃逸码只负责取 `modrm` 再转给 `fpu_op()`：
+
+    - **栈**：`st[8]` + `ftop`，`fpu_idx(i)=（ftop+i)&7`；`push` 把 `ftop`
+      减一、`pop` 加一，`fxch/ffree/fdecstp/fincstp` 按 SDM 语义。
+    - **存取**：`m32fp/m64fp/m80fp/m16int/m32int/m64int` 六种宽度全支持，
+      `fld tbyte/fstp tbyte` 直接对 80 位位型做拼接（§精度取法见下）。
+    - **四则/比较**：`fadd/fsub/fsubr/fmul/fdiv/fdivr` 的 ST(i) 与内存两种
+      形式、带 `p` 的弹栈形式；`fcom/fcomp/fcompp/fucom/…/fcomi/fcomip/
+      fucomi/fucomip/ftst` 把结果同时写 `fpsw` 的 C0/C2/C3 和 RFLAGS 的
+      CF/PF/ZF。
+    - **一元/常量/超越**：`fld1/fldz/fldpi/fldl2t/fldl2e/fldlg2/fldln2`、
+      `fabs/fchs/fsqrt/frndint/fscale/fprem/fxtract`、`f2xm1/fyl2x/fyl2xp1/
+      fpatan/fsin/fcos/fsincos/fptan`（超越函数用自写级数，不链 libm）。
+    - **控制/状态字**：`fldcw/fnstcw/fnstsw/fninit`，`fpsw` 的 top 字段跟着
+      `ftop` 走。
+
+    **精度取法（关键决策）**：c6c 自举路径把 `long double` 当 `double`
+    （实测 `1.0L/3.0L` 出来就是 53 位尾数的位型），但 `c6c --emit-ctu` 生成的
+    是**真正的 C**，`long double` 交给宿主 `cc` 就是 x86 的 80 位扩展精度。
+    所以 `c6sim.h` 里给出
+    `fpu_real = long double`（默认）/`double`（`C6_PURE` 与 `C6_WASM`），
+    `st[8]` 用 `fpu_real`：默认构建下 `fadd/fmul/fdiv/fsqrt` 直接**吃宿主的
+    x87 扩展精度**，64 位尾数、就近偶数、80 位 m80 布局全部和真机一致；
+    `fld tbyte/fstp tbyte` 在默认路径就是按位搬（`union { u64 w[2]; fpu_real v; }`），
+    自举/wasm 路径才回退到手工 double ↔ 80 位换算。这一步是必须的：
+    musl 的十进制转换按 64 位尾数写，53 位尾数会让 `0.1` 解析成
+    `0.099999999999994315`、`%.6g` 把 `22/7` 印成 `3.14285`。
+
+    **舍入模式**：`fistp/fist/frndint` 必须按 `cw` 的 RC 位走。musl 的数字
+    生成会 `fldcw` 临时切到 RC=3（向零）再 `fistp` 取整数位；只做就近偶数
+    会让残差符号翻转，循环里的值越滚越大，最后 `fistp` 撞出整数不定值、
+    `-inf`、死循环写爆栈 —— 这就是 `awk 'BEGIN{print 22/7}'` 段错误的根因。
+
+    **fsqrt**：80 位精度用 `fpu_real` 牛顿迭代（种子取宿主 `sqrtsd`），
+    SSE 的 `sqrtsd` 仍用 double 版，并按“精确中点比较”（64×64→128 整数乘法）
+    修正到正确舍入，difftest 的 `fsqrt` 用例比的是内存哈希，差一个 ulp 就挂。
+
+    **验证**：`tools/difftest` 那套 blob 直接和本机 CPU 对拍 x87（同一段
+    机器码分别跑模拟器和真机、比寄存器和数据页哈希）——`faddp/fmulp/fdivr/
+    fsubr/fild/fistp/fcomip/fnstsw/m80 往返/fsqrt` 全过，且把 musl 那个
+    “每轮乘 1e9 取 9 位数字”的循环原样搬过来跑 39 轮，命中值与真机逐位相同。
+    guest 里 `awk` 的 `0.1`、`0.1+0.2`、`22/7`、`sqrt(2)`、`printf "%.17g"`
+    均与真机一致，`top -b -n1` 正常。
