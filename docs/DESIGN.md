@@ -1913,14 +1913,15 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     | 50M 引导 | 15.9s | 16.4–16.9s（+3–6%） |
     | 210M 固定 stopt | RAM `dedbf9f2` | RAM `dedbf9f2`（一致） |
 
-    为了摊薄 wasm↔JS 切换，试过在 JS 侧按 RIP 连跑多个块
-    （`JIT_CHAIN_FALL=0` 打开）：50M 时约 39 万次调用、平均 1.1 条/调用。
-    但 205M–210M 的固定 stopt 对比发现 JIT 开/关的 RAM 哈希开始不同
-    （串口首行时间戳差 10ms、login PID 502/503；而 tsc、PIT 计数完全
-    一致，badBoundary/badBudget=0）。把「分支块之后的链」关掉后，
-    900M 指令数与 646B 串口 SHA256 又完全一致。分支链的具体 bug 尚未
-    定位，所以默认走单块直跑的 SIMPLE 路径；链式保留为诊断开关，下一步
-    优先修它。
+    为了摊薄 wasm↔JS 切换，在 JS 侧按 RIP 连跑多个块（`JIT_CHAIN_FALL=0`
+    打开）。最初 205M–210M 的固定 stopt 对比发现 JIT 开/关的 RAM 分叉
+    （串口首行时间戳差 10ms、login PID 502/503；tsc/PIT 计数一致，
+    badBoundary/badBudget=0）。根因是 CR0/CR4 变更时 `jit_flush` 只清了
+    C 侧缓存，JS 的 `byRip` 映射仍指向 flush 前的 handle，分支链会执行到
+    这些旧块；把 flush 代数传进 JS（变化时清空 `byRip`）后，210M 的 RAM
+    恢复一致，900M 全链式也做到 876,201,405 条、串口 SHA256
+    `c67ca2a0…` 一致。全链式仍比单块直跑慢（900M 71.3s vs 66.8s），所以
+    默认仍是单块直跑，链式作为诊断/后续优化开关。
 
     - 期间修了一个 simple 路径不检查 `max_ins` 的 bug：块长于预算时会
       在 `machine_run` 里让 n 下溢，整机跑飞（实测 13.7B 条）。

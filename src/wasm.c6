@@ -262,6 +262,17 @@ int sim_jit_try(u64 rip)
 #endif
 }
 
+int sim_jit_try2(u64 rip, u32 max_ins)
+{
+#if defined(C6_JIT)
+    return jit_try2(rip, max_ins);
+#else
+    (void)rip;
+    (void)max_ins;
+    return 0;
+#endif
+}
+
 void sim_set_jit(int v)
 {
 #if defined(C6_JIT)
@@ -278,6 +289,16 @@ void sim_set_jit_window(u64 lo, u64 hi)
 #else
     (void)lo;
     (void)hi;
+#endif
+}
+
+int sim_jit_synth(u64 a, u64 b, u32 ia, u32 ib, u32 mode)
+{
+#if defined(C6_JIT)
+    return jit_synth_chain(a, b, ia, ib, mode);
+#else
+    (void)a; (void)b; (void)ia; (void)ib; (void)mode;
+    return 0;
 #endif
 }
 

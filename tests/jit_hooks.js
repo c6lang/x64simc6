@@ -18,6 +18,7 @@ function makeJitEnv(getInst) {
   const handles = [];
   const byRip = new Map();
   let genView = null;
+  let lastFlush = -1;
 
   const env = {
     js_jit_compile(ptr, len, ripLo, ripHi, n, pa, gen, branch) {
@@ -54,6 +55,11 @@ function makeJitEnv(getInst) {
         if (e.n > (maxIns >>> 0)) return 0;   /* 预算不够：回退解释器 */
         const rc = e.inst.exports.run(state, ram);
         return rc === 0 ? e.n : -2;
+      }
+      const fg = inst.exports.jit_flush_count ? inst.exports.jit_flush_count() : 0;
+      if (fg !== lastFlush) {
+        byRip.clear();          /* flush（CR0/CR4 变更）后旧 handle 可能已过时 */
+        lastFlush = fg;
       }
       const buf = inst.exports.memory.buffer;
       if (!genView || genView.buffer !== buf) {

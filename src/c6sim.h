@@ -273,6 +273,7 @@ void jit_flags_inc(u64 a, u64 res, int s);
 void jit_flags_dec(u64 a, u64 res, int s);
 int jit_cond(u64 flags, u64 cc);
 u64 jit_stat(int i);
+int jit_synth_chain(u64 a, u64 b, u32 ia, u32 ib, u32 mode);
 #endif
 
 /* mem.c6 */

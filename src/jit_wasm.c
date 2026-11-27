@@ -52,6 +52,7 @@ static u64 jit_n_compile = 0;
 static u64 jit_n_hit = 0;
 static u64 jit_n_insn = 0;
 u64 g_jit_bad_boundary = 0;
+u64 g_jit_flush_gen = 0;
 u64 g_jit_bad_budget = 0;
 
 
@@ -844,6 +845,7 @@ void jit_flush(void)
     for (i = 0; i < JIT_CACHE; i++)
         jit_cache[i].valid = 0;
     jit_compiles = 0;      /* 失效后允许重新编译热块 */
+    g_jit_flush_gen++;
 }
 
 void jit_set_on(int v)
@@ -893,6 +895,51 @@ int jit_block(u64 rip)
                    (u32)(unsigned long)g_m.ram, rip_off, 0xffffffffu) < 0)
         return -5;
     return n;
+}
+
+/* 合成块：不取指、不执行客户机代码，只生成 mov eax,imm 或 jmp end，
+ * 用来单独测试 JS 侧对高地址 RIP 的链式分发。 */
+static int jit_synth_one(u64 rip, u64 end, u32 imm, u32 is_jmp)
+{
+    struct JIns ins[1];
+    u32 len = 0;
+    u32 k = 0;
+    for (k = 0; k < (u32)sizeof(ins); k++) ((u8 *)ins)[k] = 0;
+    if (is_jmp) {
+        ins[0].op = J_JMP;
+        ins[0].branch = 1;
+        ins[0].target = end;
+    } else {
+        ins[0].op = J_MOVI;
+        ins[0].dst = 0;
+        ins[0].sz = 4;
+        ins[0].is_imm = 1;
+        ins[0].imm = (u64)imm;
+    }
+    len = jit_build_module(ins, 1, end);
+    if (len == 0)
+        return -1;
+    return js_jit_compile((u32)(unsigned long)jit_mod, len,
+                          (u32)rip, (u32)(rip >> 32), 1, 0, 0, is_jmp);
+}
+
+int jit_synth_chain(u64 a, u64 b, u32 ia, u32 ib, u32 mode)
+{
+    u32 rip_off = (u32)offsetof(struct Machine, cpu.rip);
+    int hb = jit_synth_one(b, b + 0x10, ib, 0);
+    int ha = 0;
+    if (hb < 0)
+        return -2;
+    ha = jit_synth_one(a, b, ia, mode ? 1 : 0);
+    if (ha < 0)
+        return -3;
+    return js_jit_run(ha, (u32)(unsigned long)&g_m,
+                      (u32)(unsigned long)g_m.ram, rip_off, 0xffffffffu);
+}
+
+u64 jit_flush_count(void)
+{
+    return g_jit_flush_gen;
 }
 
 u32 jit_gen_base(void)

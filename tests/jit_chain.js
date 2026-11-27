@@ -99,6 +99,75 @@ const P = 0x3000;
   if (r2 !== 5) { console.error('FAIL je chain length'); bad++; }
   bad += cmp('je_chain', cs2, is2);
 
+  /* 3) A: mov/cmp/jmp B；B 是 je：跨块标志位 + 分支作为被链块 */
+  const P4 = P + 0x800;
+  put([0xb8, 0x01, 0x00, 0x00, 0x00,
+       0x83, 0xf8, 0x01,
+       0xe9, 0xf3, 0x00, 0x00, 0x00], P4);
+  put([0x0f, 0x84, 0xfa, 0x00, 0x00, 0x00], P4 + 0x100);
+  const b5 = warm(P4 + 0x100);
+  const a5 = warm(P4);
+  reset(P4);
+  const r5 = w.sim_jit_try(BigInt(P4));
+  const cs5 = snap();
+  reset(P4);
+  w.sim_run(4);
+  const is5 = snap();
+  console.log(`branch-as-chain taken: B=${b5} A=${a5} chain=${r5}`);
+  if (r5 !== 4) { console.error('FAIL branch-chain length'); bad++; }
+  bad += cmp('branch_chain_taken', cs5, is5);
+
+  /* 4) 预算：A 长 3，B 长 1 */
+  reset(P4);
+  const q2 = w.sim_jit_try2(BigInt(P4), 2);
+  const q2s = snap();
+  reset(P4);
+  const q3 = w.sim_jit_try2(BigInt(P4), 3);
+  const q3s = snap();
+  reset(P4);
+  const q4 = w.sim_jit_try2(BigInt(P4), 4);
+  const q4s = snap();
+  reset(P4);
+  w.sim_run(4);
+  const qis = snap();
+  console.log(`budget: 2->${q2} 3->${q3} 4->${q4}`);
+  if (q2 !== 0 || q3 !== 3 || q4 !== 4) { console.error('FAIL chain budget'); bad++; }
+  bad += cmp('budget_chain', q4s, qis);
+
+  /* 5) 循环链：dec ecx; jnz -4，按预算跑多圈 */
+  const P5 = P + 0xc00;
+  put([0xff, 0xc9, 0x75, 0xfc], P5);
+  let warmLoop = 0;
+  for (let k = 0; k < 96; k++) {
+    reset(P5);
+    w.sim_set_reg(1, 5n);
+    warmLoop = w.sim_jit_try2(BigInt(P5), 2);
+    if (warmLoop > 0) break;
+  }
+  reset(P5);
+  w.sim_set_reg(1, 5n);
+  const r6 = w.sim_jit_try2(BigInt(P5), 10);
+  const cs6 = snap();
+  reset(P5);
+  w.sim_set_reg(1, 5n);
+  w.sim_run(10);
+  const is6 = snap();
+  console.log(`loop budget10: warm=${warmLoop} chain=${r6}`);
+  if (r6 !== 10) { console.error('FAIL loop10 length'); bad++; }
+  bad += cmp('loop10', cs6, is6);
+
+  reset(P5);
+  w.sim_set_reg(1, 5n);
+  const r7 = w.sim_jit_try2(BigInt(P5), 9);
+  const cs7 = snap();
+  reset(P5);
+  w.sim_set_reg(1, 5n);
+  w.sim_run(8);
+  const is7 = snap();
+  console.log(`loop budget9: chain=${r7}`);
+  if (r7 !== 8) { console.error('FAIL loop9 length'); bad++; }
+  bad += cmp('loop9', cs7, is7);
+
   if (bad) { console.error(`[jit_chain] ${bad} mismatch(es)`); process.exit(1); }
   console.log('[jit_chain] PASS');
 })();
