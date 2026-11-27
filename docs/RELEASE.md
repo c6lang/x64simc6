@@ -155,6 +155,16 @@ SSE 只覆盖了 musl 的 `printf` 一小半：十进制**解析**（`strtod`）
 `fcomip/fnstsw`、m80 往返、`fsqrt`，以及 musl 那个“每轮乘 1e9 取 9 位数字”
 的循环（39 轮逐位相同）。
 
+### 4.1 其余 SSE 浮点（min/max、cmp、shuffle、打包转换）
+
+补完 `min/max`、`cmpss/sd/ps/pd`（8 种谓词）、`shufps/shufpd`、
+`unpckl/h`、`movmskps/pd`、`cvtdq2ps/cvtps2dq/cvttps2dq`、`rcp/rsqrt`。
+边角语义按 SDM：min/max 遇 NaN 或两个零返回第二操作数（与 C 的
+`fmin/fmax` 不同）；反身比较谓词对 NaN 返回真。`rcpps/rsqrtps` 返回精确的
+1/x、1/√x，而硬件给的是 12 位近似（SDM 只要求相对误差 ≤ 1.5·2⁻¹²，精确值
+满足），所以这四条与真机逐位不同，其余新指令用 blob 和本机 CPU 对拍
+1553 条全部逐位相同。
+
 ### 验收
 
 | 项 | 命令 | 结果 |

@@ -1475,3 +1475,25 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     “每轮乘 1e9 取 9 位数字”的循环原样搬过来跑 39 轮，命中值与真机逐位相同。
     guest 里 `awk` 的 `0.1`、`0.1+0.2`、`22/7`、`sqrt(2)`、`printf "%.17g"`
     均与真机一致，`top -b -n1` 正常。
+
+90. **其余 SSE 浮点：min/max、比较谓词、shuffle/unpack、movmsk、rcp/rsqrt、
+    打包转换**。补 `top` 那条链之后剩下的 SSE1/SSE2 浮点面，全部按 SDM 的
+    边角语义实现：
+    - `minss/minsd/minps/minpd`（`5d`）与 max（`5f`）：**两边都是 NaN、或
+      两个都是零（含 `+0/-0` 混搭）时返回第二操作数**；这是 SSE 与 C 的
+      `fmin/fmax` 的区别，写成 `a < b ? a : b` 会把 `-0/+0` 取反。
+    - `cmpss/cmpsd/cmpps/cmppd`（`c2` + imm8）：谓词 0..7，反身谓词
+      （`NLT/NLE/NEQ`）对 NaN 返回真，`ORD` 对 NaN 返回假；每通道生成
+      全 1/全 0 掩码。
+    - `shufps/shufpd`（`c6`）、`unpcklps/unpckhps/unpcklpd/unpckhpd`
+      （`14/15`）：立即数选通道、按 32/64 位通道交错。
+    - `movmskps/movmskpd`（`50`）：符号位压进 GPR 低位（32 位写，高位清零）。
+    - `cvtdq2ps`/`cvtps2dq`/`cvttps2dq`（`5b`）：`cvtps2dq` 的“就近偶数”
+      复用 x87 的 `fpu_rnd_dir(v,0)`（导出成 `x64_rnd_ne`），越界/NaN 写
+      `0x80000000`；`cvttps2dq` 用截断。
+    - `rsqrtps/rsqrtss/rcpps/rcpss`（`52/53`）：**算精确值**（1/x、
+      1/sqrt(x)）而不是硬件的 12 位近似。SDM 只要求相对误差 ≤ 1.5·2⁻¹²，
+      精确值满足这条，程序也不能依赖某个具体近似值；代价是 difftest 里这
+      四条与真机逐位不同（其余新指令 1553/1553 逐位相同）。
+    **注意**：这些函数都单独成函数、不内联进 `step()`，理由同 §87
+    （tcc-c6 的 wasm 后端有单函数 local 上限）。

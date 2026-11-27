@@ -19,11 +19,19 @@
 
 #include "c6sim.h"
 
+static fpu_real fpu_rnd_dir(fpu_real v, u32 rc);
+
 /* ---------------- 位型 ↔ 宿主浮点（cpu.c6 的 SSE 也用这几个） ---------------- */
 
 union FpBitsD { u64 u; double d; };
 
 union FpBitsF { u32 u; float f; };
+
+/* SSE 的 cvtps2dq 用：就近偶数取整（越界/NaN 由调用方处理） */
+double x64_rnd_ne(double v)
+{
+    return (double)fpu_rnd_dir((fpu_real)v, 0);
+}
 
 double x64_bits_to_d(u64 a)
 {

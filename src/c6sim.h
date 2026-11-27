@@ -261,6 +261,7 @@ u64 x64_d_to_bits(double x);
 float x64_bits_to_f(u32 a);
 u32 x64_f_to_bits(float x);
 double x64_sqrt_d(double x);
+double x64_rnd_ne(double v);
 void fpu_op(struct CPUState *c, u8 esc, u8 modrm, struct Operand *o);
 void raise_irq(struct CPUState *c, u32 vec);
 
