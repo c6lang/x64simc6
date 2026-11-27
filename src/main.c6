@@ -14,6 +14,7 @@ extern int poll(struct pollfd *fds, unsigned long nfds, int timeout);
 #include <fcntl.h>
 #include "c6sim.h"
 
+
 /* ---------------- 交互终端 ----------------
  * 只在 stdin 是 tty 时把宿主终端切到 raw：否则敲一条 `ls` 屏幕上会出现两遍
  * （宿主终端的本地回显 + guest 的串口回显）。另外 busybox ash 每个提示符都
@@ -127,6 +128,180 @@ static int cpr_byte(u8 b)
     }
     cpr_flush();
     return 0;
+}
+
+/* ---------------- 输出侧：光标模拟 + CPR 自动应答 ----------------
+ * busybox ash 每个提示符都会发 ESC[6n 问光标位置（FEATURE_EDITING_ASK_TERMINAL），
+ * 然后在 raw 模式下 read() 等 ESC[行;列R。真实终端的应答如果转给 guest，时机
+ * 不对就成了命令行里的垃圾；完全丢掉又会让 ash 一直等，用户敲的字符被当成应答
+ * 吃掉 —— 表现就是「提示符反复往后追加、命令被吞」。
+ * 这里做一个最小的终端：跟踪 guest 输出造成的光标位置，遇到 ESC[6n 立即自己
+ * 回一条 ESC[行;列R；宿主终端的应答仍然在输入侧过滤掉。 */
+/* ioctl 由 <unistd.h> 声明（c6c 自带头里是 long ioctl(fd, req, void*)） */
+struct host_winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; };
+#define HOST_TIOCGWINSZ 0x5413ul
+
+static int g_term_row = 1;
+static int g_term_col = 1;
+static int g_term_rows = 24;
+static int g_term_cols = 80;
+static int g_term_sr = 1;      /* ESC 7 保存的光标 */
+static int g_term_sc = 1;
+static u32 g_term_st = 0;      /* 0=普通 1=收到 ESC 2=CSI 参数 */
+static u32 g_term_ps[4] = {0, 0, 0, 0};
+static u32 g_term_np = 0;
+static u32 g_term_cur = 0;
+
+static void term_clamp(void)
+{
+    if (g_term_row < 1) g_term_row = 1;
+    if (g_term_col < 1) g_term_col = 1;
+    if (g_term_row > g_term_rows) g_term_row = g_term_rows;
+    if (g_term_col > g_term_cols) g_term_col = g_term_cols;
+}
+
+static void term_init(void)
+{
+    struct host_winsize ws = {0, 0, 0, 0};
+    if (ioctl(1, HOST_TIOCGWINSZ, &ws) == 0 &&
+        ws.ws_row > 0 && ws.ws_col > 0) {
+        g_term_rows = (int)ws.ws_row;
+        g_term_cols = (int)ws.ws_col;
+    }
+}
+
+static void cpr_answer(void)
+{
+    u8 b[24];
+    u8 tmp[12];
+    int k = 0;
+    int t = 0;
+    u32 r = (u32)g_term_row;
+    u32 c = (u32)g_term_col;
+    b[k] = 0x1b;
+    k++;
+    b[k] = '[';
+    k++;
+    if (r == 0) r = 1;
+    while (r > 0) {
+        tmp[t] = (u8)('0' + (r % 10));
+        r = r / 10;
+        t++;
+    }
+    while (t > 0) {
+        t--;
+        b[k] = tmp[t];
+        k++;
+    }
+    b[k] = ';';
+    k++;
+    if (c == 0) c = 1;
+    t = 0;
+    while (c > 0) {
+        tmp[t] = (u8)('0' + (c % 10));
+        c = c / 10;
+        t++;
+    }
+    while (t > 0) {
+        t--;
+        b[k] = tmp[t];
+        k++;
+    }
+    b[k] = 'R';
+    k++;
+    serial_feed(b, k);
+}
+
+/* guest 输出字节流 → 更新光标；遇到 ESC[6n 就应答 */
+static void term_out(const u8 *buf, int n)
+{
+    int i = 0;
+    u32 want = 0;
+    for (i = 0; i < n; i++) {
+        u8 ch = buf[i];
+        if (g_term_st == 0) {
+            if (ch == 0x1b) { g_term_st = 1; continue; }
+            if (ch == 0x0a) { g_term_row++; term_clamp(); continue; }
+            if (ch == 0x0d) { g_term_col = 1; continue; }
+            if (ch == 0x08) { if (g_term_col > 1) g_term_col--; continue; }
+            if (ch < 0x20 || ch == 0x7f) continue;
+            g_term_col++;
+            if (g_term_col > g_term_cols) {
+                g_term_col = 1;
+                g_term_row++;
+                term_clamp();
+            }
+            continue;
+        }
+        if (g_term_st == 1) {
+            g_term_st = 0;
+            if (ch == '[') {
+                g_term_st = 2;
+                g_term_np = 0;
+                g_term_cur = 0;
+                g_term_ps[0] = 0;
+                g_term_ps[1] = 0;
+                g_term_ps[2] = 0;
+                g_term_ps[3] = 0;
+            } else if (ch == '7') {
+                g_term_sr = g_term_row;
+                g_term_sc = g_term_col;
+            } else if (ch == '8') {
+                g_term_row = g_term_sr;
+                g_term_col = g_term_sc;
+                term_clamp();
+            } else if (ch == 'M') {
+                g_term_row--;
+                term_clamp();
+            }
+            continue;
+        }
+        if (ch >= '0' && ch <= '9') {
+            g_term_cur = g_term_cur * 10 + (u32)(ch - '0');
+            if (g_term_cur > 9999) g_term_cur = 9999;
+            if (g_term_np < 4) g_term_ps[g_term_np] = g_term_cur;
+            continue;
+        }
+        if (ch == ';') {
+            if (g_term_np < 3) g_term_np++;
+            g_term_cur = 0;
+            continue;
+        }
+        if (ch == '?' || ch == '>' || ch == '=' || ch == ' ')   /* 私有/扩展前缀 */
+            continue;
+        if (ch >= 0x40 && ch <= 0x7e) {
+            u32 a = g_term_ps[0];
+            u32 d = g_term_ps[1];
+            u32 n2 = (a != 0) ? a : 1;
+            g_term_st = 0;
+            if (ch == 'H' || ch == 'f') {
+                g_term_row = (a != 0) ? (int)a : 1;
+                g_term_col = (d != 0) ? (int)d : 1;
+                term_clamp();
+            } else if (ch == 'A') {
+                g_term_row -= (int)n2; term_clamp();
+            } else if (ch == 'B') {
+                g_term_row += (int)n2; term_clamp();
+            } else if (ch == 'C') {
+                g_term_col += (int)n2; term_clamp();
+            } else if (ch == 'D') {
+                g_term_col -= (int)n2; term_clamp();
+            } else if (ch == 'n' && a == 6) {
+                want = 1;   /* 深度 >2 的首次调用会被 c6c 加 g_ 前缀，放到循环后调用 */
+            } else if (ch == 's') {
+                g_term_sr = g_term_row;
+                g_term_sc = g_term_col;
+            } else if (ch == 'u') {
+                g_term_row = g_term_sr;
+                g_term_col = g_term_sc;
+                term_clamp();
+            }
+            continue;
+        }
+        g_term_st = 0;   /* 非法 CSI：放弃整条 */
+    }
+    if (want)
+        cpr_answer();
 }
 
 static void feed_input(const u8 *buf, int n)
@@ -394,6 +569,7 @@ int main(int argc, char **argv)
     g_m.watch_fd = open("/tmp/simwatch.bin", 1 | 0x40 | 0x200 | 0x400, 0644);
 #endif
     tty_raw();
+    term_init();
     if (g_tio_raw)
         fprintf(stderr, "[c6sim] 串口交互：Ctrl-] 退出，Ctrl-C 送给 guest\n");
     while (!g_m.halted && !g_quit) {
@@ -402,6 +578,7 @@ int main(int argc, char **argv)
         {
             int n = serial_take_output(out, (int)sizeof(out));
             if (n > 0) {
+                term_out(out, n);          /* 跟踪光标 + 自动应答 ESC[6n */
                 fwrite(out, 1, (size_t)n, stdout);
                 fflush(stdout);
             }

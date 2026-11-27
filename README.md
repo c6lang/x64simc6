@@ -46,6 +46,9 @@ cd web && python3 -m http.server 8000
 `cat /etc/os-release`、`uname -a`、`df -h`、`top -b -n1`（v1.1 补上了 SSE 浮点，
 x87 FPU 也整套实现了：`awk 'BEGIN{print 22/7, sqrt(2)}'`、`printf "%.17g"`
 这类十进制转换与真机逐位一致，`top` 的 `Load average` 等 `%f` 输出正常）。
+交互下 `top`（不带 `-n`）会自动刷新，`q` 退出；提示符和长命令行的
+行编辑都正常（模拟器自己模拟了一个最小终端，代真实终端回答 ash 的
+`ESC[6n` 光标查询，见 `docs/DESIGN.md` §91）。
 遇到不认识的指令可以用 `--udtrace` 打印 RIP 和指令字节。
 
 ## 验证

@@ -184,13 +184,34 @@ static void pic_write(u32 port, u8 v)
     }
     if (v & 0x08) { g_m.pic.read_isr = (v & 2) ? 1 : 0; return; }   /* OCW3 */
     if (v & 0x20) {                                            /* EOI */
-        u32 i = 0;
-        u8 b = 0;
-        if (v & 0x40) { g_pic_isr[0] = 0; g_pic_isr[1] = 0; return; }
-        for (i = 0; i < 8; i++) {
-            b = (u8)(1 << i);
-            if (g_pic_isr[1] & b) { g_pic_isr[1] = (u8)(g_pic_isr[1] & (u8)~b); return; }
-            if (g_pic_isr[0] & b) { g_pic_isr[0] = (u8)(g_pic_isr[0] & (u8)~b); return; }
+        u8 bit = 0;
+        if ((v & 0xc0) == 0x40) {           /* 非指定 EOI：清掉全部在服务的位 */
+            g_pic_isr[0] = 0;
+            g_pic_isr[1] = 0;
+            return;
+        }
+        /* OCW2 = 0110 0L2L1L0（指定 EOI）或 0010 0000（非指定）：
+         * 指定 EOI 的低 3 位是**这一片的 IRQ 号**，必须只清对应那一位。
+         * Linux 的 8259 驱动只发指定 EOI；以前我们无脑清「最低的置位位」，
+         * 定时器（IRQ0）和串口（IRQ4）同时在服务时，EOI(4) 会把 IRQ0 的
+         * 服务位清掉、IRQ4 永远留在 ISR 里 —— 之后 IRQ4 一律不再投递，
+         * 表现为控制台输出卡在一行中间、top 不刷新、提示符只出一半。 */
+        if (v & 0x40) {
+            bit = (u8)(1 << (v & 7));
+            if (slave)
+                g_pic_isr[1] = (u8)(g_pic_isr[1] & (u8)~bit);
+            else
+                g_pic_isr[0] = (u8)(g_pic_isr[0] & (u8)~bit);
+            return;
+        }
+        /* 非指定 EOI：清最高优先级（编号最低）的在服务位 */
+        {
+            u32 i = 0;
+            for (i = 0; i < 8; i++) {
+                u8 b = (u8)(1 << i);
+                if (g_pic_isr[0] & b) { g_pic_isr[0] = (u8)(g_pic_isr[0] & (u8)~b); return; }
+                if (g_pic_isr[1] & b) { g_pic_isr[1] = (u8)(g_pic_isr[1] & (u8)~b); return; }
+            }
         }
     }
 }
@@ -471,6 +492,19 @@ void dev_tick(void)
     u32 i = 0;
     u8 irq = 0;
     u8 found = 0;
+
+    /* 串口的 RX/THRE 是**电平**中断：只要使能位还开着、条件还成立，中断线就
+     * 一直有效。只在「写 THR / 写 IER」补边沿会丢中断：驱动在 tx_loadsz 一批
+     * 写完之后 THRI 仍然开着，tty 层这时再排数据进来只会调 start_tx，而
+     * start_tx 看到 THRI 已置位就不再写 IER —— 边沿没了，驱动永远等不到发送
+     * 完成中断，tty 写永久阻塞（控制台输出卡在一行中间、top 不刷新）。
+     * 这里按硬件语义在每次设备轮询（每 0x40000 条指令）把电平重新拉进 IRR。
+     * 代价是引导期 irq4 从 181 涨到约 4.2k（每 200k 条一次），实测 900M 引导
+     * 墙钟仍在 47~53s 区间，可忽略。 */
+    if ((g_m.serial.ier & 1) && g_m.serial.in_head != g_m.serial.in_tail)
+        pic_raise(&g_m, 4);
+    else if ((g_m.serial.ier & 2) && (g_m.serial.lsr & 0x20))
+        pic_raise(&g_m, 4);
 
     if (delta > 0) {
         g_tick_cnt = g_tick_cnt + 1;
