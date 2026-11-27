@@ -235,6 +235,9 @@
       整机 20M 条 15.85s → 1.04s（15.2×），浏览器登录 Alpine 1062s → 62s，
       产物 1.6 MiB → 116 KiB；50M 条与 native MATCH，无 clang 时回退 tcc-c6
       （DESIGN §97）
+- [x] `10.0.2.2` 映射到宿主 `127.0.0.1`：guest 可访问宿主上的 HTTP 代理
+      （`export http_proxy=http://10.0.2.2:3128`，`wget http://…` 实测通过；
+      HTTPS 需代理支持 busybox 的 `GET https://…` 形式）
 - [x] 发布 v1.3（tag v1.3 + src/dist/firmware + `RELEASE_NOTES.md`，产物在
       `build/release/v1.3/`，GitHub Release）
 - [x] `tools/wasm_tty.js`：wasm 版真终端前端（raw、Ctrl-C 送 guest、Ctrl-]

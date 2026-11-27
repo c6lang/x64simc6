@@ -1597,7 +1597,12 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
       `ping_group_range = 0 2147483647`，非 root 可用）。宿主 DNS 取
       `/etc/resolv.conf` 第一个 `nameserver`，取不到用 `1.1.1.1`。
       `net_tick()` 由 `dev_tick()` 调用，按墙钟 1ms 节流；`net_reset()`
-      在 `dev_init()` 里复位。
+      在 `dev_init()` 里复位。**`10.0.2.2` 在宿主侧映射到 `127.0.0.1`**
+      （QEMU user net 的约定，`n_host_ip()`）：guest 可以直接访问宿主上的
+      服务；例如宿主跑一个 HTTP 代理 3128，guest 里
+      `export http_proxy=http://10.0.2.2:3128` 后 `wget http://…` 就走代理
+      （实测通过）。busybox wget 对 https 会向代理发 `GET https://…` 而不是
+      `CONNECT`，需要代理支持 TLS 终结；UDP/ICMP 不走 HTTP 代理。
     - **固件**：`tools/mkfw.py` 新增 `--modules`（也接受
       `lib/modules/<kver>`），把 `slip.ko`/`slhc.ko` 解压进
       `/lib/modules/<kver>/kernel/drivers/net/slip/`，并给 `/init` 追加

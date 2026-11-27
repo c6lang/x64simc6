@@ -142,6 +142,13 @@ https://qq.com/`（HTTPS 证书校验通过）；GIF 由 `tools/make_demo_gif.py
 | 网关 / peer | `10.0.2.2`（本地回 ping） |
 | DNS | `10.0.2.3`（宿主 `/etc/resolv.conf` 的第一个服务器，兜底 1.1.1.1） |
 
+`10.0.2.2` 在宿主侧映射到 **127.0.0.1**（QEMU user net 的约定）：可以在宿主上
+跑一个 HTTP 代理（例如 tinyproxy/squid 监听 3128），guest 里
+`export http_proxy=http://10.0.2.2:3128` 后 `wget http://example.com/` 就走
+代理（实测通过）。busybox wget 对 https 是向代理发 `GET https://…` 而不是
+`CONNECT`，需要代理支持这种 TLS 终结请求；原生直连的 HTTPS 不受影响。
+UDP/ICMP 不走 HTTP 代理，DNS 仍由宿主解析。
+
 构建带网络的固件（需要 linux-lts 的模块树，默认在 `build/alpine/lib`，
 也可以 `--modules` 指到 `lib` / `lib/modules` / `lib/modules/<kver>`）：
 

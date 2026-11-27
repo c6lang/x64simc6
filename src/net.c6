@@ -250,6 +250,13 @@ static u32 n_now_ms(void)
     return (u32)(n_now_ns() / 1000000ull);
 }
 
+/* QEMU user net 的约定：10.0.2.2 是“宿主”。TCP/UDP 发到 10.0.2.2 时
+ * 实际连宿主的 127.0.0.1，这样 guest 能访问宿主上的 HTTP 代理/其它服务。 */
+static u32 n_host_ip(u32 ip)
+{
+    return (ip == NET_PEER_IP) ? 0x7f000001u : ip;
+}
+
 static void n_sa(struct net_sa *sa, u32 ip, u32 port)
 {
     sa->sa_family = (unsigned short)NET_AF_INET;
@@ -589,7 +596,7 @@ static void conn_open(u32 rip, u32 rport, u32 gip, u32 gport,
     } else
 #endif
     {
-        n_sa(&sa, rip, rport);
+        n_sa(&sa, n_host_ip(rip), rport);
         connect(fd, &sa, (unsigned int)sizeof(sa));
         c->connect_started = 1;
     }
@@ -745,7 +752,7 @@ static void tcp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
 #if !defined(C6_WASM)
     if (g_net_shim && dlen > 0 && !c->connect_started && c->fd != 0) {
         struct net_sa sa = {0};
-        n_sa(&sa, c->rip, c->rport);
+        n_sa(&sa, n_host_ip(c->rip), c->rport);
         connect((int)c->fd, &sa, (unsigned int)sizeof(sa));
         c->connect_started = 1;
         c->last_rx_ms = n_now_ms();
@@ -888,7 +895,7 @@ static void udp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
             return;
         }
         fcntl(fd, NET_F_SETFL, NET_O_NONBLOCK);
-        n_sa(&sa, fwd_ip, fwd_port);
+        n_sa(&sa, n_host_ip(fwd_ip), fwd_port);
         if (connect(fd, &sa, (unsigned int)sizeof(sa)) != 0) {
             close(fd);
             u->used = 0;
