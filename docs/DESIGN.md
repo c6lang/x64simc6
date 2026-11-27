@@ -1538,3 +1538,25 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     **验证**：交互 `top` 30 秒 13 帧并可用 `q` 退出；连续 12 次 500 字节
     写全部完成；`top -n 2` 两帧后回到 shell；pty 里模拟真终端应答时
     100 字符长命令行的回显完整、提示符不再追加。
+
+92. **`login:` 反复输出：guest 时钟比墙钟快 15 倍**。交互登录时提示符会
+    每隔 4～6 秒重新打印一次，输入的用户名还可能被吞掉。查下来既不是
+    getty 也不是串口的问题，而是**时间模型**：空闲快进（HLT 分支）一次
+    推进一个 PIT 周期（4ms guest 时间），但墙钟只花几百微秒，于是 guest
+    钟比真实时间快十几倍（实测 15 秒墙钟 = 234～269 秒 guest 时间）。
+    busybox login 用 `setitimer(ITIMER_REAL, 60s)` + SIGALRM 做登录超时
+    （`--sys` 里能看到 `rt_sigaction(SIGALRM)` → `setitimer` → `read` →
+    立刻 `exit_group(0)`），60 guest 秒 ≈ 4 秒墙钟，于是 login 刚打印完
+    提示符就被超时踢掉，init 不停 respawn getty —— 用户看到的就是
+    "login:" 反复输出；敲字快还能赶上，慢慢打就必然被踢。
+    修法两条：
+    - **TSC 按 17 条指令加 1**（`g_tsc_acc` 分频）。内核用 PIT 标定出的
+      TSC 频率约 1.19MHz，而模拟器一秒跑两千万条指令；1:1 推进时 guest
+      眼里的时间就是墙钟的 15 倍。分频后忙时 guest 时间和墙钟基本一致。
+    - **交互模式下空闲快进按墙钟节流**（`pace_ahead()`）：guest 钟比墙钟
+      超前 20ms 以上时这一跳就不推进时间（但**仍然调用 `dev_tick()`**，
+      否则挂起的串口中断投递不出去、敲键没反应——这是第一版踩的坑）。
+      stdin 不是 tty（批处理 / difftest / `--stopt` 基准）时完全关掉，
+      吞吐和结果都不受影响。
+    修复后交互登录：逐字符输入回显即时、回车后直接进 shell，提示符不再
+    重复；批处理跑 900M 引导仍是 46 秒、`ser_out=309`（`irq4` 317）。

@@ -161,6 +161,10 @@
 - [x] `main.c6` 做最小终端：跟踪 guest 光标位置、主动应答 ash 的 `ESC[6n`，
       修登录后提示符/输入"往后追加"（宿主终端的应答仍过滤）
 
+- [x] 修交互登录 `login:` 反复输出：TSC 按 17 条指令加 1 + 交互模式空闲
+      按墙钟节流（DESIGN §92）；busybox login 的 60 秒 SIGALRM 不再三四秒
+      就到，逐字符输入回显正常、回车直接进 shell
+
 ## 阶段 9 —— 未结问题
 
 - [x] 补齐其余 SSE 浮点：`min/max`、`cmp*` 八种谓词、`shufps/shufpd`、
