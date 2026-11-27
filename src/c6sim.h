@@ -288,6 +288,8 @@ u64 jit_stat(int i);
 int jit_synth_chain(u64 a, u64 b, u32 ia, u32 ib, u32 mode);
 void jit_set_trace(int v);
 void jit_set_mask(int v);
+void jit_set_min_n(int n);
+extern int g_jit_min_n;
 extern int g_jit_mask;
 #endif
 
