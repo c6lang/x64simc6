@@ -11,6 +11,9 @@ WASM_FLAGS=${WASM_FLAGS:-"-Wl,--initial-memory=268435456 -Wl,--max-memory=536870
 # 同一份 C6 源码，宿主编译器有寄存器分配，整机引导比 c6c 直接出码快 30 倍以上。
 # C6_PURE=1 强制回到 c6c 自举路径（不需要系统 cc）。
 CC=${CC:-cc}
+# 优化级别：-O2 是实测最优（-O3/-march=native/-flto/PGO 都更差或只差 3%，
+# 见 DESIGN §84）。要试别的就 OPT="-O3" ./build.sh native。
+OPT=${OPT:--O2}
 C6_PURE=${C6_PURE:-0}
 
 CORE="src/mem.c6 src/dev.c6 src/cpu.c6 src/boot.c6 src/machine.c6 src/host.c6"
@@ -26,6 +29,7 @@ usage() {
 环境变量:
   C6_PURE=1  跳过快速路径，直接用 c6c 生成 build/sim（自举验证用）
   CC=...     快速路径使用的宿主编译器（默认 cc）
+  OPT=...    快速路径的优化选项（默认 -O2）
   C6C=...    c6c 路径
 EOF
 }
@@ -57,10 +61,10 @@ native_fast() {
         n=$(basename "$f" .c6)
         "$C6C" --emit-ctu -I src "$f" -o "build/ctu/$n.c"
         ctu_fixup "build/ctu/$n.c"
-        "$CC" -O2 -w -c -I src "build/ctu/$n.c" -o "build/ctu/$n.o"
+        "$CC" $OPT -w -c -I src "build/ctu/$n.c" -o "build/ctu/$n.o"
     done
-    "$CC" -O2 -o build/sim build/ctu/*.o -lm
-    echo "native: build/sim (cc -O2 via --emit-ctu)"
+    "$CC" $OPT -o build/sim build/ctu/*.o -lm
+    echo "native: build/sim (cc $OPT via --emit-ctu)"
 }
 
 native_pure() {

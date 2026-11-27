@@ -1367,3 +1367,22 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
          `g_m.cpu.rip`（§10 的指针参数偏移 bug）。
        自举路径保留为 `C6_PURE=1 ./build.sh native`，用于验证「C6 源码本身」
        的正确性与可移植性。
+85. **编译器选项：-O2 是实测最优，-O3 反而更慢**。同一份 `--emit-ctu` 产物上
+    逐个试过（100M 条整机引导，`perf stat -e instructions:u` + 墙钟 best-of-3）：
+
+    | 选项 | 宿主指令 | 墙钟 |
+    | --- | --- | --- |
+    | `-O2`（采用） | 36.57G | 5.10s |
+    | `-O3` | 37.23G（+1.8%） | 5.17s |
+    | `-O2 -march=native` | 6.42G@20M（比 -O2 的 6.41G 略差） | 0.838s@20M |
+    | `-O2 -flto` | 36.11G（−1.3%） | 5.31s |
+    | `-O2` + PGO（200M 采样） | 35.41G（−3.2%） | 5.18s |
+    | `-O2 -fno-stack-protector` | 与 -O2 相同 | — |
+
+    `--emit-ctu` 出来的 `step()` 是一个巨大的 switch + goto 热循环：
+    -O3 多做的循环展开/矢量化把热循环撑大，I-cache 和分支预测都变差，
+    20M 处指令数 +2.4%、100M 处 +1.8%；`-march=native` 不改变代码结构，
+    没有收益。LTO 能跨 TU 内联一点（指令数 −1.3%），但代码布局变差、墙钟更慢。
+    PGO 只有 ~3% 收益，却需要「拿 34MB 固件跑一遍采样」并维护随源码变化的
+    profile 数据，不划算。结论：默认 `-O2`，需要时用 `OPT="-O3" ./build.sh
+    native` 覆盖。
