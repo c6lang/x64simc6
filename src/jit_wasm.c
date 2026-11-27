@@ -29,7 +29,7 @@
 #include <stddef.h>
 #include "c6sim.h"
 
-#define JIT_MOD_MAX 4096
+#define JIT_MOD_MAX 8192
 #define JIT_MAX_INS 16
 #define JIT_CACHE 2048
 #define JIT_MAX_COMPILES 2048
@@ -39,8 +39,10 @@
 static u8 jit_mod[JIT_MOD_MAX];
 
 /* 由 JS 提供（build.sh 的 JIT=1 链接加 --allow-undefined） */
-extern int js_jit_compile(u32 ptr, u32 len);
-extern int js_jit_run(int handle, u32 state_off, u32 ram_off);
+extern int js_jit_compile(u32 ptr, u32 len, u32 rip_lo, u32 rip_hi,
+                          u32 n, u32 pa_page, u32 gen, u32 branch);
+extern int js_jit_run(int handle, u32 state_off, u32 ram_off,
+                      u32 rip_off, u32 max_ins);
 
 int g_jit_on = 1;
 static u64 jit_lo = 0xffffffff80000000ull;
@@ -48,6 +50,9 @@ static u64 jit_hi = 0xffffffffc0000000ull;
 static int jit_compiles = 0;
 static u64 jit_n_compile = 0;
 static u64 jit_n_hit = 0;
+static u64 jit_n_insn = 0;
+u64 g_jit_bad_boundary = 0;
+u64 g_jit_bad_budget = 0;
 
 
 u64 jit_stat(int i)
@@ -55,6 +60,9 @@ u64 jit_stat(int i)
     if (i == 0) return jit_n_compile;
     if (i == 1) return jit_n_hit;
     if (i == 3) return (u64)jit_compiles;
+    if (i == 6) return jit_n_insn;
+    if (i == 7) return g_jit_bad_boundary;
+    if (i == 8) return g_jit_bad_budget;
     return 0;
 }
 
@@ -140,7 +148,7 @@ static void wb_section(struct WBuf *out, u8 id, struct WBuf *body)
 enum {
     J_NOP = 1, J_MOVI, J_MOVMI, J_MOVRR,
     J_ADD, J_SUB, J_AND, J_OR, J_XOR, J_CMP, J_TEST,
-    J_INC, J_DEC,
+    J_INC, J_DEC, J_LEA, J_MOVZX, J_MOVSX,
     J_JMP, J_JCC
 };
 
@@ -152,6 +160,13 @@ struct JIns {
     u8 is_imm;
     u8 branch;   /* 1 = 块的最后一条是分支 */
     u8 cc;       /* jcc 条件码 */
+    u8 base;     /* LEA: 0xff = 无 */
+    u8 index;    /* LEA: 0xff = 无 */
+    u8 scale;    /* LEA: 0..3 -> ×1/2/4/8 */
+    u8 from;     /* MOVZX/MOVSX 源宽度：1/2 字节 */
+    u8 src_hi;   /* 无 REX 的 8 位源是 AH/CH/DH/BH */
+    u8 rip_rel;  /* LEA 的 RIP 相对 */
+    int disp;    /* LEA 位移（已符号扩展） */
     u64 imm;
     u64 rip;
     u64 target;
@@ -239,6 +254,59 @@ static int jit_decode_one(u64 p, struct JIns *in)
         if (sz == 8)
             in->imm = (u64)(i64)(i32)(u32)in->imm;   /* imm32 符号扩展 */
         in->len = pos + 6;
+        return 1;
+    }
+    if (op == 0x8d) {                 /* LEA reg, [base+index*scale+disp] */
+        u8 m = (u8)jit_mr8(p + pos + 1);
+        u32 mod = (u32)(m >> 6);
+        u32 regf = ((m >> 3) & 7) | ((rex & 4) ? 8 : 0);
+        u32 rm = m & 7;
+        u32 dp = pos + 2;
+        int disp = 0;
+        u32 base = 0xff, index = 0xff;
+        u8 scale = 0, rip_rel = 0;
+
+        if (mod == 3)
+            return 0;
+        if (mod == 0 && rm == 5) {     /* RIP 相对 */
+            disp = (int)jit_rd32(p + dp);
+            dp += 4;
+            rip_rel = 1;
+        } else {
+            if (rm == 4) {
+                u8 sib = (u8)jit_mr8(p + dp);
+                u32 rawidx = (u32)((sib >> 3) & 7);
+                dp++;
+                index = rawidx | ((rex & 2) ? 8 : 0);
+                if (rawidx == 4 && !(rex & 2))
+                    index = 0xff;
+                base = (u32)(sib & 7) | ((rex & 1) ? 8 : 0);
+                scale = (u8)((sib >> 6) & 3);
+                if ((sib & 7) == 5 && mod == 0) {
+                    base = 0xff;
+                    disp = (int)jit_rd32(p + dp);
+                    dp += 4;
+                }
+            } else {
+                base = rm | ((rex & 1) ? 8 : 0);
+            }
+            if (mod == 1) {
+                disp = (int)(i8)jit_mr8(p + dp);
+                dp++;
+            } else if (mod == 2) {
+                disp = (int)jit_rd32(p + dp);
+                dp += 4;
+            }
+        }
+        in->op = J_LEA;
+        in->dst = (u8)regf;
+        in->base = (u8)base;
+        in->index = (u8)index;
+        in->scale = scale;
+        in->disp = disp;
+        in->rip_rel = rip_rel;
+        in->sz = (rex & 8) ? 8 : 4;
+        in->len = dp;
         return 1;
     }
     if (op == 0x89 || op == 0x8b || op == 0x01 || op == 0x03 ||
@@ -341,6 +409,23 @@ static int jit_decode_one(u64 p, struct JIns *in)
             in->target = (u64)((i64)p + (i64)in->len + d);
             return 1;
         }
+        if (op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf) {
+            u8 m = (u8)jit_mr8(p + pos + 2);
+            if ((m >> 6) != 3)
+                return 0;
+            in->op = (op2 == 0xb6 || op2 == 0xb7) ? J_MOVZX : J_MOVSX;
+            in->from = (u8)((op2 == 0xb6 || op2 == 0xbe) ? 1 : 2);
+            in->dst = (u8)(((m >> 3) & 7) | ((rex & 4) ? 8 : 0));
+            if ((op2 == 0xb6 || op2 == 0xbe) && rex == 0 && (m & 7) >= 4) {
+                in->src_hi = 1;
+                in->src = (u8)((m & 7) - 4);
+            } else {
+                in->src = (u8)((m & 7) | ((rex & 1) ? 8 : 0));
+            }
+            in->sz = (rex & 8) ? 8 : 4;
+            in->len = pos + 3;
+            return 1;
+        }
         return 0;
     }
     return 0;
@@ -409,7 +494,7 @@ static void e_alu_result(struct WBuf *b, u8 sz, u8 op32, u8 op64)
 
 static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
 {
-    u8 t1[256], t2[512], t3[64], t4[64], t5[4096];
+    u8 t1[256], t2[512], t3[64], t4[64], t5[8192];
     u32 rax_off = (u32)offsetof(struct Machine, cpu.r[0]);
     u32 rip_off = (u32)offsetof(struct Machine, cpu.rip);
     u32 fl_off = (u32)offsetof(struct Machine, cpu.flags);
@@ -506,6 +591,56 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
             e_get(&b, 2); e_get(&b, 4); e_i32_const(&b, x->sz);
             e_call(&b, x->op == J_INC ? 3 : 4);
             break;
+        case J_LEA:
+            if (x->rip_rel) {
+                e_i64_const(&b, x->rip + (u64)x->len);
+            } else if (x->base != 0xff) {
+                e_load64(&b, rax_off + (u32)x->base * 8u);
+            } else {
+                e_i64_const(&b, 0);
+            }
+            if (x->index != 0xff) {
+                e_load64(&b, rax_off + (u32)x->index * 8u);
+                if (x->scale != 0) {
+                    e_i64_const(&b, 1ull << x->scale);
+                    wb_u8(&b, 0x7e);          /* i64.mul */
+                }
+                wb_u8(&b, 0x7c);              /* i64.add */
+            }
+            if (x->disp != 0) {
+                e_i64_const(&b, (u64)(i64)x->disp);
+                wb_u8(&b, 0x7c);
+            }
+            e_set(&b, 2);
+            e_addr(&b, d);
+            e_get(&b, 2);
+            if (x->sz == 4) { e_wrap(&b); e_ext_u(&b); }
+            e_store64(&b);
+            break;
+        case J_MOVZX:
+        case J_MOVSX:
+            e_load64(&b, s);
+            if (x->src_hi) {
+                e_i64_const(&b, 8);
+                wb_u8(&b, 0x88);          /* i64.shr_u：取 AH/CH/DH/BH */
+            }
+            e_wrap(&b);
+            if (x->from == 1) {
+                if (x->op == J_MOVZX) { e_i32_const(&b, 0xff); wb_u8(&b, 0x71); }
+                else wb_u8(&b, 0xc0);     /* i32.extend8_s */
+            } else {
+                if (x->op == J_MOVZX) { e_i32_const(&b, 0xffff); wb_u8(&b, 0x71); }
+                else wb_u8(&b, 0xc1);     /* i32.extend16_s */
+            }
+            if (x->op == J_MOVSX && x->sz == 8)
+                wb_u8(&b, 0xac);          /* i64.extend_i32_s */
+            else
+                e_ext_u(&b);
+            e_set(&b, 2);
+            e_addr(&b, d);
+            e_get(&b, 2);
+            e_store64(&b);
+            break;
         case J_TEST:
             e_load64(&b, d); e_set(&b, 2);
             e_load64(&b, s); e_set(&b, 3);
@@ -577,7 +712,7 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
 
     {
         struct WBuf c = { t5, 0, sizeof(t5) };
-        u8 body[4096];
+        u8 body[8192];
         u32 i = 0;
         for (i = 0; i < b.n && i < sizeof(body); i++) body[i] = b.p[i];
         wb_u8(&c, 0x01); wb_leb(&c, b.n); wb_bytes(&c, body, b.n);
@@ -609,7 +744,9 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
     len = jit_build_module(ins, n, end);
     if (len == 0)
         return -1;
-    h = js_jit_compile((u32)(unsigned long)jit_mod, len);
+    h = js_jit_compile((u32)(unsigned long)jit_mod, len,
+                       (u32)rip, (u32)(rip >> 32), (u32)n,
+                       *pa_page, *gen, (u32)ins[n - 1].branch);
     if (h < 0)
         return -1;
     jit_compiles++;
@@ -623,6 +760,7 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
  * max_ins 用于 machine_run 的 stopt / 循环配额：块比它长就不跑。 */
 int jit_try2(u64 rip, u32 max_ins)
 {
+    u32 rip_off = (u32)offsetof(struct Machine, cpu.rip);
     u32 slot = 0;
     struct JitEnt *e = 0;
     u32 n = 0;
@@ -640,15 +778,20 @@ int jit_try2(u64 rip, u32 max_ins)
         if (e->gen != jit_page_gen[e->pa_page])
             e->valid = 0;             /* SMC：页被写过，重翻译 */
         else {
+            int rc = 0;
             if (e->n > max_ins)
                 return 0;
-            if (js_jit_run((int)e->handle, (u32)(unsigned long)&g_m,
-                           (u32)(unsigned long)g_m.ram) != 0) {
+            rc = js_jit_run((int)e->handle, (u32)(unsigned long)&g_m,
+                            (u32)(unsigned long)g_m.ram, rip_off, max_ins);
+            if (rc < 0) {
                 e->valid = 0;
                 return 0;
             }
-            jit_n_hit++;
-            return (int)e->n;
+            if (rc > 0) {
+                jit_n_hit++;
+                jit_n_insn += (u32)rc;
+            }
+            return rc;
         }
     }
     {
@@ -675,13 +818,19 @@ int jit_try2(u64 rip, u32 max_ins)
     e->valid = 1;
     if (n > max_ins)
         return 0;                     /* 已缓存，等下一次预算够再跑 */
-    if (js_jit_run(h, (u32)(unsigned long)&g_m,
-                   (u32)(unsigned long)g_m.ram) != 0) {
-        e->valid = 0;
-        return 0;
+    {
+        int rc = js_jit_run(h, (u32)(unsigned long)&g_m,
+                            (u32)(unsigned long)g_m.ram, rip_off, max_ins);
+        if (rc < 0) {
+            e->valid = 0;
+            return 0;
+        }
+        if (rc > 0) {
+            jit_n_compile++;
+            jit_n_insn += (u32)rc;
+        }
+        return rc;
     }
-    jit_n_compile++;
-    return (int)n;
 }
 
 int jit_try(u64 rip)
@@ -716,8 +865,12 @@ int jit_block(u64 rip)
 {
     struct JIns ins[JIT_MAX_INS];
     u64 end = 0;
+    u64 pa = 0;
     int n = 0;
     u32 len = 0;
+    u32 pg = 0;
+    u32 gen = 0;
+    u32 rip_off = (u32)offsetof(struct Machine, cpu.rip);
     int h = 0;
 
     n = jit_decode_block(rip, ins, &end);
@@ -726,13 +879,25 @@ int jit_block(u64 rip)
     len = jit_build_module(ins, n, end);
     if (len == 0)
         return -3;
-    h = js_jit_compile((u32)(unsigned long)jit_mod, len);
+    pa = mem_translate(rip, 0, 0, 0);
+    if (pa < (u64)RAM_SIZE) {
+        pg = (u32)(pa >> 12);
+        gen = jit_page_gen[pg];
+    }
+    h = js_jit_compile((u32)(unsigned long)jit_mod, len,
+                       (u32)rip, (u32)(rip >> 32), (u32)n, pg, gen,
+                       (u32)ins[n - 1].branch);
     if (h < 0)
         return -4;
     if (js_jit_run(h, (u32)(unsigned long)&g_m,
-                   (u32)(unsigned long)g_m.ram) != 0)
+                   (u32)(unsigned long)g_m.ram, rip_off, 0xffffffffu) < 0)
         return -5;
     return n;
+}
+
+u32 jit_gen_base(void)
+{
+    return (u32)(unsigned long)jit_page_gen;
 }
 
 int jit_poc(u64 rip)

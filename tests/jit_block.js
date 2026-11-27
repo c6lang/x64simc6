@@ -9,6 +9,7 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { makeJitEnv } = require("./jit_hooks");
 
 const ROOT = path.dirname(__dirname);
 const WASM = path.join(ROOT, "web", "sim.wasm");
@@ -17,38 +18,9 @@ async function main() {
   const bytes = fs.readFileSync(WASM);
   const mod = new WebAssembly.Module(bytes);
 
-  const handles = [];
   let inst = null;
-  const env = {
-    js_jit_compile(ptr, len) {
-      try {
-        const mem = new Uint8Array(inst.exports.memory.buffer, ptr, len).slice();
-        const m = new WebAssembly.Module(mem);
-        const i = new WebAssembly.Instance(m, {
-          env: {
-            memory: inst.exports.memory,
-            jit_flags_add: inst.exports.jit_flags_add,
-            jit_flags_sub: inst.exports.jit_flags_sub,
-            jit_flags_logic: inst.exports.jit_flags_logic,
-            jit_flags_inc: inst.exports.jit_flags_inc,
-            jit_flags_dec: inst.exports.jit_flags_dec,
-            jit_cond: inst.exports.jit_cond,
-          },
-        });
-        handles.push(i);
-        return handles.length - 1;
-      } catch (e) {
-        console.error("[jit_block] compile failed:", e && e.message);
-        return -1;
-      }
-    },
-    js_jit_run(h, state, ram) {
-      if (h < 0 || h >= handles.length) return -2;
-      return handles[h].exports.run(state, ram) | 0;
-    },
-  };
-
-  inst = await WebAssembly.instantiate(mod, { env });
+  const jit = makeJitEnv(() => inst);
+  inst = await WebAssembly.instantiate(mod, { env: jit.env });
   const w = inst.exports;
 
   if (w.sim_reset() !== 0) {

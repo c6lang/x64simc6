@@ -8,6 +8,7 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { makeJitEnv } = require("./jit_hooks");
 
 const ROOT = path.dirname(__dirname);
 const WASM = path.join(ROOT, "web", "sim.wasm");
@@ -16,38 +17,9 @@ async function main() {
   const bytes = fs.readFileSync(WASM);
   const mod = new WebAssembly.Module(bytes);
 
-  const handles = [];
   let inst = null;
-  const env = {
-    js_jit_compile(ptr, len) {
-      try {
-        const mem = new Uint8Array(inst.exports.memory.buffer, ptr, len).slice();
-        const m = new WebAssembly.Module(mem);
-        const i = new WebAssembly.Instance(m, {
-          env: {
-            memory: inst.exports.memory,
-            jit_flags_add: inst.exports.jit_flags_add,
-            jit_flags_sub: inst.exports.jit_flags_sub,
-            jit_flags_logic: inst.exports.jit_flags_logic,
-            jit_flags_inc: inst.exports.jit_flags_inc,
-            jit_flags_dec: inst.exports.jit_flags_dec,
-            jit_cond: inst.exports.jit_cond,
-          },
-        });
-        handles.push(i);
-        return handles.length - 1;
-      } catch (e) {
-        console.error("[jit_block64] compile failed:", e && e.message);
-        return -1;
-      }
-    },
-    js_jit_run(h, state, ram) {
-      if (h < 0 || h >= handles.length) return -2;
-      return handles[h].exports.run(state, ram) | 0;
-    },
-  };
-
-  inst = await WebAssembly.instantiate(mod, { env });
+  const jit = makeJitEnv(() => inst);
+  inst = await WebAssembly.instantiate(mod, { env: jit.env });
   const w = inst.exports;
   if (w.sim_reset() !== 0) {
     console.error("[jit_block64] sim_reset failed");
@@ -130,6 +102,30 @@ async function main() {
     0x48, 0x83, 0xf8, 0x05,
     0x90,
   ], 12);
+
+  /* LEA（SIB/位移/RIP 相对）与 movzx/movsx */
+  run_case("lea_movx", [
+    0x48, 0xb8, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x48, 0xb9, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x48, 0x8d, 0x14, 0x48,
+    0x48, 0x8d, 0x5c, 0x88, 0x10,
+    0x48, 0x8d, 0x6c, 0xcb, 0xf0,
+    0xb9, 0x80, 0x00, 0x00, 0x00,
+    0x0f, 0xbe, 0xd1,
+    0x0f, 0xb6, 0xd9,
+    0x48, 0x0f, 0xbe, 0xc9,
+    0x48, 0x0f, 0xb7, 0xd9,
+    0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00,
+    0x90,
+  ], 12);
+
+  /* 无 REX 的 8 位源是 AH/CH/DH/BH */
+  run_case("movx_hi", [
+    0xb8, 0x00, 0x80, 0x00, 0x00,
+    0x0f, 0xbe, 0xcc,
+    0x0f, 0xb6, 0xd4,
+    0x48, 0x0f, 0xbe, 0xcc,
+  ], 4);
 
   /* jcc taken：mov/cmp/je，块长 3；目标落在 mov eax,3 */
   run_case("jcc_taken", [

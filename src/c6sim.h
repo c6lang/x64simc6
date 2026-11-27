@@ -259,6 +259,8 @@ void jit_flush(void);
 void jit_set_on(int v);
 void jit_set_window(u64 lo, u64 hi);
 extern int g_jit_on;
+extern u64 g_jit_bad_boundary;
+extern u64 g_jit_bad_budget;
 
 /* mem.c6：按物理页的写代数，JIT 用它做 SMC 失效 */
 extern u32 jit_page_gen[32768];

@@ -259,8 +259,9 @@
       指令计数/TSC 边界、未覆盖指令回退、SMC 页写代数、64 位与
       jcc/jmp；900M 引导 JIT 开/关的指令数与串口逐字节一致
       （876,201,405 条，`c67ca2a0…`，DESIGN §100）
-- [ ] JIT 批量链式执行：JS 侧按 RIP 连跑多个块，减少 wasm↔JS 切换
-      （当前 900M 慢 20% 的主因）
+- [ ] JIT 批量链式执行（已实现 JS 按 RIP 连跑）：50M 把调用压到约 39 万次，
+      但 210M 起分支链会让 guest RAM 分叉（tsc/PIT 一致）；默认已退回
+      单块直跑，`JIT_CHAIN_FALL=0` 保留诊断，待定位分支链 bug
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用
 - [ ] JIT 子集扩展：lea/movzx/movsx/imul/shift/push/pop/call/ret、
       内存操作数与缺页回退（当前覆盖约 5% 指令）

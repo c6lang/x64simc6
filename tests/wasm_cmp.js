@@ -9,6 +9,7 @@
  */
 const fs = require('fs');
 const { execFileSync } = require('child_process');
+const { makeJitEnv } = require('./jit_hooks');
 
 const N = Number(process.argv[2] || 1000000);
 const QUIET = process.argv.includes('--quiet');
@@ -55,36 +56,8 @@ async function wasmSnapshot() {
   const imports = WebAssembly.Module.imports(mod);
   const hasJit = imports.some((i) => i.module === 'env' && i.name === 'js_jit_compile');
   let inst = null;
-  const handles = [];
-  const env = {
-    js_jit_compile(ptr, len) {
-      if (handles.length >= 32768) return -1;
-      try {
-        const bytes = new Uint8Array(inst.exports.memory.buffer, ptr, len).slice();
-        const m = new WebAssembly.Module(bytes);
-        const i = new WebAssembly.Instance(m, {
-          env: {
-            memory: inst.exports.memory,
-            jit_flags_add: inst.exports.jit_flags_add,
-            jit_flags_sub: inst.exports.jit_flags_sub,
-            jit_flags_logic: inst.exports.jit_flags_logic,
-            jit_flags_inc: inst.exports.jit_flags_inc,
-            jit_flags_dec: inst.exports.jit_flags_dec,
-            jit_cond: inst.exports.jit_cond,
-          },
-        });
-        handles.push(i);
-        return handles.length - 1;
-      } catch (e) {
-        return -1;
-      }
-    },
-    js_jit_run(h, state, ram) {
-      if (h < 0 || h >= handles.length) return -2;
-      return handles[h].exports.run(state, ram) | 0;
-    },
-  };
-  inst = await WebAssembly.instantiate(mod, hasJit ? { env } : {});
+  const jit = makeJitEnv(() => inst);
+  inst = await WebAssembly.instantiate(mod, hasJit ? { env: jit.env } : {});
   const w = inst.exports;
   if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
   const STAGE = 0x0d800000;
@@ -129,7 +102,7 @@ async function wasmSnapshot() {
   if (hasJit && process.env.JIT_STATS === '1') {
     console.error(
       `[jit] runs=${w.sim_jit_stat(0)} hits=${w.sim_jit_stat(1)} ` +
-      `compiles=${w.sim_jit_stat(3)}`
+      `compiles=${w.sim_jit_stat(3)} insns=${w.sim_jit_stat(6)}`
     );
   }
   return { regs, rip: BigInt.asUintN(64, w.sim_last_rip()).toString(16),

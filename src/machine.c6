@@ -228,19 +228,27 @@ static int machine_step_loop(u64 count)
          * 分频和循环配额。取指/异常/调试模式一律回退解释器。 */
         if (g_jit_on && !dbg_any && !g_m.cpu.exc_pending && !g_m.cpu.halted &&
             !g_m.cpu.fault_abort &&
-            ((g_m.instructions & 0x3ffffull) + 16ull) < 0x40000ull) {
+            (g_m.instructions & 0x3ffffull) != 0x3ffffull) {
             u64 jlim = (u64)n + 1ull;
+            u64 bdist = 0x40000ull - (g_m.instructions & 0x3ffffull);
             u32 jn = 0;
+            /* 停在 dev_tick 边界/ stopt 前一条，让解释器执行最后一条并
+             * 在循环尾部按原时序调 dev_tick。 */
+            if ((bdist - 1ull) < jlim)
+                jlim = bdist - 1ull;
             if (stopt != 0 && stopt > g_m.instructions &&
-                (stopt - g_m.instructions) < jlim)
-                jlim = stopt - g_m.instructions;
-            jn = (u32)jit_try2(g_m.cpu.rip, (u32)jlim);
+                (stopt - g_m.instructions - 1ull) < jlim)
+                jlim = stopt - g_m.instructions - 1ull;
+            if (jlim > 0)
+                jn = (u32)jit_try2(g_m.cpu.rip, (u32)jlim);
             if (jn > 0) {
+                if ((u64)jn > jlim) g_jit_bad_budget++;
                 g_m.cur_rip = g_m.cpu.rip;
                 g_m.instructions += (u64)jn;
                 g_tsc_acc += jn;
                 g_m.tsc += g_tsc_acc / 17u;
                 g_tsc_acc %= 17u;
+                if ((g_m.instructions & 0x3ffffull) == 0) g_jit_bad_boundary++;
                 n -= (jn - 1u);
                 continue;
             }

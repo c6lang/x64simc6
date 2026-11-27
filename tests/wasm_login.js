@@ -9,6 +9,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { makeJitEnv } = require('./jit_hooks');
 const ROOT = path.dirname(__dirname);
 const MAX = Number(process.env.MAX_INSNS || 3000000000);
 const CHUNK = Number(process.env.CHUNK || 2000000);
@@ -23,36 +24,8 @@ const CAP = 1 << 16;
   const hasJit = WebAssembly.Module.imports(mod).some(
     (i) => i.module === 'env' && i.name === 'js_jit_compile');
   let instance = null;
-  const handles = [];
-  const env = {
-    js_jit_compile(ptr, len) {
-      if (handles.length >= 32768) return -1;
-      try {
-        const bytes = new Uint8Array(instance.exports.memory.buffer, ptr, len).slice();
-        const m = new WebAssembly.Module(bytes);
-        const i = new WebAssembly.Instance(m, {
-          env: {
-            memory: instance.exports.memory,
-            jit_flags_add: instance.exports.jit_flags_add,
-            jit_flags_sub: instance.exports.jit_flags_sub,
-            jit_flags_logic: instance.exports.jit_flags_logic,
-            jit_flags_inc: instance.exports.jit_flags_inc,
-            jit_flags_dec: instance.exports.jit_flags_dec,
-            jit_cond: instance.exports.jit_cond,
-          },
-        });
-        handles.push(i);
-        return handles.length - 1;
-      } catch (e) {
-        return -1;
-      }
-    },
-    js_jit_run(h, state, ram) {
-      if (h < 0 || h >= handles.length) return -2;
-      return handles[h].exports.run(state, ram) | 0;
-    },
-  };
-  instance = await WebAssembly.instantiate(mod, hasJit ? { env } : {});
+  const jit = makeJitEnv(() => instance);
+  instance = await WebAssembly.instantiate(mod, hasJit ? { env: jit.env } : {});
   const w = instance.exports;
   if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
   const mem = new Uint8Array(w.memory.buffer);
@@ -106,7 +79,7 @@ const CAP = 1 << 16;
   if (process.env.SERIAL_OUT) fs.writeFileSync(process.env.SERIAL_OUT, text);
   if (hasJit) {
     console.log(`[wasm_login] jit runs=${w.sim_jit_stat(0)} hits=${w.sim_jit_stat(1)} ` +
-                `compiles=${w.sim_jit_stat(3)}`);
+                `compiles=${w.sim_jit_stat(3)} insns=${w.sim_jit_stat(6)}`);
   }
   console.log(`[wasm_login] insns=${insns} text=${text.length}B ` +
               `loops=${loops} 用时=${((Date.now() - t0) / 1000).toFixed(0)}s`);

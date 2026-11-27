@@ -1905,19 +1905,33 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
       JIT 开/关的指令数完全一样，串口 646 字节 SHA256 都是
       `c67ca2a0…`，两次都 `WASM LOGIN OK`。
 
-    **性能**（Node，同机）：
+    **性能与链式实验**（Node，同机）：
 
-    | 负载 | JIT 关 | JIT 开 | 说明 |
-    | --- | --- | --- | --- |
-    | 900M 引导 | 55.97s | 67.17s（+20%） | 11,081,452 次块执行、291 次编译 |
-    | 50M 引导 | 16.11s | 16.12–16.43s | 13 次编译、约 40 万次块执行 |
+    | 负载 | JIT 关 | JIT 开（默认单块直跑） |
+    | --- | --- | --- |
+    | 900M 引导 | 56.6s | 66.8s（+18%） |
+    | 50M 引导 | 15.9s | 16.4–16.9s（+3–6%） |
+    | 210M 固定 stopt | RAM `dedbf9f2` | RAM `dedbf9f2`（一致） |
 
-    MVP 先把正确性/失效/回退打通，还不是净赢。瓶颈有两个：每条缓存块都要
-    从 wasm 进 JS 再回 wasm（900M 里 11M 次约 11s），以及子集只覆盖寄存器/
-    分支（约 5% 指令）。下一步按优先级：JS 侧按 RIP 批量链式执行（一次
-    JS 调用跑多个块、每块查写代数）、生成代码内联 flags/条件、扩到
-    lea/movzx/imul/shift/push/pop/call/ret 和内存操作数（缺页回退解释器）。
-    默认发布构建仍是 JIT=0，零 import。
+    为了摊薄 wasm↔JS 切换，试过在 JS 侧按 RIP 连跑多个块
+    （`JIT_CHAIN_FALL=0` 打开）：50M 时约 39 万次调用、平均 1.1 条/调用。
+    但 205M–210M 的固定 stopt 对比发现 JIT 开/关的 RAM 哈希开始不同
+    （串口首行时间戳差 10ms、login PID 502/503；而 tsc、PIT 计数完全
+    一致，badBoundary/badBudget=0）。把「分支块之后的链」关掉后，
+    900M 指令数与 646B 串口 SHA256 又完全一致。分支链的具体 bug 尚未
+    定位，所以默认走单块直跑的 SIMPLE 路径；链式保留为诊断开关，下一步
+    优先修它。
+
+    - 期间修了一个 simple 路径不检查 `max_ins` 的 bug：块长于预算时会
+      在 `machine_run` 里让 n 下溢，整机跑飞（实测 13.7B 条）。
+    - 新增 LEA（SIB/RIP 相对/32 位）与 movzx/movsx（含无 REX 的
+      AH/CH/DH/BH）、64 位/分支的块测试，以及 `jit_chain.js`、
+      `wasm_fixed.js`（固定 stopt 对比串口/RAM/tsc/PIT）。
+
+    MVP 先把正确性/失效/回退打通，还不是净赢。瓶颈：每条缓存块一次
+    wasm↔JS 切换、子集只覆盖寄存器/分支/LEA/MOVX（约 5–10% 指令）。
+    下一步：修分支链、JS 批量链式执行、生成代码内联 flags/条件、扩到
+    push/pop/call/ret 与内存操作数（缺页回退）。默认发布构建仍是 JIT=0。
 
     复现：
 
@@ -1925,6 +1939,8 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     ./build.sh jit                 # JIT=1 + 三个块测试
     JIT=1 ./build.sh wasm
     JIT_STATS=1 node tests/wasm_cmp.js 50000000
-    node tests/wasm_login.js                  # JIT 开
+    node tests/wasm_login.js                  # JIT 开（默认单块直跑）
     JIT_OFF=1 node tests/wasm_login.js        # JIT 关
+    JIT_CHAIN_FALL=0 node tests/wasm_login.js # 链式诊断（分支链有已知差异）
+    node tests/wasm_fixed.js 210000000        # 固定 stopt 对比
     ```

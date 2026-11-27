@@ -296,6 +296,21 @@ u64 sim_get_flags(void)
     return g_m.cpu.flags;
 }
 
+u64 sim_tsc(void)
+{
+    return g_m.tsc;
+}
+
+u64 sim_pit_count(void)
+{
+    return g_m.pit.count[0];
+}
+
+u64 sim_last_pit_tsc(void)
+{
+    return g_m.last_pit_tsc;
+}
+
 void sim_set_flags(u64 v)
 {
     g_m.cpu.flags = v;
