@@ -1401,3 +1401,28 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     raw 模式下生效）；输入路径上再过滤 `ESC[数字;数字R` 这条应答（方向键等
     其它 ESC 序列原样转给 guest）；正常退出（Ctrl-] 或机器 halt）时
     `tcsetattr` 恢复原设置。
+
+87. **SSE 浮点：借宿主浮点，不自己写软浮点**。`top` 一跑就 `Illegal
+    instruction`，`--udtrace` 追下去是 musl/busybox 在算 `%f`：先是
+    `comisd`（`66 0f 2f`），补完又依次缺 `cvttsd2si`（`f2 0f 2c`）、
+    `cvtsi2sd`（`f2 0f 2a`）、`subsd/mulsd`（`f2 0f 5c/59`）……本质是这台
+    机器**一条浮点指令都没实现**。
+    关键发现是 c6 语言本身支持 `double`/`float`（`c6c` 自举路径也能跑对
+    `1.0/3.0`），所以不需要在整数上造软浮点：xmm 的位型用 union 转成宿主
+    `double`/`float` 算完再转回来，NaN、±0、次正规数、就近偶数舍入全部由
+    x86-64 的 SSE2 指令保证，和真机一致。实现落在 `cpu.c6` 的
+    `fp_d_get/fp_d_put/fp_f_get/fp_f_put`、`fp_d_bin/fp_f_bin`（+ - * / 和
+    sqrt，sqrt 用牛顿迭代到 1ulp，不链 libm）以及 `sse_fp_cmp/i2f/f2i/bin/cvt`
+    五个指令体，覆盖 `ucomiss/ucomisd`、`cvtsi2sd/cvtsi2ss`、
+    `cvttsd2si/cvtsd2si`、`add/sub/mul/div/sqrt`（ss/sd/ps/pd 四种宽度）、
+    `cvtss2sd/cvtsd2ss/cvtps2pd/cvtpd2ps`。`0x2d`（按 MXCSR 舍入）与
+    `sqrt` 的末位、MXCSR/FXSAVE 仍不建模，够 printf/top 用。
+    这些指令体都抽成独立函数，**不能**内联进 `step()`：tcc-c6 的 wasm 后端
+    对单函数 local 数有上限，早先直接写进 case 里会让 `web/sim.wasm` 过不了
+    `WebAssembly.validate`（`local count too large`）。
+
+88. **`movsd/movss` 的窄宽度**（顺手修掉的内存踩踏）：`f2/f3 0f 10/11` 是
+    `movsd/movss`，只动低 64/32 位，载入时高位清零；旧代码把它们和
+    `movaps/movups` 一样当 16 字节搬，**存储时会多写 8 字节**，直接踩坏
+    guest 内存。浮点代码一多（musl 的 `printf` 到处 `movsd`）这个 bug 就会
+    放大，所以和 §87 一起修。

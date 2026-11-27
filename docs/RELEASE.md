@@ -86,6 +86,40 @@ cc -O2 -o build/sim build/ctu/*.o
 
 wasm 仍走 tcc-c6，纯源码级优化：20M 条引导 46.1s → 28.2s（1.63×）。
 
+### 3. 补上 SSE 浮点指令（`top` 不再 `Illegal instruction`）
+
+v1.1 之前模拟器**一条浮点指令都没实现**：Alpine 里一跑 `top` 就 `Illegal instruction`。
+用新增的 `--udtrace` 逐条追，缺的是 musl/busybox 算 `%f` 用的那一串：
+
+| 缺的编码 | 指令 | 用途 |
+| --- | --- | --- |
+| `66 0f 2f` | `comisd` | 浮点比较 |
+| `f2 0f 2c` | `cvttsd2si` | double → 整数 |
+| `f2 0f 2a` | `cvtsi2sd` | 整数 → double |
+| `f2 0f 5c/59/58/5e` | `subsd/mulsd/addsd/divsd` | 四则 |
+| `f2/f3 0f 5a` | `cvtsd2ss/cvtss2sd` | 精度转换 |
+
+实现方式是不写软浮点：**c6 语言自带 `double`/`float`**（自举路径也能正确算
+`1.0/3.0`），把 xmm 的位型用 union 转成宿主浮点算完再转回来，NaN、±0、
+次正规数、就近偶数舍入都由宿主的 SSE2 指令保证（`docs/DESIGN.md` §87）。
+顺带修了 `f2/f3 0f 10/11`（`movsd/movss`）被当成 16 字节搬的 bug——旧代码
+存储时会多写 8 字节，直接踩坏 guest 内存（§88）。
+
+现在 Alpine 里 `top`、`free`、`top -b -n1` 都能正常输出，
+`Load average:` 这类 `%f` 格式化结果与真机一致：
+
+```
+(none):~# top -b -n1
+Mem: 25176K used, 69768K free, 7860K shrd, 0K buff, 7860K cached
+CPU:   0% usr   9% sys   0% nic  90% idle   0% io   0% irq   0% sirq
+Load average: 1.12 1.23 0.52 1/57 445
+  PID  PPID USER     STAT   VSZ %VSZ CPU %CPU COMMAND
+  445   444 root     R     1624   2%   0   9% top -b -n1
+```
+
+新增调试开关 `--udtrace`：遇到未实现的编码时打印 RIP、opcode 和 8 字节
+指令，配合 `objdump -d` 能在几分钟内定位下一条要补的指令。
+
 ### 验收
 
 | 项 | 命令 | 结果 |
@@ -93,6 +127,7 @@ wasm 仍走 tcc-c6，纯源码级优化：20M 条引导 46.1s → 28.2s（1.63×
 | 单元/冒烟 | `./build.sh test` | 全过（payload / 单元 / CPL3 / pcache / wasm 冒烟） |
 | 指令差分 | `tools/difftest/difftest.py` | 1236/1236，自举与默认两种构建各跑一遍 |
 | 900M 引导 | `build/sim firmware.bin --stopt=900000000` | `ser_out=309 irq4=181`，逐字节一致 |
+| 浮点/`top` | 登录后 `top -b -n1` | 正常输出（含 `Load average` 浮点格式化） |
 | 登录验收 | `tools/boot_login.py` | 两种构建都 PASS（`uname -m` → `x86_64`） |
 
 ---
@@ -117,7 +152,8 @@ wasm 仍走 tcc-c6，纯源码级优化：20M 条引导 46.1s → 28.2s（1.63×
   kernel panic，已弃用；经过见 `docs/DESIGN.md` §83。
 
 调试设施（保留在 CLI 里）：`--nofast`、`--nofetch`、`--nodata`（A/B 开关，
-实测耗时差 +0.7% / +32% / +23%），`--cachecheck`（每次快路径命中与慢路径对拍）。
+实测耗时差 +0.7% / +32% / +23%），`--cachecheck`（每次快路径命中与慢路径对拍），
+`--udtrace`（遇到未实现编码时打印 RIP/opcode/指令字节，补指令时用）。
 
 新增单元测试 `tests/test_pcache.c6`：缺页不污染缓存、失效立即生效、
 R/W/NX/U-S 四条权限、跨页 4/8 字节访问、开/关缓存随机对拍 4000 次。

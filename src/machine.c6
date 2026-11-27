@@ -14,6 +14,7 @@ int g_no_fast = 0;
 int g_no_fetch = 0;
 int g_no_data = 0;
 int g_cc = 0;   /* --cachecheck：每次快路径命中都与慢路径对拍 */
+int g_ud_trace = 0;   /* --udtrace：遇到 #UD 时打印指令地址与字节 */
 
 static const char default_cmdline[] =
     "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 "

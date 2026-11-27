@@ -207,6 +207,7 @@ extern int g_no_fast;
 extern int g_no_fetch;
 extern int g_no_data;
 extern int g_cc;
+extern int g_ud_trace;
 u64 boot_probe(void);
 int machine_boot_staged(u8 *base, u32 koff, u32 klen,
                         u32 ioff, u32 ilen, u32 coff, u32 clen);

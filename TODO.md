@@ -138,3 +138,14 @@
 - [x] `build.sh` 加 `OPT` 旋钮（默认 `-O2`；-O3/-flto/-march=native/PGO
       实测都不如 -O2，见 DESIGN §85）
 - [x] 文档：README 性能表、DESIGN §84/§85/§86、RELEASE v1.1
+- [x] 补 SSE 浮点指令：`comisd/cvttsd2si/cvtsi2sd/subsd/mulsd/addsd/divsd/`
+      `sqrt`、`cvtss2sd/cvtsd2ss/cvtps2pd/cvtpd2ps`（借宿主的 `double`/`float`，
+      不写软浮点，DESIGN §87）；顺手修 `movsd/movss` 多写 8 字节的内存踩踏（§88）
+- [x] `--udtrace` 调试开关：打印未实现编码的 RIP/opcode/指令字节
+- [x] Alpine 里 `top -b -n1` 正常输出（`Load average` 等 `%f` 与真机一致）
+
+## 阶段 9 —— 未结问题
+
+- [ ] 引导期偶发的「跳进 0x48/0x4a/0x4d 填充页」`#UD`（`--udtrace` 可见，
+      进程被 SIGILL 但整机继续跑；引导、登录、`top` 都不受影响）。下一步用
+      `--udtrace` + `dmesg` 的 `traps:` 行定位是哪条跳转把 RIP 带进数据页。
