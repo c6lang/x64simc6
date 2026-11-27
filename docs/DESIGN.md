@@ -1560,3 +1560,108 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
       吞吐和结果都不受影响。
     修复后交互登录：逐字符输入回显即时、回车后直接进 shell，提示符不再
     重复；批处理跑 900M 引导仍是 46 秒、`ser_out=309`（`irq4` 317）。
+
+93. **外网访问：COM2 上的 SLIP + 用户态 NAT**。目标：guest 里的 `ping` /
+    `wget` 能真正走宿主网络，不要求 root/tap，也不引入 libslirp 依赖。
+    选型过程与结论：
+
+    - **为什么不是 virtio-net**：guest 内核是 Alpine 的
+      `6.6.142-0-lts`，`CONFIG_VIRTIO_MMIO=m` 而
+      `# CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES is not set`，模块又没有
+      `depmod` 索引，`virtio_mmio.device=` 内核参数无解；`-netdev user`
+      / tap 需要宿主特权。**稳健的公共交集是串口**：内核有
+      `CONFIG_SLIP=m`、`CONFIG_SLIP_COMPRESSED=y`、`CONFIG_SLIP_MODE_SLIP6=y`，
+      minirootfs 里也有 `/sbin/slattach`。
+    - **硬件**：在 `dev.c6` 里加第二个 16550A：端口 `0x2f8..0x2ff`（COM2，
+      `/dev/ttyS1`）、IRQ3、128 KiB RX 环。`serial2_read/write` 覆盖
+      RBR/THR、IER、IIR、LCR/DLAB、MCR、LSR、SCR；`dev_tick()` 每轮把
+      RX 和 THRE 的**电平**重新拉进 PIC（和 §91 的 COM1 同一套语义），
+      否则驱动使能 IER 后不会再收到第一次中断。
+    - **THRE 不能只做电平**：16550 的 THRE 挂起态由「写 THR」置位、
+      「读 IIR」清除（RX 优先）；只按电平重拉会变成永不停的中断风暴，
+      guest 卡在 IRQ3 处理里、sl0 的 TX queue 20 秒超时。`Serial2State`
+      里加 `thre_pending`，`serial2_read(2)` 读到 THRE 时清它，
+      `serial2_write(0)` 重新置位——这样「驱动一批写完 → 清 THRI」能停，
+      而「tty 层后来再排数据 → start_tx 只写 IER」也能被 `ier & 2`
+      重新拉起（顺序与真 16550 一致）。
+    - **软件**：`src/net.c6`（`C6_WASM` 下整体为空）。地址 `10.0.2.15`
+      / peer `10.0.2.2` / DNS `10.0.2.3`（QEMU user 的约定）。
+      `slip_rx_byte()` 按 RFC 1055 解帧（`0xC0` 定界，`0xDB 0xDC/0xDD`
+      转义），`slip_tx()` 反向转义后 `serial2_feed()` 进 COM2 环；
+      IP 层自己算校验和、按 1480 分片；TCP 每条连接一个**非阻塞**宿主
+      socket（`connect` 后发本地 SYN-ACK，guest 的数据先缓存在
+      `wbuf`，`poll(SO_ERROR)` 成功后再 forward，最大 16 条）；UDP 逐流
+      转发（16 条），`10.0.2.3:53` 自动改写成宿主 DNS 并把回包源改回
+      `10.0.2.3`；ICMP echo 对 `10.0.2.2/10.0.2.3/10.0.2.15` 本地回，
+      其余用宿主 **ping socket**（`SOCK_DGRAM, IPPROTO_ICMP`，本机
+      `ping_group_range = 0 2147483647`，非 root 可用）。宿主 DNS 取
+      `/etc/resolv.conf` 第一个 `nameserver`，取不到用 `1.1.1.1`。
+      `net_tick()` 由 `dev_tick()` 调用，按墙钟 1ms 节流；`net_reset()`
+      在 `dev_init()` 里复位。
+    - **固件**：`tools/mkfw.py` 新增 `--modules`（也接受
+      `lib/modules/<kver>`），把 `slip.ko`/`slhc.ko` 解压进
+      `/lib/modules/<kver>/kernel/drivers/net/slip/`，并给 `/init` 追加
+      `insmod slhc`、`insmod slip`、`slattach -p slip -s 115200
+      /dev/ttyS1 &`、等待 `/sys/class/net/sl0`（最多 5 秒）、
+      `ifconfig sl0 10.0.2.15 pointopoint 10.0.2.2 mtu 1500 up`、
+      `route add default gw 10.0.2.2`、`nameserver 10.0.2.3`。
+      `build.sh fw` 在 `build/alpine/lib/modules` 存在时自动带上模块树。
+    - **验证**（native，默认构建）：guest 里 `ifconfig sl0` 显示
+      `10.0.2.15 P-t-P 10.0.2.2 UP`；`ping -c1 10.0.2.2` 和
+      `ping -c1 10.0.2.3` 都是 0% loss、RTT ~3.3ms；
+      `wget http://example.com/` 走完 DNS + TCP + HTTP 并成功退出。
+    - **踩过的坑**：`tcp_input` 里 guest 包的 `src` 是 guest、`dst` 是远端，
+      最初把两者当成「远端/guest」传给 `conn_open`，SYN-ACK 的 IP 头和
+      端口方向全反，guest 只看到「自己发给自己」的包并无限重传 SYN；
+      统一成 `conn_open(dst, dport, src, sport)` 后修复。THRE 语义和
+      §95 的空闲快进两个坑分别见上面和下一节。UDP 侧没有这个问题，
+      因为 `udp_input` 一开始就是按 `gip=src, rip=dst` 写的，DNS 一直能通。
+
+94. **`ifconfig` 触发内核 oops：BSWAP 漏了 REX.B**。现象：guest 里一执行
+    `ifconfig`（甚至只是 `ifconfig -a`）就
+    `BUG: unable to handle page fault for address: ffffffff88000000`，
+    `RSP = CR2`，随后整机卡在页错误处理里空转；`uname -m` 等命令本身正常。
+    这个 bug **与联网无关**：不带 `slip` 模块的固件同样复现，是模拟器
+    已有缺陷。
+
+    定位靠新加的 `--rspcheck`：每条指令前记录 `(rip,rsp)` 到 64 项环，
+    发现 `rsp` 落在模块区（`0xffffffffc0000000` 以上）就打印环和 TSS
+    并停机。第一次停机点在 `bffffff8`，把范围放宽后看到 8 字节一步的
+    「栈一直往下走」——是 `#PF` 的入口反复入栈，而 `rsp` 本来是
+    `0xffffc90000197830`，某条指令之后突然变成 `0x30781900`。
+    **`0x30781900` 正好是 `0x00197830` 的字节序反转**：`RSP` 低 32 位被
+    `bswap` 了。对应的指令是 `41 0f cc`（`bswap %r12d`，在内核
+    `fib_table_insert` 里），而 `cpu.c6` 的 `bswap` 实现是
+    `i = op2 - 0xc8` —— **忘了加 REX.B**，于是 `41 0f cc` 被当成
+    `bswap %esp`，把 RSP 的低 32 位反转后零扩展成 `0x30781900`。
+    `ifconfig` 一做路由表查找就踩中这条指令，`call` 一压栈就
+    `#PF`，异常入口再用坏 RSP 压栈，形成死循环。
+
+    修法：`u32 i = (op2 - 0xc8) + ((rex & 1) ? 8 : 0);`。
+    `tools/difftest/difftest.py` 补了 `41 0f c8..cf` 和 `49 0f c8..cf`
+    （`bswap r8d..r15d` / `r8..r15`）共 16 条用例。修复后
+    `ifconfig -a`、`ifconfig lo up`、`uname -m` 全部正常，`--rspcheck`
+    不再触发；`slattach`/`sl0` 的回归也才有意义（此前 `/init` 里的
+    `ifconfig sl0` 同样会把整机带进 oops）。
+
+95. **空闲快进越过设备中断：ping RTT 2 秒、DNS 超时**。SLIP 刚通时
+    guest 里 `ping 10.0.2.2` 能收到回包，但 RTT 显示 **5869ms**，DNS
+    查询必然 `bad address`。`--nettrace` 加墙钟后看到：`udp send` →
+    `udp recv` 只有 **14ms**，`serial2_feed` 也是立即的；问题在 guest
+    收到包之后 1～2 秒才处理。根因在 HLT 空闲分支：
+    ```c
+    step = pit.count[0];        /* tickless idle 下可能是 2 秒 */
+    g_m.tsc += step; g_m.instructions += step;
+    dev_tick();                 /* 这时才把 IRQ3 投递给 CPU */
+    ```
+    设备中断在**时间已经跳完**之后才投递：回包确实进了 RX 环、IRQ3
+    也确实拉起来了，但 guest 的 TSC/jiffies 已经被推后 2 秒，于是
+    `ping` 的 RTT 是 2 秒、DNS 解析器的 1 秒超时提前到期、UDP 回包到达
+    时 socket 已经关闭（guest 反而回了一个 ICMP port unreachable）。
+    修法三步：**先 `dev_tick()` 再快进**；`dev_tick()` 之后如果
+    `exc_pending` 就清 `halted`、投递、**不推进时间**；快进上限
+    `0x40000` 条指令，保证设备事件最多晚 0x40000 条被发现。修复后
+    `ping 10.0.2.2` RTT **3.3ms**，DNS、`wget http://example.com/`
+    一次通过。注意 §92 的交互模式 `pace_ahead()` 不受影响：它本来就把
+    step 置 0，只是现在「先轮询、再决定是否快进」的顺序对批处理模式
+    同样正确。

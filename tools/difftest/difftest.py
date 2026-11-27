@@ -165,6 +165,11 @@ def gen_basic():
     # xchg / bswap
     tests += [("xchg", [0x48, 0x87, modrm(3, 2, 1)]),
               ("bswap", [0x48, 0x0f, 0xc8 + 2])]
+    # bswap 的 REX.B 位：bswap r8d..r15d / r8..r15（漏了 REX.B 会写到
+    # rsp 上，内核 41 0f cc 就曾把栈指针打飞，见 DESIGN §94）
+    for rr in range(8):
+        tests.append(("bswap r%dd" % (8 + rr), [0x41, 0x0f, 0xc8 + rr]))
+        tests.append(("bswap r%d" % (8 + rr), [0x49, 0x0f, 0xc8 + rr]))
     # push/pop
     tests += [("push r1", [0x51]), ("pop r2", [0x5a]),
               ("push imm8", [0x6a, 0x7f]), ("push imm32", [0x68, 0x88, 0x77, 0x66, 0x55])]
