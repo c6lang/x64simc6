@@ -1835,3 +1835,38 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     ./build.sh test && node tests/wasm_cmp.js 50000000
     SIM=build/sim TIMEOUT=1200 python3 tools/boot_login.py
     ```
+
+99. **P1 热指令快通道扩展（已落地）**。
+
+    `step()` 顶部原有 nop / MOV r,r / Jcc rel8 / JMP rel8|rel32 快通道。
+    这次补了内核里最常见的四类，全部只在「不碰内存、不会缺页」的编码上：
+
+    - `MOV r32/r64, imm32/imm64`（B8-BF，含 REX.B/W）
+    - 32/64 位 ALU reg,reg：add/or/and/sub/xor/cmp（排除 adc/sbb 与字节形式）
+    - `TEST r32/r64, r32/r64`（85，mod=3）
+    - `Jcc rel32`（0F 80-8F）
+
+    ALU 快通道复用主路径的 `flags_add/flags_sub/flags_logic/reg_read/
+    reg_write`，没有第二套标志位公式。命中时只多一次 modrm 比较。
+
+    200M 条整机引导（固定核，`--stopt=200000000`）：
+
+    | 版本 | instructions:u | cycles:u（无争用配对） | best-of-3 墙钟 |
+    | --- | --- | --- | --- |
+    | 只有 §98a 内联 | 70,710,397,444 | 约 26.6G | 9.60s |
+    | + 快通道扩展 | **66,397,426,607（-6.10%）** | 约 25.4G | **9.33s（-2.9%）** |
+
+    墙钟受共享机器负载影响很大（同一配对里见过 9.3–28.9s），所以主指标
+    用 instructions:u；-6.1% 在三轮里稳定到 0.001% 以内。配对最好的三次：
+    base 9.602/9.750/9.774s，fast 9.328/9.527/9.633s。
+
+    正确性：串口输出 SHA256 与内联版一致（`2c1da2ba…`）；
+    `tools/difftest` **1252/1252**；`wasm_cmp 50M` MATCH；
+    `./build.sh test`、`boot_login.py` PASS。
+
+    顺带确认了一个**改动前就有**的现象：native 跑到 1B 条时，同一个二进制
+    两次运行的串口首行时间戳（`[0.686666]` vs `[0.683333]`）和 halt 行的
+    irq4 计数会差一点，其余字节完全相同。这是设备/宿主时序的既有抖动，
+    不是快通道引入的（同一二进制复跑即可复现）。所以全量引导的逐字节对比
+    取 200M 确定性窗口 + wasm_cmp；JIT 验收走 wasm 路径（无宿主
+    net_tick/节流），不把 native 的墙钟序当确定性基准。

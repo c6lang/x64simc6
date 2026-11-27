@@ -253,4 +253,8 @@ wasm 也从 tcc-c6 换成了同一套「ctu + `clang -O2` + `wasm-ld`」：20M �
 **74.6G → 70.7G（-5.3%）**，best-of-3 墙钟 10.8s → 9.6–9.7s，串口输出
 逐字节一致。计数摊销与惰性取指窗口两个反例（宿主指令更少/更多、墙钟
 都没赢）记在 §98b；实验性的 wasm JIT 见 §98d。
+
+随后的 P1 快通道扩展（DESIGN §99）：补 MOV 立即数、ALU reg,reg、TEST 和
+Jcc rel32，200M 条宿主指令再降到 **66.4G（-6.1%）**，配对墙钟 9.60s →
+9.33s；difftest 1252/1252、wasm_cmp 50M MATCH、boot_login 全过。
 细节见 `docs/DESIGN.md` §97。

@@ -1685,6 +1685,73 @@ int step(struct CPUState *c)
             return fast_done(c, start);
         }
     }
+    /* MOV r32/r64, imm32/imm64：内核里大量加载常量/地址 */
+    if (op >= 0xb8 && op <= 0xbf) {
+        u32 r = (op & 7) | ((rex & 1) ? 8 : 0);
+        u32 sz = (rex & 8) ? 8 : opsz;
+        u64 v = fetch_n(c, (sz == 8) ? 8 : (sz == 2) ? 2 : 4);
+        reg_write(c, r, sz, v);
+        return fast_done(c, start);
+    }
+    /* 32/64 位 ALU reg,reg 与 test：mod=3，不会缺页。
+     * 只收 add/or/and/sub/xor/cmp（排除 adc/sbb 与字节形式）。 */
+    if (op == 0x85 ||
+        (op <= 0x3d && (op & 1) && ((op & 7) <= 3) &&
+         ((op >> 3) & 7) != 2 && ((op >> 3) & 7) != 3)) {
+        u8 mrm = mem_fetch8(c->rip);
+        if ((mrm & 0xc0) == 0xc0) {
+            u32 sz = (rex & 8) ? 8 : opsz;
+            u32 rr = ((mrm >> 3) & 7) | ((rex & 4) ? 8 : 0);
+            u32 rq = (mrm & 7) | ((rex & 1) ? 8 : 0);
+            u32 grp = (op >> 3) & 7;
+            u32 dir = (op >> 1) & 1;
+            u64 a = 0, b = 0, res = 0;
+            c->rip = c->rip + 1;
+            if (dir) {
+                a = reg_read(c, rr, sz);
+                b = reg_read(c, rq, sz);
+            } else {
+                a = reg_read(c, rq, sz);
+                b = reg_read(c, rr, sz);
+            }
+            if (op == 0x85) {
+                flags_logic(c, a & b, sz);
+            } else if (grp == 7) {
+                flags_sub(c, a, b, (a - b) & sz_mask(sz), sz);
+            } else {
+                if (grp == 0) {
+                    res = (a + b) & sz_mask(sz);
+                    flags_add(c, a, b, res, sz, 0);
+                } else if (grp == 5) {
+                    res = (a - b) & sz_mask(sz);
+                    flags_sub(c, a, b, res, sz);
+                } else if (grp == 4) {
+                    res = a & b;
+                    flags_logic(c, res, sz);
+                } else if (grp == 1) {
+                    res = a | b;
+                    flags_logic(c, res, sz);
+                } else {   /* grp == 6，xor */
+                    res = a ^ b;
+                    flags_logic(c, res, sz);
+                }
+                reg_write(c, dir ? rr : rq, sz, res);
+            }
+            return fast_done(c, start);
+        }
+    }
+    /* Jcc rel32（0f 8x）：内核分支的主体 */
+    if (op == 0x0f) {
+        u8 op2 = (u8)mem_fetch8(c->rip);
+        if (op2 >= 0x80 && op2 <= 0x8f) {
+            u64 d = 0;
+            c->rip = c->rip + 1;
+            d = sx(fetch_n(c, 4), 32);
+            if (cond(c, op2 - 0x80))
+                c->rip = (u64)((i64)c->rip + (i64)d);
+            return fast_done(c, start);
+        }
+    }
     if (op >= 0x70 && op <= 0x7f) {                   /* Jcc rel8 */
         u64 d = sx(fetch_n(c, 1), 8);
         if (cond(c, op - 0x70))
