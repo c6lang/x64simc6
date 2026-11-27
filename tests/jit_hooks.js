@@ -36,6 +36,9 @@ function makeJitEnv(getInst) {
             jit_flags_inc: inst.exports.jit_flags_inc,
             jit_flags_dec: inst.exports.jit_flags_dec,
             jit_cond: inst.exports.jit_cond,
+            jit_ld: inst.exports.jit_ld,
+            jit_st: inst.exports.jit_st,
+            jit_faulted: inst.exports.jit_faulted,
           },
         });
         const h = handles.length;
@@ -54,7 +57,7 @@ function makeJitEnv(getInst) {
         const e = handles[h];
         if (e.n > (maxIns >>> 0)) return 0;   /* 预算不够：回退解释器 */
         const rc = e.inst.exports.run(state, ram);
-        return rc === 0 ? e.n : -2;
+        return rc === 0 ? e.n : rc;   /* rc>0：在第 rc 条指令上缺页中止 */
       }
       const fg = inst.exports.jit_flush_count ? inst.exports.jit_flush_count() : 0;
       if (lastFlush === -1) {
@@ -75,7 +78,8 @@ function makeJitEnv(getInst) {
         const e = handles[cur];
         if (!e || total + e.n > lim) break;
         if (genView[e.pa] !== e.gen) break;
-        if (e.inst.exports.run(state, ram) !== 0) break;
+        const rc = e.inst.exports.run(state, ram);
+        if (rc !== 0) { total += rc; break; }
         total += e.n;
         if (NOCHAIN) break;
         if (FALL_ONLY && e.branch) break;

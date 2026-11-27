@@ -273,6 +273,15 @@ int sim_jit_try2(u64 rip, u32 max_ins)
 #endif
 }
 
+void sim_set_jit_trace(int v)
+{
+#if defined(C6_JIT)
+    jit_set_trace(v);
+#else
+    (void)v;
+#endif
+}
+
 void sim_set_jit(int v)
 {
 #if defined(C6_JIT)

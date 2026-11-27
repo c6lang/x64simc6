@@ -1929,10 +1929,27 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
       AH/CH/DH/BH）、64 位/分支的块测试，以及 `jit_chain.js`、
       `wasm_fixed.js`（固定 stopt 对比串口/RAM/tsc/PIT）。
 
-    MVP 先把正确性/失效/回退打通，还不是净赢。瓶颈：每条缓存块一次
-    wasm↔JS 切换、子集只覆盖寄存器/分支/LEA/MOVX（约 5–10% 指令）。
-    下一步：修分支链、JS 批量链式执行、生成代码内联 flags/条件、扩到
-    push/pop/call/ret 与内存操作数（缺页回退）。默认发布构建仍是 JIT=0。
+    内存操作数（本轮补上）：支持 base+index*scale+disp 与 RIP 相对地址，
+    覆盖 `mov r,[m]` / `[m],r` / `[m],imm32`、ALU/cmp/test 两个方向、
+    `inc/dec [m]`、`movzx/movsx [m]`。生成代码通过 `jit_ld`/`jit_st`
+    访问（和解释器同一套 mem_r/mem_w），每次访问后查 `jit_faulted`：
+    缺页时写回该指令 RIP 并 `return k+1`（把这次尝试计入指令数），
+    `machine_run` 下一次看到 exc_pending 就回退解释器重试；加载在写
+    寄存器前检查，存储在算完标志后检查，和解释器的故障回滚顺序一致。
+
+    调试内存时抓到一个方向 bug：ALU 内存形式用了 `op & 1` 判断
+    mem_dst/mem_src（0x01 和 0x03 都是奇数），导致 `and rdi,[rip+…]`
+    （0x23）被翻成对内存的存储，35M 处把内核页表的一个 PTE 改成
+    0x8000000000000063。用 `JIT_TRACE=1` 的 `[JST]` 存储日志
+    （rip=ffffffff810a0c06、va=ffffffff825de110）加反汇编
+    （指令实际是 `and rdi,[rip+0x153d503]`）定位；改成
+    `(op>>1)&1` 后 50M MATCH、900M 串口一致。
+
+    当前覆盖与性能：900M 里 JIT 执行 22.3M 条（2.5%）、489 次编译、
+    14.4M 次块执行；JIT 开 67.8s vs 关 55.6s（+22%）。瓶颈仍是每条
+    缓存块一次 wasm↔JS 切换、内存访问的两个 import 调用，以及子集还
+    缺 push/pop/call/ret/shift/imul。下一步：栈操作与 call/ret（带故障
+    回滚）、内联 flags/条件、修好后的批量链式。默认发布构建仍是 JIT=0。
 
     复现：
 

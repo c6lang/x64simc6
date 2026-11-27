@@ -69,6 +69,7 @@ async function wasmSnapshot() {
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
   w.sim_set_stopt(BigInt(N));
+  if (hasJit && process.env.JIT_TRACE === '1' && w.sim_set_jit_trace) w.sim_set_jit_trace(1);
   // 一次跑够；里面会在 stopt 处自己停
   let guard = 0;
   while (Number(w.sim_insns()) < N && guard++ < 2000) w.sim_run(2000000);
@@ -95,6 +96,14 @@ async function wasmSnapshot() {
     }
     fs.writeFileSync(process.env.DUMP_OUT || '/tmp/wasm_mem.txt', outN);
     console.log('wasm mem dump ->', process.env.DUMP_OUT || '/tmp/wasm_mem.txt');
+  }
+  if (process.env.JIT_TRACE === '1' && w.__c6_wasm_con_ptr) {
+    const cp = Number(w.__c6_wasm_con_ptr());
+    const cl = Number(w.__c6_wasm_con_len());
+    if (cp && cl) {
+      console.error('[trace]\n' +
+        new TextDecoder().decode(new Uint8Array(w.memory.buffer, cp, cl)));
+    }
   }
   const regs = [];
   for (let i = 0; i < 16; i++)

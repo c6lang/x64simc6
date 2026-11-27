@@ -259,6 +259,8 @@ void jit_flush(void);
 void jit_set_on(int v);
 void jit_set_window(u64 lo, u64 hi);
 extern int g_jit_on;
+extern int g_jit_trace;
+extern u32 g_jit_trace_n;
 extern u64 g_jit_bad_boundary;
 extern u64 g_jit_bad_budget;
 
@@ -272,8 +274,12 @@ void jit_flags_logic(u64 r, int s);
 void jit_flags_inc(u64 a, u64 res, int s);
 void jit_flags_dec(u64 a, u64 res, int s);
 int jit_cond(u64 flags, u64 cc);
+u64 jit_ld(u64 a, u64 sz);
+void jit_st(u64 a, u64 v, u64 sz, u64 rip);
+int jit_faulted(void);
 u64 jit_stat(int i);
 int jit_synth_chain(u64 a, u64 b, u32 ia, u32 ib, u32 mode);
+void jit_set_trace(int v);
 #endif
 
 /* mem.c6 */

@@ -262,6 +262,8 @@
 - [x] JIT 批量链式执行（JS 按 RIP 连跑）：flush 代数清 `byRip` 后，
       210M/900M 与解释器一致；但全链式 900M 71.3s vs 单块直跑 66.8s，
       默认仍单块直跑，`JIT_CHAIN_FALL=0` 保留为诊断开关
+- [x] JIT 内存操作数与缺页回退：mov/ALU 两方向/cmp/test/inc/movzx/
+      movsx 的 [mem] 形式，base/index*scale+disp/RIP 相对；50M MATCH、
+      900M 串口与指令数一致（commit 待记）
+- [ ] JIT 栈操作与调用：push/pop/call/ret（含故障回滚）、shift/imul
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用
-- [ ] JIT 子集扩展：lea/movzx/movsx/imul/shift/push/pop/call/ret、
-      内存操作数与缺页回退（当前覆盖约 5% 指令）
