@@ -121,7 +121,8 @@ wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
 
 在真实终端里跑时模拟器会把终端切到 raw：输入不会显示两遍，`Ctrl-C` 原样
 送给 guest，**`Ctrl-]` 退出**。约 1 分钟出现 `(none) login:`，输入 `root`
-回车进 shell；`/root` 是空的（`ls` 自然没有输出），可以试 `ls /`、
+回车进 shell（启动日志里不再有 `PCI: Fatal` / `can't run '/sbin/openrc'`
+这两类报错，见 DESIGN §103）；`/root` 是空的（`ls` 自然没有输出），可以试 `ls /`、
 `cat /etc/os-release`、`uname -a`、`df -h`、`top -b -n1`（v1.1 补上了 SSE 浮点，
 x87 FPU 也整套实现了：`awk 'BEGIN{print 22/7, sqrt(2)}'`、`printf "%.17g"`
 这类十进制转换与真机逐位一致，`top` 的 `Load average` 等 `%f` 输出正常）。

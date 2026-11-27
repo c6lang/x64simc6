@@ -293,3 +293,24 @@
       补丁字节（路径不同），待 19M RIP/块 trace 对齐
 - [ ] JIT 调采样间隔/编译预算，目标把 +14% 继续压低
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用
+
+## 阶段 13 —— 启动日志清理（2026-11）
+
+- [x] `src/dev.c6` PCI 配置空间：`0xcf8..0xcfb` 读回地址寄存器、
+      `0xcfc..0xcff` 按字节通道读写 `config[]`（1/2/4 字节访问都对）、
+      BAR/ROM（`0x10..0x30`）忽略写并按真硬件读回 0；头布局改成 i440FX
+      主机桥 8086:1237 / class 0x060000 / header type 0 / 无 capability 链
+      （DESIGN §103a）
+- [x] 默认 cmdline 的 `pci=off` 全部换成 `pci=conf1`：`tools/boot_login.py`、
+      `tools/release.py`、`tools/make_demo_gif.py`、`tools/wasm_tty.js`、
+      `tests/*.js`、README 示例、`src/machine.c6` 的 `default_cmdline`
+      （`pci=off` 会把 `pci_probe` 清 0，内核必然打印 PCI Fatal，§103b）
+- [x] `tools/mkfw.py` 生成 `/init` 时先
+      `sed -i -e '/sbin\/openrc/d'` 删掉 inittab 里的 openrc 三连，再注入
+      `ttyS0::respawn:-/bin/login`（minirootfs 没有 openrc，§103c）
+- [x] 验证：loglevel=7 采样看到 `PCI: Using configuration type 1 for base
+      access` + `[8086:1237] type 00 class 0x060000`；标准固件 1.5B 条到
+      login 的串口只有 56 字节（无任何报错）；`boot_login.py` PASS（418B、
+      无报错）；`wasm_login.js` OK（49s/418B）；`./build.sh test` 全过；
+      difftest 1252/1252
+- [x] 文档：DESIGN §103、README 启动说明

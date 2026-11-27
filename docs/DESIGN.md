@@ -2101,3 +2101,77 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      `ping 10.0.2.2` 的 RTT 3.3~23ms、`ping bing.com` 106ms 且 DNS 正常；
      浏览器 e2e/页面登录不受影响。改动：`src/machine.c6`、`src/wasm.c6`、
      `web/app.js`、`tools/wasm_tty.js`。
+
+103. **启动日志清零：PCI 配置空间读回与 inittab 的 openrc 三连**。标准固件的
+     串口日志一直是下面 4 行（后面才是 `login:`），看起来像启动失败：
+
+     ```
+     [    0.696666] PCI: Fatal: No config space access function found
+     can't run '/sbin/openrc': No such file or directory
+     can't run '/sbin/openrc': No such file or directory
+     can't run '/sbin/openrc': No such file or directory
+     ```
+
+     **（a）PCI：配置地址口 0xcf8 不可读 ⇒ 内核放弃整条枚举**。
+     `src/dev.c6` 的配置空间原来只实现了「`0xcfc` 起 1 字节读」，
+     `0xcf8..0xcfb`（配置地址寄存器）读出去全是 `0xff`。Linux x86 的
+     `pci_check_type1()` 是这样探测 type-1 机制的：
+
+     ```
+     outb(0x01, 0xCFB);                  /* 先动一下地址高位 */
+     tmp = inl(0xCF8);
+     outl(0x80000000, 0xCF8);
+     if (inl(0xCF8) == 0x80000000 &&     /* ← 这里读回 0xffffffff，探测失败 */
+         pci_conf1_read(0,0,0,0,2,&tmp) == PCIBIOS_SUCCESSFUL)
+             works = 1;
+     ```
+
+     读回比对失败 → `pci_arch_init()` 打印 `PCI: Fatal: ...` 并让
+     `raw_pci_ops` 保持空，后面所有 PCI 访问都没有实现（loglevel=7 时还能
+     看到 `PCI: System does not support PCI`）。
+
+     修法：
+     - `0xcf8..0xcfb` 按字节通道读回 `g_m.pci.addr`（写侧同样按字节通道，
+       原来 outb 到这四个字节任意一个都覆盖低字节）；
+     - `0xcfc..0xcff` 按字节通道读写 `config[]`——`inb/inw/inl` 都是
+       `io_r8` 拼出来的，所以 `pci_conf1_read` 的 1/2/4 字节访问一起修好；
+     - BAR/ROM（`0x10..0x30`）本机一个都没实现：忽略写、读回 0。否则内核
+       探测 BAR 大小时写 `0xffffffff`，会在假设备上读回 4GiB 资源
+       （loglevel=7 曾出现 `pci 0000:00:00.0: ROM [mem 0x0-0x7ff pref]`）；
+     - 头布局按 PCI 规范摆正：vendor `8086` / device `1237`（i440FX 主机桥）/
+       base class `0x06`（即 `0x060000`）/ header type 0 / status 不带
+       capability 链（0x10 位会让内核去 0x34 找 capability 指针）。
+
+     **（b）`pci=off` 与「想枚举 PCI」互斥**。设备模型修好之后仍然会打印
+     那行 Fatal：`pci=off` 把 `pci_probe` 清成 0，`pci_direct_probe()` 直接
+     返回 0，`pci_arch_init()` 只能报「没有访问函数」。所以默认 cmdline
+     统一从 `pci=off` 换成 `pci=conf1`（显式 type-1，跳过 BIOS/MMCONFIG
+     探测）：`tools/boot_login.py`、`tools/release.py`、
+     `tools/make_demo_gif.py`、`tools/wasm_tty.js`、`tests/*.js`、README
+     的固件示例、`src/machine.c6` 的 `default_cmdline`，共 17 处。
+
+     **（c）openrc：minirootfs 里没有这个程序**。Alpine 自带的
+     `/etc/inittab` 有三行 `::sysinit:/sbin/openrc sysinit`、
+     `::sysinit:/sbin/openrc boot`、`::wait:/sbin/openrc default`，busybox
+     init 逐条 fork/exec，全失败就打印三次 `can't run '/sbin/openrc'`。
+     `tools/mkfw.py` 生成 `/init` 本来就会改 inittab 注入
+     `ttyS0::respawn:-/bin/login`，现在先 `sed -i -e '/sbin\/openrc/d'` 把
+     三行（含 `::shutdown:` 那行）删掉再注入。
+
+     **验证**：
+     - loglevel=7 的 650M 采样：`PCI: Using configuration type 1 for base
+       access`、`PCI: Probing PCI hardware`、
+       `pci 0000:00:00.0: [8086:1237] type 00 class 0x060000`，没有 Fatal /
+       `System does not support PCI` / 假 ROM 资源；
+     - loglevel=4 的标准固件跑到 1.5B 条（`--stopt=1500000000`）：串口**只有
+       56 字节**（`(none) login: ` ×4，批处理下 stdin EOF 被 respawn），
+       PCI 和 openrc 的报错全部消失；
+     - `tools/boot_login.py` PASS，`build/login.log` 从 `(none) login: root`
+       开始、整份 418 字节、没有一行报错，`uname -m` 仍是 `x86_64`；
+     - `tests/wasm_login.js`（wasm 侧 cmdline 同样改 conf1）`WASM LOGIN OK`，
+       49s / 792M 条 / 串口 418 字节，和 native 同量；
+     - `./build.sh test` 全过、`tools/difftest` **1252/1252**。
+
+     **顺带记录**：`pci=conf1` 让内核真的枚举到 8086:1237 之后，
+     `pci 0000:00:00.0: Limiting direct PCI/PCI transfers` 是 i440FX 的
+     正常 quirk 输出（KERN_INFO，loglevel=4 看不到），不是错误。
