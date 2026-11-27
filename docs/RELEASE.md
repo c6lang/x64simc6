@@ -16,7 +16,8 @@
 - **固件**：`tools/mkfw.py --modules` 把 `slip.ko`/`slhc.ko` 注入 initrd，
   并给 `/init` 追加 `insmod` → `slattach` → `ifconfig sl0 ... up` → 默认路由
   → `resolv.conf`；`./build.sh fw` 在 `build/alpine/lib/modules` 存在时
-  自动启用。initrd 从 3.3 MiB 涨到约 34 MiB（含两个模块）。
+  自动启用。initrd 只增加约 19 KiB（两个模块解压后共约 64 KiB，cpio.gz
+  压缩后约 19 KiB；固件总量 34.30 MiB → 34.32 MiB）。
 - 用法、限制（仅 IPv4、无 DHCP、固定窗口/MSS 1460）见 README「外网访问」，
   实现与选型见 `docs/DESIGN.md` §93。
 

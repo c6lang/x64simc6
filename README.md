@@ -71,10 +71,15 @@ native 版可以让 guest 真正上外网：模拟器在 **COM2（0x2f8 / IRQ3�
 
 ```sh
 ./build.sh fw --kernel build/alpine/boot/vmlinuz-lts \
-  --initrd build/alpine/minirootfs.tar.gz --out build/firmware.bin
+  --initrd build/alpine/minirootfs.tar.gz \
+  --cmdline "console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off" \
+  --out build/firmware.bin
 # 没有模块树时自动退回“无网络”固件；等价的显式写法：
 python3 tools/mkfw.py --modules build/alpine/lib ...
 ```
+
+（`--cmdline` 用和验收一致的 `acpi=off pci=off`；不带它时 mkfw 用
+`earlyprintk=...` 的默认命令行，也能启动，但没在这台模拟器上完整验收过。）
 
 mkfw 会把 `slip.ko` / `slhc.ko` 解压进 initrd，并在 `/init` 里自动执行：
 `insmod` 两个模块 → `slattach -p slip -s 115200 /dev/ttyS1` →
@@ -87,6 +92,21 @@ ping -c1 10.0.2.2          # 本地网关，3ms 左右
 ping -c1 10.0.2.3          # DNS，本地回
 wget -O /dev/null http://example.com/   # DNS + TCP/HTTP 真外网
 ```
+
+如果 `ifconfig sl0` 报 `Device not found`，说明**固件没带 SLIP 模块**，
+不是启动参数的问题。在 guest 里依次确认：
+
+```sh
+cat /init                                   # 应该有 insmod/slattach/ifconfig sl0 段
+ls /lib/modules/$(uname -r)/kernel/drivers/net/slip/   # slip.ko slhc.ko
+ls -l /dev/ttyS1                            # COM2 设备节点
+dmesg | grep -iE 'slip|slhc'                # insmod 失败会打印 invalid module format
+```
+
+最常见的原因是固件是用旧命令（没有 `--modules`/`build/alpine/lib`）打的：
+`mkfw` 会打印「未指定 --modules，guest 将没有外网」。重新按上面命令生成
+`build/firmware.bin` 即可（成功时会打印「注入 SLIP 模块：build/alpine/lib」）。
+浏览器/wasm 版没有真实 socket，永远没有 `sl0`。
 
 宿主侧的行为：IP 层自己封/解（含校验和、>1480 的分片），TCP 每条连接用一个
 非阻塞宿主 socket 中继（最大 16 条），UDP 逐流转发（16 条，DNS 自动改写目标到
