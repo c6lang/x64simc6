@@ -161,6 +161,7 @@ const FW_MAX = 48 << 20;
 
   function tick() {
     if (quit) return;
+    if (w.sim_set_host_ms) w.sim_set_host_ms(Date.now() >>> 0);
     const t0 = Date.now();
     do {
       w.sim_run(200000);
