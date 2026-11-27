@@ -234,5 +234,9 @@
       （DESIGN §97）
 - [x] 发布 v1.3（tag v1.3 + src/dist/firmware + `RELEASE_NOTES.md`，产物在
       `build/release/v1.3/`，GitHub Release）
+- [x] `tools/wasm_tty.js`：wasm 版真终端前端（raw、Ctrl-C 送 guest、Ctrl-]
+      退出、自动应答/过滤 `ESC[6n`），已在 pty 里验证登录 + `uname -m`
+- [x] `.github/workflows/pages.yml` + 仓库 Pages 设置：从 release 资产组装
+      `web/` 站点（<https://c6lang.github.io/x64simc6/> 已部署）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）

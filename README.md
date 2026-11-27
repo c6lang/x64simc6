@@ -48,6 +48,10 @@ Source 选「GitHub Actions」，手动跑一次 `pages` workflow（之后每次
 `web/` 组装成站点，打开 <https://c6lang.github.io/x64simc6/> 即可。固件
 34 MB，首次加载后会存进 Cache Storage。
 
+想在**终端**里跑 wasm 版（而不是浏览器）：`node tools/wasm_tty.js`（默认
+`--wasm web/sim.wasm --fw build/firmware.bin`）。它和 native 一样切 raw、
+Ctrl-C 送 guest、Ctrl-] 退出，并自己应答 ash 的 `ESC[6n` 光标查询。
+
 构建 Alpine 固件（需要联网；Alpine 3.20 CDN）：
 
 ```sh
