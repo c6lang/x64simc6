@@ -232,5 +232,7 @@
       整机 20M 条 15.85s → 1.04s（15.2×），浏览器登录 Alpine 1062s → 62s，
       产物 1.6 MiB → 116 KiB；50M 条与 native MATCH，无 clang 时回退 tcc-c6
       （DESIGN §97）
+- [x] 发布 v1.3（tag v1.3 + src/dist/firmware + `RELEASE_NOTES.md`，产物在
+      `build/release/v1.3/`，GitHub Release）
 - [ ] CI 首次在真实 GitHub runner 上跑通（需要 remote + 带 c6c/tcc-c6 的自托管
       runner；`runs-on` / `C6C` / `TCC` 已参数化）

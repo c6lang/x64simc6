@@ -1,7 +1,19 @@
 # x64simc6 发布说明
 
-## v1.3 变更（开发版，相对 v1.2）
+## v1.3 变更（相对 v1.2）
 
+发布日期：2026-11-27
+
+性能版本：**wasm 后端改用 `c6c --emit-ctu` + `clang -O2`，整机快 15～22 倍**，
+浏览器里登录 Alpine 从 18 分钟降到约 1 分钟；同时加入发布自动化与演示 GIF。
+native 侧源码与 v1.2 相同，wasm 在 50M 条处与 native MATCH。
+
+- **wasm 也走 -O2**：`c6c --emit-ctu -D C6_WASM=1` + `clang -O2` + `wasm-ld`
+  链接 c6 的 wasm 运行时。整机引导 20M 条 **15.85s → 1.04s（15.2×）**，
+  浏览器里登录 Alpine 并执行命令 **1062s → 62s**（Node 里 59s），
+  `web/sim.wasm` 1.6 MiB → **116 KiB**；50M 条处与 native MATCH。
+  没有 clang/wasm-ld 时自动退回 tcc-c6，也可 `WASM_BACKEND=tcc` 强制
+  （DESIGN §97）。
 - **发布自动化**：`tools/release.py` 从提交文本生成 `RELEASE_NOTES.md`
   （Conventional Commits 分组 + `docs/RELEASE.md` 概述）并打包
   src/dist/firmware + `SHA256SUMS`；`tools/fetch_alpine.py` 为 CI/新机器准备
@@ -10,12 +22,27 @@
 - **演示 GIF**：README「外网访问」嵌入登录后 `ifconfig sl0` / `ping qq.com` /
   `wget https://qq.com/` 的 GIF（`docs/img/net-demo.gif`，由
   `tools/make_demo_gif.py` 录制）。
-- **wasm 也走 -O2**：`c6c --emit-ctu -D C6_WASM=1` + `clang -O2` + `wasm-ld`
-  链接 c6 的 wasm 运行时。整机引导 20M 条 **15.85s → 1.04s（15.2×）**，
-  浏览器里登录 Alpine 并执行命令 **1062s → 62s**（Node 里 59s），
-  `web/sim.wasm` 1.6 MiB → **116 KiB**；50M 条处与 native MATCH。
-  没有 clang/wasm-ld 时自动退回 tcc-c6，也可 `WASM_BACKEND=tcc` 强制
-  （DESIGN §97）。
+- **浏览器页面加载大固件**：`web/app.js` 原来把固件放在 248 MiB 的 SCRATCH 区、
+  并限制 4 MiB，真实 Alpine 固件（34 MiB）会被“固件超过 4 MiB staging 上限”
+  挡住；改成按需把线性内存扩到 512 MiB、固件 staging 移到 256 MiB（上限
+  48 MiB，与 `g_fw_stage` 一致）。同时把每帧固定 20000 条改成 12 ms 时间预算，
+  页面吞吐从 ~1.2M 条/秒升到 ~16M 条/秒。`browser_e2e` 增加「页面加载 34 MiB
+  固件 + 启动吞吐」回归。
+
+验收：`./build.sh test` 全绿、`./tests/smoke.sh` 通过（含 headless Chromium）、
+`tools/boot_login.py` PASS、difftest **1252/1252**、
+`node tests/wasm_cmp.js 50000000` 与 native **MATCH**、`node tests/wasm_login.js`
+**59s / MARK-OK**、`node tests/browser_alpine.js` **62s / MARK-OK**、guest 内
+`ping qq.com` / `wget http(s)://…` 正常。
+
+### 产物（`build/release/v1.3/`）
+
+| 文件 | 内容 |
+| --- | --- |
+| `x64simc6-1.3-src.tar.gz` | 源码（git archive，不含 build/） |
+| `x64simc6-1.3-dist.tar.gz` | `sim`（native）+ `sim.wasm`（clang -O2，116 KiB）+ `web/` + 文档 |
+| `x64simc6-1.3-firmware.tar.gz` | `build/firmware.bin`（Alpine 内核 + 带 slip/slhc 的 initrd，34 MB） |
+| `SHA256SUMS` | 上面三件的校验和 |
 
 ## v1.2 变更（相对 v1.1）
 
