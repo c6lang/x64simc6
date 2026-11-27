@@ -125,10 +125,12 @@ def make_initrd(tar_path, modules_dir=None):
             f.write('  echo "nameserver 10.0.2.3" > /etc/resolv.conf\n')
             f.write('fi\n')
         # minirootfs 里没有 /sbin/getty、也没有 /sbin/openrc，只有 /bin/login；
-        # 而且 Alpine 的 inittab 里 ttyS0 那行默认是注释的。这里直接改写成 login。
+        # 而且 Alpine 的 inittab 里 ttyS0 那行默认是注释的。这里直接改写成 login，
+        # 并删掉 openrc 的 sysinit/wait/shutdown 行——否则 busybox init 每次启动
+        # 都打印 "can't run '/sbin/openrc': No such file or directory"（DESIGN §103）。
         f.write('L=\'ttyS0::respawn:-/bin/login\'\n')
         f.write('if [ -r /etc/inittab ]; then\n')
-        f.write('  sed -i \'/ttyS0::respawn/d\' /etc/inittab\n')
+        f.write('  sed -i -e \'/sbin\\/openrc/d\' -e \'/ttyS0::respawn/d\' /etc/inittab\n')
         f.write('  echo "$L" >> /etc/inittab\n')
         f.write('else\n')
         f.write('  echo "$L" > /etc/inittab\n')

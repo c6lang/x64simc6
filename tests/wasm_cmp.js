@@ -21,7 +21,7 @@ function nativeSnapshot() {
   try {
     const args = ['--stopt=' + N, '--dumpregs'];
     if (process.env.REGION) args.push('--memhash=' + process.env.REGION);
-    args.push('--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off', FW);
+    args.push('--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1', FW);
     out = execFileSync(SIM, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
                                    timeout: 600000 });
   } catch (e) {
@@ -65,7 +65,7 @@ async function wasmSnapshot() {
   const mem = new Uint8Array(w.memory.buffer);
   if (STAGE + fw.length > mem.length) throw new Error('stage overflow');
   mem.set(fw, STAGE);
-  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off');
+  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
   w.sim_set_stopt(BigInt(N));

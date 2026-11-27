@@ -159,13 +159,13 @@ UDP/ICMP 不走 HTTP 代理，DNS 仍由宿主解析。
 ```sh
 ./build.sh fw --kernel build/alpine/boot/vmlinuz-lts \
   --initrd build/alpine/minirootfs.tar.gz \
-  --cmdline "console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off" \
+  --cmdline "console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1" \
   --out build/firmware.bin
 # 没有模块树时自动退回“无网络”固件；等价的显式写法：
 python3 tools/mkfw.py --modules build/alpine/lib ...
 ```
 
-（`--cmdline` 用和验收一致的 `acpi=off pci=off`；不带它时 mkfw 用
+（`--cmdline` 用和验收一致的 `acpi=off pci=conf1`；不带它时 mkfw 用
 `earlyprintk=...` 的默认命令行，也能启动，但没在这台模拟器上完整验收过。）
 
 mkfw 会把 `slip.ko` / `slhc.ko` 解压进 initrd，并在 `/init` 里自动执行：

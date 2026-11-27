@@ -493,15 +493,20 @@ u8 io_r8(u32 port)
         return pic_read(port);
     if (port >= 0x40 && port <= 0x43) return pit_read(port);
     if (port == 0x71) return cmos_read();
-    if (port == 0xcfc) {
+    /* PCI 配置地址寄存器 0xcf8..0xcfb 必须能读回（真 82371/440FX 就是这样）：
+     * Linux 的 pci_check_type1() 先 outl 0x80000000 再读回比对，读不到就判定
+     * "no config space access function found"，整条 PCI 枚举被放弃。 */
+    if (port >= 0xcf8 && port <= 0xcfb)
+        return (u8)(g_m.pci.addr >> ((port - 0xcf8) * 8));
+    /* 配置数据口 0xcfc..0xcff：按字节通道从 config[] 取，inb/inw/inl 都靠
+     * 这里的四次 io_r8 拼出来（pci_conf1_read 的 1/2/4 字节读都走这条）。 */
+    if (port >= 0xcfc && port <= 0xcff) {
         u32 a = g_m.pci.addr;
         if (!(a & 0x80000000)) return 0xff;
         if (((a >> 16) & 0xff) == 0 && ((a >> 11) & 0x1f) == 0 && ((a >> 8) & 7) == 0)
-            return g_m.pci.config[a & 0xfc];
+            return g_m.pci.config[(a & 0xfc) | (port & 3)];
         return 0xff;
     }
-    if (port == 0xcfd || port == 0xcfe || port == 0xcff)
-        return 0xff;
     return 0xff;
 }
 
@@ -527,15 +532,26 @@ void io_w8(u32 port, u8 v)
     if (port >= 0x40 && port <= 0x43) { pit_write(port, v); return; }
     if (port == 0x70) { g_cmos_idx = (u8)(v & 0x7fu); return; }
     if (port == 0x71) return;   /* RTC 只读：写时间不落盘 */
-    if (port == 0xcf8) {
-        g_m.pci.addr = ((u32)v) | (g_m.pci.addr & 0xffffff00);
+    /* 配置地址/数据口的字节写：按字节通道落到 addr / config[]，和真硬件
+     * 一致（outb 到 0xcfb 只能改地址最高字节）。inb/inw/inl 写由 io_w32
+     * 拆成四次 io_w8。 */
+    if (port >= 0xcf8 && port <= 0xcfb) {
+        u32 sh = (port - 0xcf8) * 8;
+        u32 m = 0xffu << sh;
+        g_m.pci.addr = (g_m.pci.addr & ~m) | ((((u32)v) << sh) & m);
         return;
     }
-    if (port == 0xcfc) {
+    if (port >= 0xcfc && port <= 0xcff) {
         u32 a = g_m.pci.addr;
         if ((a & 0x80000000) && ((a >> 16) & 0xff) == 0 &&
-            ((a >> 11) & 0x1f) == 0 && ((a >> 8) & 7) == 0)
-            g_m.pci.config[a & 0xfc] = v;
+            ((a >> 11) & 0x1f) == 0 && ((a >> 8) & 7) == 0) {
+            u32 off = (a & 0xfc) | (port & 3);
+            /* 0x10..0x30 是 6 个 BAR + CardBus/子系统 + ROM BAR：本机一个都
+             * 没实现，按真硬件语义读回 0、忽略写。否则内核探测 BAR 大小时
+             * 写 0xffffffff 会把这个「假设备」报成 4GiB 资源。 */
+            if (off < 0x10 || off > 0x30)
+                g_m.pci.config[off] = v;
+        }
         return;
     }
 #if !defined(C6_WASM)
@@ -654,17 +670,26 @@ void dev_init(void)
     }
     g_m.pit.reload[0] = 11932;
     g_m.pit.count[0] = 11932;
+    /* 0 号设备 = i440FX 主机桥（8086:1237），只放一个设备让内核有东西可枚举。
+     * 头布局按 PCI 规范：0x09 prog-if / 0x0a subclass / 0x0b base class，
+     * 0x0e header type。status 不带 capability 链（0x10 位），否则内核会去
+     * 0x34 找空指针。 */
     g_m.pci.config[0] = 0x86;             /* vendor 0x8086 */
     g_m.pci.config[1] = 0x80;
     g_m.pci.config[2] = 0x37;             /* device 0x1237 */
     g_m.pci.config[3] = 0x12;
-    g_m.pci.config[4] = 0x07;             /* COMMAND */
-    g_m.pci.config[6] = 0x10;
-    g_m.pci.config[8] = 0x00;             /* class 0x060000 */
-    g_m.pci.config[9] = 0x00;
-    g_m.pci.config[10] = 0x00;
-    g_m.pci.config[12] = 0x00;            /* header type */
-    g_m.pci.config[15] = 0x00;
+    g_m.pci.config[4] = 0x00;             /* COMMAND */
+    g_m.pci.config[5] = 0x00;
+    g_m.pci.config[6] = 0x00;             /* STATUS */
+    g_m.pci.config[7] = 0x00;
+    g_m.pci.config[8] = 0x02;             /* revision */
+    g_m.pci.config[9] = 0x00;             /* prog-if */
+    g_m.pci.config[10] = 0x00;            /* subclass */
+    g_m.pci.config[11] = 0x06;            /* base class: 0x060000 host bridge */
+    g_m.pci.config[12] = 0x00;            /* cache line */
+    g_m.pci.config[13] = 0x00;            /* latency */
+    g_m.pci.config[14] = 0x00;            /* header type: 普通设备 */
+    g_m.pci.config[15] = 0x00;            /* BIST */
     g_virtio_net_regs[0] = 0x74726976;  /* 'virt' */
     g_c6blk_regs[0] = 0x74726976;
     serial2_reset();
