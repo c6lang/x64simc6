@@ -197,6 +197,16 @@ int sim_set_rtc(u32 t)
     return 0;
 }
 
+/* 宿主毫秒（Date.now() & 0xffffffff）：wasm 的空闲快进用它把 guest 钟
+ * 对齐墙钟（否则 ping RTT 被快进撑大、DNS 提前超时）。 */
+u32 g_host_ms = 0;
+
+int sim_set_host_ms(u32 ms)
+{
+    g_host_ms = ms;
+    return 0;
+}
+
 int sim_set_cmdline(const char *s)
 {
     machine_set_cmdline(s);

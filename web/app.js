@@ -226,6 +226,8 @@ function loop() {
   const before = Number(wasm.sim_stat_insns());
   // 按时间预算跑：固定 20000 条/帧会把 wasm 限制在 ~1.2M 条/秒，
   // 白白浪费 clang -O2 的 15M 条/秒。每帧最多占 12ms，UI 仍可交互。
+  if (typeof wasm.sim_set_host_ms === 'function')
+    wasm.sim_set_host_ms(Date.now() >>> 0);
   const t0 = performance.now();
   do {
     wasm.sim_run(100000);

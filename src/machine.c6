@@ -9,9 +9,6 @@
 struct host_timespec { long tv_sec; long tv_nsec; };
 extern int clock_gettime(int clk, struct host_timespec *ts);
 #define HOST_CLOCK_MONOTONIC 1
-static u32 g_tsc_acc = 0;      /* TSC 分频累加器 */
-static u64 g_pace_w0 = 0;      /* 墙钟基准（ns） */
-static u64 g_pace_t0 = 0;      /* 对应时刻的 TSC */
 
 static u64 pace_wall_ns(void)
 {
@@ -20,12 +17,26 @@ static u64 pace_wall_ns(void)
         return 0;
     return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
 }
+#else
+/* wasm 没有 CLOCK_MONOTONIC：页面/Node 前端用 sim_set_host_ms() 每帧写入
+ * 宿主毫秒，pace_ahead() 用同一套逻辑把 guest 钟对齐到墙钟。 */
+extern u32 g_host_ms;
+static u64 pace_wall_ns(void)
+{
+    return (u64)g_host_ms * 1000000ull;
+}
+#endif
+
+static u32 g_tsc_acc = 0;      /* TSC 分频累加器 */
+static u64 g_pace_w0 = 0;      /* 墙钟基准（ns） */
+static u64 g_pace_t0 = 0;      /* 对应时刻的 TSC */
 
 /* 空闲快进前调用：guest 钟（TSC≈1.19MHz）是否已比墙钟超前 20ms 以上。
  * 超前就不再推进这一跳，直接回主循环（stdin 照样被 poll），等墙钟追上。
  * 这样空闲时 guest 时间和墙钟基本一致，busybox login 的 60 秒 SIGALRM
- * 不会三四秒就到、把 getty 反复重启（"login:" 反复输出）。 */
-static int g_pace_idle = 0;    /* 只有交互模式（stdin 是 tty）才节流 */
+ * 不会三四秒就到、把 getty 反复重启（"login:" 反复输出）；wasm 里还
+ * 避免 ping RTT 被空闲快进撑大、DNS 查询提前超时。 */
+static int g_pace_idle = 0;    /* 交互模式（native tty / wasm 页面）才节流 */
 static int pace_ahead(void)
 {
     u64 w = 0;
@@ -51,11 +62,6 @@ static int pace_ahead(void)
     }
     return 0;
 }
-#endif
-
-#if defined(C6_WASM)
-static u32 g_tsc_acc = 0;      /* wasm 没有节流，但仍需要分频累加器 */
-#endif
 
 static u64 g_ring[16] = {0};
 static int g_reset_once = 0;
@@ -142,6 +148,8 @@ void machine_init(void)
 {
 #if !defined(C6_WASM)
     g_pace_idle = isatty(0);   /* 批处理/对拍不节流，吞吐和结果都保持原样 */
+#else
+    g_pace_idle = 1;           /* 宿主毫秒由 sim_set_host_ms() 提供 */
 #endif
     machine_reset();
 }
@@ -202,12 +210,10 @@ static int machine_step_loop(u64 count)
              * 最多晚 0x40000 条指令被发现。 */
             {
                 u64 step = 0x2000;
-#if !defined(C6_WASM)
                 /* 跑在墙钟前面就先不推进时间（但仍然要 dev_tick，
                  * 否则挂起的串口中断永远投递不出去，敲键没反应）。 */
                 if (pace_ahead())
                     step = 0;
-#endif
                 if (g_m.pit.reload[0] > 0 &&
                     (g_m.pit.mode[0] == 2 || g_m.pit.mode[0] == 3) &&
                     g_m.pit.count[0] > 0x2000) {

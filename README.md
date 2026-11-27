@@ -59,6 +59,10 @@ guest。`tests/browser_tty_login.js` 会从页面点「加载固件」「启动�
 （缓存的 wasm/固件），保留页面存储里的文件；`sim.wasm` 按版本号 URL
 （`sim.wasm?v=…`）取，换构建时 bump 版本即可避免用到旧缓存。
 
+wasm 的空闲快进也按墙钟节流（页面每帧把宿主毫秒传给 `sim_set_host_ms`）；
+否则 guest 钟在等待网络时会跑快，`ping bing.com` 的解析器超时提前到、
+报 `bad address`，ping 的回复也会一阵一阵地出（DESIGN §102）。
+
 要注意的两点（也是“点了没反应”的常见原因）：
 
 - **先点一下终端再打字**（终端里出现光标），键盘才会进 guest；页面启动后
