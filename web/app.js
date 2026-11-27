@@ -167,9 +167,12 @@ async function initWasm() {
   const log = await idbOp('meta', 'readonly', s => s.get('console'));
   if (log) {
     serialLog = new TextDecoder().decode(log);
+    term.write('\r\n\x1b[90m── 上次会话的串口记录（机器已复位，' +
+               '点「加载固件」「启动」重新开始）──\x1b[0m\r\n');
     term.write(serialLog);
   }
-  status('wasm 已就绪，IndexedDB 文件已导入');
+  status(log ? '已恢复上次日志（机器未运行）；请点「加载固件」「启动」'
+             : 'wasm 已就绪，IndexedDB 文件已导入');
 }
 
 async function loadFirmware() {
@@ -217,11 +220,12 @@ function loop() {
   const t0 = performance.now();
   do {
     wasm.sim_run(100000);
-    if (wasm.sim_status() !== 0) break;
+    // 注意：不要用 sim_status() 判断“停机”——Linux 在 idle/等回车时就是
+    // HLT（cpu.halted=1），那是正常运行状态；只有指令数不再前进才真停了。
   } while (performance.now() - t0 < 12);
   totalInsns = Number(wasm.sim_stat_insns());
   pumpSerial();
-  if (totalInsns - before === 0 || wasm.sim_status() !== 0) {
+  if (totalInsns - before === 0) {
     running = false;
     status(`停机，共执行 ${totalInsns} 条指令`);
     exportFiles();

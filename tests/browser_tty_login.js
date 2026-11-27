@@ -115,6 +115,15 @@ function freePort() {
     if (!text.includes('login:')) throw new Error('xterm 里没等到 login:');
     console.log('[tty] xterm 看到 login:');
 
+    // guest 在 login 提示符处会 HLT（正常 idle）：页面不能把它当成“停机”
+    await sleep(3000);
+    const stillRunning = await evaluate(`running === true`);
+    const curStatus = await evaluate(`document.getElementById('status').textContent`);
+    if (!stillRunning || /停机/.test(curStatus)) {
+      throw new Error('idle 3s 后页面停止运行: running=' + stillRunning + ' status=' + curStatus);
+    }
+    console.log('[tty] idle 3s 后仍在运行');
+
     // 模拟真实用户：点一下终端（聚焦 xterm 的隐藏 textarea），再发键盘事件
     const box = await evaluate(`(() => {
       const e = document.querySelector('.xterm');

@@ -6,7 +6,11 @@
   283 KiB）：光标闪烁、ANSI 颜色、5000 行滚动历史、选择复制；键盘直接输入
   （Ctrl-C 原样送 guest），ash 的 `ESC[6n` 由 xterm 自动应答。新增
   `tests/browser_tty_login.js`：从页面点「加载固件」「启动」，在 xterm 里等
-  `login:`、`term.paste('root\r')`、`uname -m` → `x86_64`（约 70s）。
+  `login:`、真实键盘事件输入 `root`、`uname -m` → `x86_64`（约 70s）。
+  顺带修了「浏览器里输入没反应」的两类问题：点终端后显式聚焦、未启动时
+  给出提示；以及**把 Linux 在 login/idle 时的 HLT 误判为“停机”**（页面
+  循环只看指令数是否前进，不再看 `sim_status()`）。状态栏还会显示已执行
+  指令数，并提示内核解压阶段暂时没有串口输出。
 - **GitHub Pages**：`.github/workflows/pages.yml` 从 release 资产组装站点
   （`web/` + `sim.wasm` + `firmware.bin`），已部署
   <https://c6lang.github.io/x64simc6/>；`workflow_dispatch` 的 `site_ref`
