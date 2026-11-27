@@ -1972,9 +1972,10 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     块执行；墙钟 63.4s vs 关 55.6s（+14%，从 +24% 降下来），串口和
     指令数仍一致。链式路径（`JIT_CHAIN_FALL=0`）在 20M 与 native 分叉；
     `JIT_BATCH_ONE=1`（只跑批内第一块）MATCH，说明 bug 在“链到下一块”
-    的 JS 分发；默认仍是单块直跑（SIMPLE），链式保留诊断。下一步：
-    修链式分发、调采样间隔/编译预算把 +14% 继续压下去、SSE/rep
-    string ops。默认发布构建仍是 JIT=0。
+    的 JS 分发；继续二分到 18M MATCH、19M DIFF，call/ret 的合成链测试
+    能过，怀疑与链中的缺页/采样块有关。默认仍是单块直跑（SIMPLE），
+    链式保留诊断。下一步：补内存/缺页链测试定位，再调采样间隔/编译
+    预算把 +14% 继续压下去、SSE/rep string ops。默认发布构建仍是 JIT=0。
 
     复现：
 

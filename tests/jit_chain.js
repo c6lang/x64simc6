@@ -168,6 +168,25 @@ const P = 0x3000;
   if (r7 !== 8) { console.error('FAIL loop9 length'); bad++; }
   bad += cmp('loop9', cs7, is7);
 
+  /* 6) call/ret 链：A(mov rsp;call B) -> B(mov eax,7;ret) -> C(mov eax,9;nop) */
+  const PA = 0x3a00, PB = 0x3b00;
+  put([0x48, 0xbc, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0xe8, 0xf1, 0x00, 0x00, 0x00], PA);
+  put([0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3], PB);
+  put([0xb8, 0x09, 0x00, 0x00, 0x00, 0x90], PA + 15);
+  const b6 = warm(PB);
+  const c6 = warm(PA + 15);
+  const a6 = warm(PA);
+  reset(PA);
+  const rcall = w.sim_jit_try(BigInt(PA));
+  const cscall = snap();
+  reset(PA);
+  w.sim_run(6);
+  const iscall = snap();
+  console.log(`call chain: B=${b6} C=${c6} A=${a6} chain=${rcall}`);
+  if (rcall !== 6) { console.error('FAIL call chain length'); bad++; }
+  bad += cmp('call_chain', cscall, iscall);
+
   if (bad) { console.error(`[jit_chain] ${bad} mismatch(es)`); process.exit(1); }
   console.log('[jit_chain] PASS');
 })();

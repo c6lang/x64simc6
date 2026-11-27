@@ -272,7 +272,7 @@
 - [ ] JIT 子集再扩：setcc/xchg/cmpxchg/bswap、常用 SSE、rep movs/stos
 - [x] JIT 采样编译 + good/bad RIP 位图、去 CR0/CR4 flush：900M 覆盖
       107.5M 条（12.3%），墙钟 +24% → +14%，串口/指令数一致
-- [ ] JIT 链式分发 bug：JIT_CHAIN_FALL=0 在 20M 分叉，JIT_BATCH_ONE=1
-      MATCH；默认简单路径，待用 call/ret/memory 链测试定位
+- [ ] JIT 链式分发 bug：JIT_CHAIN_FALL=0 在 18M MATCH/19M 分叉，
+      JIT_BATCH_ONE=1 MATCH；call/ret 合成链通过，待内存/缺页链定位
 - [ ] JIT 调采样间隔/编译预算，目标把 +14% 继续压低
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用
