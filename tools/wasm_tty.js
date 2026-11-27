@@ -24,7 +24,7 @@ function opt(name, def) {
 const WASM = opt('--wasm', 'web/sim.wasm');
 const FW = opt('--fw', 'build/firmware.bin');
 const CMDLINE = opt('--cmdline',
-  'console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off');
+  'console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
 const STAGE = 0x10000000;     // 256 MiB：固件 staging
 const SCRATCH = 0x0f800000;   // 248 MiB：串口输出/输入的小缓冲
 const CAP = 65536;

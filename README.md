@@ -122,7 +122,8 @@ wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
 
 在真实终端里跑时模拟器会把终端切到 raw：输入不会显示两遍，`Ctrl-C` 原样
 送给 guest，**`Ctrl-]` 退出**。约 1 分钟出现 `(none) login:`，输入 `root`
-回车进 shell；`/root` 是空的（`ls` 自然没有输出），可以试 `ls /`、
+回车进 shell（启动日志里不再有 `PCI: Fatal` / `can't run '/sbin/openrc'`
+这两类报错，见 DESIGN §103）；`/root` 是空的（`ls` 自然没有输出），可以试 `ls /`、
 `cat /etc/os-release`、`uname -a`、`df -h`、`top -b -n1`（v1.1 补上了 SSE 浮点，
 x87 FPU 也整套实现了：`awk 'BEGIN{print 22/7, sqrt(2)}'`、`printf "%.17g"`
 这类十进制转换与真机逐位一致，`top` 的 `Load average` 等 `%f` 输出正常）。
@@ -164,13 +165,13 @@ UDP/ICMP 不走 HTTP 代理，DNS 仍由宿主解析。
 ```sh
 ./build.sh fw --kernel build/alpine/boot/vmlinuz-lts \
   --initrd build/alpine/minirootfs.tar.gz \
-  --cmdline "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=off" \
+  --cmdline "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=conf1" \
   --out build/firmware.bin
 # 没有模块树时自动退回“无网络”固件；等价的显式写法：
 python3 tools/mkfw.py --modules build/alpine/lib ...
 ```
 
-（`--cmdline` 带 `earlycon` 让内核在正式 8250 console 注册前就开始往 ttyS0 打印，`loglevel=7` 不抑制 info 级日志；不带它时 mkfw 也默认用这一组参数。）
+（`--cmdline` 带 `earlycon` 让内核在正式 8250 console 注册前就开始往 ttyS0 打印，`loglevel=7` 不抑制 info 级日志；`pci=conf1` 显式走 type-1 配置访问，启动日志里不再有 `PCI: Fatal`（DESIGN §103）。不带它时 mkfw 也默认用这一组参数。）
 
 mkfw 会把 `slip.ko` / `slhc.ko` 解压进 initrd，并在 `/init` 里自动执行：
 `insmod` 两个模块 → `slattach -p slip -s 115200 /dev/ttyS1` →

@@ -264,7 +264,7 @@ def main():
     ap.add_argument("--font-size", type=int, default=15)
     ap.add_argument("--boot-timeout", type=float, default=600)
     ap.add_argument("--cmdline",
-                    default="console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off")
+                    default="console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1")
     a = ap.parse_args()
 
     out = Path(a.out)

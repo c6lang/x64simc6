@@ -23,7 +23,7 @@ const WASM = process.env.WASM || 'web/sim.wasm';
 
 function nativeSnaps() {
   const args = ['--stopt=' + END, '--snap=' + START + ',' + STEP,
-                '--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off', FW];
+                '--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1', FW];
   let out = '';
   try {
     out = execFileSync(SIM, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
@@ -46,7 +46,7 @@ async function wasmSnaps() {
   const STAGE = 0x0d800000;
   const fw = new Uint8Array(fs.readFileSync(FW));
   new Uint8Array(w.memory.buffer).set(fw, STAGE);
-  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off');
+  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
 

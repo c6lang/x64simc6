@@ -125,10 +125,12 @@ def make_initrd(tar_path, modules_dir=None):
             f.write('  echo "nameserver 10.0.2.3" > /etc/resolv.conf\n')
             f.write('fi\n')
         # minirootfs 里没有 /sbin/getty、也没有 /sbin/openrc，只有 /bin/login；
-        # 而且 Alpine 的 inittab 里 ttyS0 那行默认是注释的。这里直接改写成 login。
+        # 而且 Alpine 的 inittab 里 ttyS0 那行默认是注释的。这里直接改写成 login，
+        # 并删掉 openrc 的 sysinit/wait/shutdown 行——否则 busybox init 每次启动
+        # 都打印 "can't run '/sbin/openrc': No such file or directory"（DESIGN §103）。
         f.write('L=\'ttyS0::respawn:-/bin/login\'\n')
         f.write('if [ -r /etc/inittab ]; then\n')
-        f.write('  sed -i \'/ttyS0::respawn/d\' /etc/inittab\n')
+        f.write('  sed -i -e \'/sbin\\/openrc/d\' -e \'/ttyS0::respawn/d\' /etc/inittab\n')
         f.write('  echo "$L" >> /etc/inittab\n')
         f.write('else\n')
         f.write('  echo "$L" > /etc/inittab\n')
@@ -155,7 +157,7 @@ def main():
     ap.add_argument('--modules',
                     help='内核模块树（build/alpine/lib 或 lib/modules/<kver>），'
                          '注入 slip/slhc 并自动配置外网')
-    ap.add_argument('--cmdline', default='console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=off')
+    ap.add_argument('--cmdline', default='console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=conf1')
     ap.add_argument('--out', default='build/firmware.bin')
     a = ap.parse_args()
     kernel, kpaddr = extract_vmlinux(a.kernel)

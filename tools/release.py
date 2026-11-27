@@ -44,7 +44,7 @@ CMD_GROUP = [
     ("other", "其他"),
 ]
 CC_RE = re.compile(r"^([A-Za-z]+)(\([^)]*\))?!?:\s*(.+)$")
-DEFAULT_CMDLINE = "console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off"
+DEFAULT_CMDLINE = "console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1"
 
 
 def die(msg):

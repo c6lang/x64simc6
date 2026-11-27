@@ -13,7 +13,7 @@
   SIM       模拟器路径（默认 build/sim）
   FW        固件路径（默认 build/firmware.bin）
   TIMEOUT   总超时秒数（默认 7200）
-  BOOT_ARGS 内核命令行（默认 console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=off）
+  BOOT_ARGS 内核命令行（默认 console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=conf1）
 """
 import os
 import select
@@ -27,7 +27,7 @@ FW = os.environ.get("FW", os.path.join(ROOT, "build", "firmware.bin"))
 TIMEOUT = float(os.environ.get("TIMEOUT", "7200"))
 BOOT_ARGS = os.environ.get(
     "BOOT_ARGS",
-    "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=off",
+    "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=7 panic=-1 acpi=off noapic nolapic pci=conf1",
 )
 LOG = os.environ.get("LOG", os.path.join(ROOT, "build", "login.log"))
 

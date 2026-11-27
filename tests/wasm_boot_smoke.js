@@ -28,7 +28,7 @@ const CAP = 1 << 16;
   if (STAGE + fw.length > mem.length) throw new Error('stage 越界');
   mem.set(fw, STAGE);
 
-  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=off');
+  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) { console.log('sim_init 失败 rc =', rc); process.exit(1); }
 
