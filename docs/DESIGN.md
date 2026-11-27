@@ -1982,9 +1982,12 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     顺序（目的写入必须在 RSP+=8 之后，否则 pop %rsp 的最终 RSP 会错），
     并补了 leave/push [mem] 的单块测试；合成 call/ret 链（无缺页）通过，
     所以更像是栈/调用链里的缺页路径，下一步用 paging 故障链或 19M 的
-    RIP/块 trace 定位。把 mask 拆细后：mask 64（只 push/pop）或 8192
-    （只 call/ret）都能让 19M 恢复 MATCH，leave 不影响，像是「push/pop
-    与 call/ret 的组合/覆盖路径」而不是单个指令。
+    RIP/块 trace 定位。把 mask 再拆细到单个形式：mask 64（只 push
+    reg）、8192（只 call）、262144（只 ret）各自都能让 19M 恢复 MATCH；
+    关 pop/push imm/push [mem]/leave 都不行。19M 的 RAM 差异集中在内核
+    text 的补丁字节（ftrace/static call 一类），看起来是不同路径走到了
+    不同补丁阶段，而不是单个错误存储。更像是 push reg + call/ret 出现
+    在链里改变了后续路径/覆盖，下一步用 19M 的 RIP/块 trace 对齐。
 
     又修了一个缺失的投递：JIT 块的最后一条缺页时，machine_run 过去会
     `continue`，把异常留到下一轮再重试一条指令；现在块结束后若

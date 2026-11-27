@@ -784,8 +784,13 @@ static int jit_op_group(const struct JIns *in)
     case J_PUSHF: case J_POPF: return 8;
     case J_MOVSXD: case J_SEXT: case J_SEXT_D: return 16;
     case J_NOP: return 32;
-    case J_PUSH: case J_POP: return 64;
-    case J_CALL: case J_RET: return 8192;
+    case J_PUSH:
+        if (in->mem) return 131072;
+        if (in->is_imm) return 65536;
+        return 64;
+    case J_POP: return 32768;
+    case J_CALL: return 8192;
+    case J_RET: return 262144;
     case J_LEAVE: return 16384;
     case J_LEA: return 256;
     case J_MOVZX: case J_MOVSX: return 512;

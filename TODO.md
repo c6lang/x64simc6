@@ -273,8 +273,8 @@
 - [x] JIT 采样编译 + good/bad RIP 位图、去 CR0/CR4 flush：900M 覆盖
       107.5M 条（12.3%），墙钟 +24% → +14%，串口/指令数一致
 - [ ] JIT 链式分发 bug：JIT_CHAIN_FALL=0 在 18M MATCH/19M 分叉；
-      mask 64（push/pop）或 8192（call/ret）各自都能恢复 MATCH，leave
-      不影响；paging 缺页链测试 PASS，缺页投递已修；待更细 mask 或
-      19M RIP/块 trace 定位 push/pop+call/ret 的组合路径
+      mask 64（push reg）、8192（call）、262144（ret）各自都能恢复
+      MATCH，pop/push imm/push mem/leave 不行；19M RAM 差异是内核 text
+      补丁字节（路径不同），待 19M RIP/块 trace 对齐
 - [ ] JIT 调采样间隔/编译预算，目标把 +14% 继续压低
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用
