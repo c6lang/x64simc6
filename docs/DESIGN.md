@@ -1977,6 +1977,13 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     链式保留诊断。下一步：补内存/缺页链测试定位，再调采样间隔/编译
     预算把 +14% 继续压下去、SSE/rep string ops。默认发布构建仍是 JIT=0。
 
+    链式二分：用 `JIT_MASK` 按指令组禁用后，mask 64（push/pop/call/ret/
+    leave）使 19M 恢复 MATCH，问题就在这一组。期间修了 `pop %rsp` 的
+    顺序（目的写入必须在 RSP+=8 之后，否则 pop %rsp 的最终 RSP 会错），
+    并补了 leave/push [mem] 的单块测试；合成 call/ret 链（无缺页）通过，
+    所以更像是栈/调用链里的缺页路径，下一步用 paging 故障链或 19M 的
+    RIP/块 trace 定位。
+
     复现：
 
     ```sh

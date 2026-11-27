@@ -70,6 +70,7 @@ async function wasmSnapshot() {
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
   w.sim_set_stopt(BigInt(N));
   if (hasJit && process.env.JIT_TRACE === '1' && w.sim_set_jit_trace) w.sim_set_jit_trace(1);
+  if (hasJit && process.env.JIT_MASK && w.sim_set_jit_mask) w.sim_set_jit_mask(Number(process.env.JIT_MASK));
   // 一次跑够；里面会在 stopt 处自己停
   let guard = 0;
   while (Number(w.sim_insns()) < N && guard++ < 2000) w.sim_run(2000000);

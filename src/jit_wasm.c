@@ -56,6 +56,7 @@ u64 g_jit_flush_gen = 0;
 u8 g_jit_bad[524288];
 u8 g_jit_good[524288];   /* 64K 个 64-bit 位图：不可翻译的 RIP，C 侧快速跳过 */
 int g_jit_trace = 0;
+int g_jit_mask = 0;   /* 诊断：按组禁用指令 */
 u32 g_jit_trace_n = 0;
 u64 g_jit_bad_budget = 0;
 
@@ -774,6 +775,26 @@ static int jit_decode_one(u64 p, struct JIns *in)
     return 0;
 }
 
+static int jit_op_group(const struct JIns *in)
+{
+    switch (in->op) {
+    case J_SHIFT: return 1;
+    case J_IMUL: return 2;
+    case J_CMOV: return 4;
+    case J_PUSHF: case J_POPF: return 8;
+    case J_MOVSXD: case J_SEXT: case J_SEXT_D: return 16;
+    case J_NOP: return 32;
+    case J_PUSH: case J_POP: case J_CALL: case J_RET: case J_LEAVE: return 64;
+    case J_LEA: return 256;
+    case J_MOVZX: case J_MOVSX: return 512;
+    case J_MOVI: case J_MOVMI: case J_MOVRR: case J_MOVRM: case J_MOVMR: return 1024;
+    case J_ADD: case J_SUB: case J_AND: case J_OR: case J_XOR:
+    case J_CMP: case J_TEST: case J_INC: case J_DEC: return 2048;
+    case J_JMP: case J_JCC: return 4096;
+    default: return 0;
+    }
+}
+
 static int jit_decode_block(u64 rip, struct JIns *ins, u64 *end)
 {
     u64 p = rip;
@@ -784,6 +805,8 @@ static int jit_decode_block(u64 rip, struct JIns *ins, u64 *end)
         if ((p & 0xfffull) > 0xff0ull)
             break;                    /* 页尾留 16 字节余量 */
         if (!jit_decode_one(p, &t))
+            break;
+        if ((g_jit_mask & jit_op_group(&t)) || (g_jit_mask & 128 && t.mem))
             break;
         len = t.len;
         if (len == 0 || ((p & 0xfffull) + (u64)len) > 0x1000ull)
@@ -1101,9 +1124,11 @@ static u32 jit_build_module(const struct JIns *ins, int n, u64 end_rip)
             e_load64(&b, rsp_off); e_set(&b, 5);
             e_get(&b, 5); e_i64_const(&b, 8); e_call(&b, 6); e_set(&b, 6);
             e_fault_check(&b, rip_off, x->rip, k);
-            e_addr(&b, d); e_get(&b, 6); e_store64(&b);
+            /* 先 RSP += 8，再写目的寄存器：pop %rsp 时目的写入要覆盖自增，
+             * 与解释器的 pop64 + reg_write 顺序一致。 */
             e_addr(&b, rsp_off); e_get(&b, 5); e_i64_const(&b, 8);
             wb_u8(&b, 0x7c); e_store64(&b);
+            e_addr(&b, d); e_get(&b, 6); e_store64(&b);
             break;
         case J_CALL:
             has_term = 1;
@@ -1455,6 +1480,12 @@ void jit_flush(void)
         g_jit_good[i] = 0;
     jit_compiles = 0;      /* 失效后允许重新编译热块 */
     g_jit_flush_gen++;
+}
+
+void jit_set_mask(int v)
+{
+    g_jit_mask = v;
+    jit_flush();
 }
 
 void jit_set_trace(int v)
