@@ -24,6 +24,7 @@ const WINDOW_HI = 0x40001000n;
   const jit = makeJitEnv(() => inst);
   inst = await WebAssembly.instantiate(mod, { env: jit.env });
   const w = inst.exports;
+  if (w.sim_set_jit_min_n) w.sim_set_jit_min_n(1);   /* 单元测试的块很短 */
 
   function setup() {
     w.sim_reset();

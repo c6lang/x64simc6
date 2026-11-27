@@ -291,5 +291,7 @@
       mask 64（push reg）、8192（call）、262144（ret）各自都能恢复
       MATCH，pop/push imm/push mem/leave 不行；19M RAM 差异是内核 text
       补丁字节（路径不同），待 19M RIP/块 trace 对齐
-- [ ] JIT 调采样间隔/编译预算，目标把 +14% 继续压低
+- [x] JIT 只编译长块（MIN_N=9）：900M 覆盖 199M（25.3%），
+      best-of-3 约 0.5–1% 快于解释器，串口/指令数一致；50M MATCH
+- [ ] JIT 批量/wasm 内 dispatch，消除每块 wasm↔JS 切换
 - [ ] JIT 生成代码内联 flags/条件，去掉每个 ALU 的 import 调用

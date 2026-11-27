@@ -1825,7 +1825,7 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     `wasm_cmp 50M` MATCH、`./build.sh test`、`boot_login.py` 全过。
 
     **还没做**（下一步）：第一版只做到这里。块缓存、machine_run 接入、
-    SMC、64 位与分支翻译已经在 §100 补上；性能上还不是净赢。
+    SMC、64 位与分支翻译已经在 §100 补上；只编译长块后性能已略快。
 
     **(e) 复现命令**：
 
@@ -1979,8 +1979,20 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     `JIT_BATCH_ONE=1`（只跑批内第一块）MATCH，说明 bug 在“链到下一块”
     的 JS 分发；继续二分到 18M MATCH、19M DIFF，call/ret 的合成链测试
     能过，怀疑与链中的缺页/采样块有关。默认仍是单块直跑（SIMPLE），
-    链式保留诊断。下一步：补内存/缺页链测试定位，再调采样间隔/编译
-    预算把 +14% 继续压下去、SSE/rep string ops。默认发布构建仍是 JIT=0。
+    链式保留诊断。下一步：补内存/缺页链测试定位、SSE/rep string ops。
+    默认发布构建仍是 JIT=0。
+
+    性能拐点（MIN_N，本轮）：每块 wasm↔JS 切换约 0.3µs，而块内省下的
+    解释器 dispatch 约每指令 20–40ns；平均 5.4 条的块大多净亏，这就是
+    +14% 的主因。只编译 >=9 条指令的长块（`g_jit_min_n=9`，短块标 bad
+    交给解释器；`JIT_MIN_N=` 可覆盖）后：900M 里 JIT 执行 199.0M 条
+    （25.3%）、14.8M 次块执行、6219 次编译；best-of-3 墙钟关
+    49.31–50.24s（中位 49.85s）、开 49.12–49.47s（中位 49.45s），约
+    0.5–1% 净赢；指令数/串口 SHA256 完全一致。50M wasm_cmp MATCH
+    （JIT 覆盖 20.9M/50M=42%）。JIT 从「慢 14%」变成「略快」，默认
+    JIT=1 构建采用 MIN_N=9；单元测试的短块用 `sim_set_jit_min_n(1)`。
+    下一步的大头仍是批量/wasm 内 dispatch（消除每块 JS 切换）和
+    SSE/rep string ops。
 
     链式二分：用 `JIT_MASK` 按指令组禁用后，mask 64（push/pop/call/ret/
     leave）使 19M 恢复 MATCH，问题就在这一组。期间修了 `pop %rsp` 的
