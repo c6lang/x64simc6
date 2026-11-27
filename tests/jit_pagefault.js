@@ -92,6 +92,40 @@ const WINDOW_HI = 0x40001000n;
   }
   console.log(`jit: rip=0x${j.rip.toString(16)} rsp=0x${j.r[4].toString(16)} halted=${j.halted}`);
   console.log(`int: rip=0x${i.rip.toString(16)} rsp=0x${i.r[4].toString(16)} halted=${i.halted}`);
+  /* 缺页 load：mov rbx,[guard]；解释器会把 mem_r64 的返回（垃圾）写进 RBX，
+   * JIT 当前在写目的寄存器前就中止 */
+  function loadRun(useJit) {
+    setup();
+    const base = Number(w.sim_ram_base());
+    const dv = new DataView(w.memory.buffer);
+    const c = [0x48, 0xb8, 0x00, 0x20, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+               0x48, 0x8b, 0x18];
+    c.forEach((b, i) => dv.setUint8(base + 0x2300 + i, b));
+    /* 缺页后 mem_r64 会拿 pa=0 读 RAM[0..7]；写成非零以暴露
+     * “解释器把垃圾写进目的寄存器、JIT 不写”的差异 */
+    dv.setBigUint64(base + 0, 0xdeadbeefcafebaben, true);
+    if (useJit) {
+      w.sim_set_jit(1);
+      w.sim_set_jit_window(WINDOW_LO, WINDOW_HI);
+    } else {
+      w.sim_set_jit(0);
+    }
+    w.sim_set_rip(0x40000300n);
+    w.sim_set_reg(3, 0x123456789n);   /* 目的寄存器初值非零 */
+    w.sim_run(2);
+    return snap();
+  }
+  const lj = loadRun(true);
+  const li = loadRun(false);
+  console.log(`load fault: jit rbx=0x${lj.r[3].toString(16)} rip=0x${lj.rip.toString(16)} halted=${lj.halted}`);
+  console.log(`load fault: int rbx=0x${li.r[3].toString(16)} rip=0x${li.rip.toString(16)} halted=${li.halted}`);
+  if (lj.r[3] !== li.r[3]) {
+    console.error(`load fault RBX jit=0x${lj.r[3].toString(16)} interp=0x${li.r[3].toString(16)}`);
+    bad++;
+  }
+  if (lj.rip !== li.rip) { console.error('load fault RIP differs'); bad++; }
+  if (lj.halted !== li.halted) { console.error('load fault halted differs'); bad++; }
+
   if (bad) { console.error(`[jit_pagefault] ${bad} mismatch(es)`); process.exit(1); }
   console.log('[jit_pagefault] PASS');
 })();
