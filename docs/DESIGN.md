@@ -1982,7 +1982,15 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     顺序（目的写入必须在 RSP+=8 之后，否则 pop %rsp 的最终 RSP 会错），
     并补了 leave/push [mem] 的单块测试；合成 call/ret 链（无缺页）通过，
     所以更像是栈/调用链里的缺页路径，下一步用 paging 故障链或 19M 的
-    RIP/块 trace 定位。
+    RIP/块 trace 定位。把 mask 拆细后：mask 64（只 push/pop）或 8192
+    （只 call/ret）都能让 19M 恢复 MATCH，leave 不影响，像是「push/pop
+    与 call/ret 的组合/覆盖路径」而不是单个指令。
+
+    又修了一个缺失的投递：JIT 块的最后一条缺页时，machine_run 过去会
+    `continue`，把异常留到下一轮再重试一条指令；现在块结束后若
+    exc_pending 就立刻 `cpu_deliver`，和解释器循环尾一致。
+    `tests/jit_pagefault.js`（4 级页表 + guard 栈 + call/ret 链）PASS：
+    JIT 开/关都停在 RIP=ret、RSP=guard、halted=1。
 
     复现：
 

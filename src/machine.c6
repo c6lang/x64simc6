@@ -260,6 +260,12 @@ static int machine_step_loop(u64 count)
                 g_m.tsc += g_tsc_acc / 17u;
                 g_tsc_acc %= 17u;
                 if ((g_m.instructions & 0x3ffffull) == 0) g_jit_bad_boundary++;
+                /* 块的最后一条可能缺页（栈/call/ret 最常见）：补上解释器
+                 * 循环尾部的投递，不能留到下一轮再重试一条指令。 */
+                if (g_m.cpu.exc_pending) {
+                    g_m.cpu.halted = 0;
+                    cpu_deliver(&g_m.cpu);
+                }
                 n -= (jn - 1u);
                 continue;
             }

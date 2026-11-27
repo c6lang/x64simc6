@@ -310,6 +310,40 @@ void sim_set_jit_window(u64 lo, u64 hi)
 #endif
 }
 
+int sim_jit_compile_only(u64 rip)
+{
+#if defined(C6_JIT)
+    return jit_compile_only(rip);
+#else
+    (void)rip;
+    return -1;
+#endif
+}
+
+void sim_set_cr(int i, u64 v)
+{
+    if (i >= 0 && i < 16) {
+        g_m.cpu.cr[i] = v;
+        mem_tlb_flush();
+    }
+}
+
+void sim_set_efer(u64 v)
+{
+    g_m.cpu.efer = v;
+}
+
+void sim_set_sel(int i, u64 v)
+{
+    if (i >= 0 && i < 8)
+        g_m.cpu.sel[i] = (u16)v;
+}
+
+int sim_cpu_halted(void)
+{
+    return g_m.cpu.halted ? 1 : 0;
+}
+
 int sim_jit_synth(u64 a, u64 b, u32 ia, u32 ib, u32 mode)
 {
 #if defined(C6_JIT)

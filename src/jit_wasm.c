@@ -784,7 +784,9 @@ static int jit_op_group(const struct JIns *in)
     case J_PUSHF: case J_POPF: return 8;
     case J_MOVSXD: case J_SEXT: case J_SEXT_D: return 16;
     case J_NOP: return 32;
-    case J_PUSH: case J_POP: case J_CALL: case J_RET: case J_LEAVE: return 64;
+    case J_PUSH: case J_POP: return 64;
+    case J_CALL: case J_RET: return 8192;
+    case J_LEAVE: return 16384;
     case J_LEA: return 256;
     case J_MOVZX: case J_MOVSX: return 512;
     case J_MOVI: case J_MOVMI: case J_MOVRR: case J_MOVRM: case J_MOVMR: return 1024;
@@ -1372,6 +1374,14 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
 
 /* 执行一个块，返回执行的客户机指令数；0 = 未处理，由解释器接手。
  * max_ins 用于 machine_run 的 stopt / 循环配额：块比它长就不跑。 */
+int jit_compile_only(u64 rip)
+{
+    u32 n = 0, pa = 0, gen = 0;
+    if (jit_compiles >= JIT_MAX_COMPILES)
+        return -2;
+    return jit_compile(rip, &n, &pa, &gen) >= 0 ? 0 : -1;
+}
+
 int jit_try_common(u64 rip, u32 max_ins, int sample)
 {
     u32 rip_off = (u32)offsetof(struct Machine, cpu.rip);

@@ -256,6 +256,7 @@ int jit_block(u64 rip);
 int jit_try(u64 rip);
 int jit_try2(u64 rip, u32 max_ins);
 int jit_try_sample(u64 rip, u32 max_ins);
+int jit_compile_only(u64 rip);
 void jit_flush(void);
 void jit_set_on(int v);
 void jit_set_window(u64 lo, u64 hi);
