@@ -148,6 +148,17 @@ void machine_reset_noram(void)
     mem_tlb_flush();
 }
 
+/* 测试/对拍用：强制固定 1/17、关闭按墙钟的 TSC 校准。
+ * 浏览器/交互仍走 paced（machine_init 里自动置 1），wasm 对拍在
+ * sim_init 之后调用本函数即可恢复逐字节确定性。 */
+void machine_set_paced(int v)
+{
+    g_pace_idle = v ? 1 : 0;
+    g_calib = 0;
+    g_tsc_div = 17;
+    g_tsc_acc = 0;
+}
+
 void machine_init(void)
 {
 #if !defined(C6_WASM)

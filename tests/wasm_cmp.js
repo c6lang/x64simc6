@@ -68,6 +68,7 @@ async function wasmSnapshot() {
   w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
+  if (w.sim_set_paced) w.sim_set_paced(0);   /* 对拍/序列：固定 1/17，不按墙钟校准 */
   w.sim_set_stopt(BigInt(N));
   if (hasJit && process.env.JIT_MIN_N && w.sim_set_jit_min_n) w.sim_set_jit_min_n(Number(process.env.JIT_MIN_N));
   if (hasJit && process.env.JIT_TRACE === '1' && w.sim_set_jit_trace) w.sim_set_jit_trace(1);

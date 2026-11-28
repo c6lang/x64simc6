@@ -242,6 +242,7 @@ int machine_boot_staged(u8 *base, u32 koff, u32 klen,
 
 /* machine.c6 */
 void machine_init(void);
+void machine_set_paced(int v);
 void machine_reset(void);
 void machine_reset_noram(void);
 int machine_load_firmware(u8 *fw, u32 len);

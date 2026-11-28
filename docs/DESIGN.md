@@ -2005,6 +2005,14 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     无内存链式在 harness 里 55.4s，但生产 glue 没有链式，默认仍是
     单块（MIN_N=9）。
 
+    固定 1/17 对拍模式（`sim_set_paced(0)`；浏览器/交互仍按墙钟校准）下
+    再测 900M：JIT 开 54.0s vs 关 55.5s（约 -2.7%），指令数 928,669,926、
+    串口 96018440… 开/关一致。`sim_set_cmdline` 在 `sim_init` 前设置时
+    会被 `machine_init` 的默认值覆盖，现在存一份并在 boot 前重新套用。
+    已知：`tests/wasm_cmp` 的整机 128 分块哈希在新固件/boot 下 chunk 0
+    仍有差异（100K 处 CPU 状态一致，1M 起 r1 分叉），属 boot 参数/低内存
+    的并发 boot 改动，待 boot 侧对齐。
+
     链式二分：用 `JIT_MASK` 按指令组禁用后，mask 64（push/pop/call/ret/
     leave）使 19M 恢复 MATCH，问题就在这一组。期间修了 `pop %rsp` 的
     顺序（目的写入必须在 RSP+=8 之后，否则 pop %rsp 的最终 RSP 会错），

@@ -3,6 +3,10 @@
 
 /* Alpine 固件约 34 MiB（内核 30 MiB + initrd 3.4 MiB），staging 必须放得下 */
 static u8 g_fw_stage[48u << 20];
+/* sim_set_cmdline 可能在 sim_init 之前调用；sim_init 里的 machine_init
+ * 会先把 cmdline 重置成默认值，所以这里存一份，boot 前重新套用。 */
+static char g_sim_cmdline[256];
+static int g_sim_cmdline_set = 0;
 
 /* 解析 C6FW 头（内联读 static staging，不把指针传进带指针参数的函数——
  * c6 wasm 后端在这类函数上有已知栈槽问题，见 DESIGN 第 10 条）。 */
@@ -10,6 +14,11 @@ static u32 fw_rd32(u32 off)
 {
     return (u32)g_fw_stage[off] | ((u32)g_fw_stage[off + 1] << 8) |
            ((u32)g_fw_stage[off + 2] << 16) | ((u32)g_fw_stage[off + 3] << 24);
+}
+
+void sim_set_paced(int v)
+{
+    machine_set_paced(v);
 }
 
 int sim_init(u8 *fw, int len)
@@ -20,6 +29,8 @@ int sim_init(u8 *fw, int len)
     for (i = 0; i < (u32)len; i++) g_fw_stage[i] = fw[i];
     machine_init();
     g_m.watch_fd = -1;      /* wasm 没有 main() 的初始化；默认 -1 才不关快通道/JIT */
+    if (g_sim_cmdline_set)
+        machine_set_cmdline(g_sim_cmdline);   /* 恢复调用者在 init 前设置的 cmdline */
     mag = fw_rd32(0);
     hver = fw_rd32(4);
     ko = fw_rd32(16);
