@@ -31,10 +31,12 @@ CORE="src/mem.c6 src/dev.c6 src/fpu.c6 src/cpu.c6 src/boot.c6 src/machine.c6 src
 
 usage() {
     cat <<'EOF'
-用法: ./build.sh [native|wasm|all|fw|test|clean]
+用法: ./build.sh [native|wasm|all|fw|c6os|test|clean]
   native  生成 build/sim（native CLI，默认用系统 cc 编 --emit-ctu 产物）
   wasm    生成 web/sim.wasm（浏览器用）
   fw      调用 tools/mkfw.py 生成 firmware.bin
+  c6os    调用 tools/mkc6os.py，把 ~/rtos-c6 的内核 + Alpine initramfs
+          打成 build/c6os.bin（C6FW v2，网页里可直接选这个 .bin）
   test    跑 c6 test 块与 payload 冒烟
   jit     用 JIT=1 构建 wasm，并跑 tests/jit_poc.js + tests/jit_block.js
   clean   删除 build/ 与 web/sim.wasm
@@ -200,6 +202,8 @@ test_all() {
             "./build/$(basename "$t" .c6)"
         fi
     done
+    node tests/netshim_proxy.js
+    echo "test: netshim upstream proxy OK"
     wasm
     node tests/wasm_smoke.js web/sim.wasm build/hello64.bin
 }
@@ -209,6 +213,7 @@ native) native ;;
 wasm) wasm ;;
 all) native; wasm ;;
 fw) shift; fw "$@" ;;
+c6os) shift; python3 tools/mkc6os.py "$@" ;;
 test) test_all ;;
 jit) JIT=1 wasm; node tests/jit_poc.js; node tests/jit_block.js; node tests/jit_block64.js; node tests/jit_chain.js; node tests/jit_pagefault.js ;;
 clean) rm -rf build web/sim.wasm; echo "cleaned" ;;

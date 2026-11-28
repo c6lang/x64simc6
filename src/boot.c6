@@ -409,3 +409,181 @@ int machine_boot_payload(u8 *code, u32 len, u64 addr)
     dev_init();
     return 0;
 }
+
+/* ---------------- c6os（~/rtos-c6）x86-64 内核 ----------------
+ *
+ * c6os 的 x86 内核是链接在 0x11000 的平铺 64 位镜像（入口 _start64），
+ * 引导期只依赖两样东西：
+ *   - E820 表：count @0x5000，条目 @0x5010，24 字节/条（base/len/type）；
+ *   - 引导信息块 @0x7000：magic 'C6IS'、kernel_pa/len、rootfs_pa/len。
+ * Alpine 的 initramfs 是「u64 长度前缀 + 512 字节填充 + newc cpio」。
+ *
+ * 不能复用 Linux 那套低内存布局：本模拟器给 Linux 的 PD/GDT/IDT 在
+ * 0x5000/0x7000/0x8000，正好压在 c6os 的 E820/引导块上。这里重排：
+ *   IDT 0x1000 / PML4 0x2000 / PDPT 0x3000 / PD 0x4000 /
+ *   E820 0x5000 / GDT 0x5400 / 引导块 0x7000 / 内核 0x11000 /
+ *   rootfs 0x800000
+ * c6os 的 pmm_init 会把 4MiB 以下整段保留，上面这些低地址结构不会被
+ * 分配器当成页框；rootfs 由 c6os 自己 port_phys_reserve() 扣掉。 */
+
+#define C6OS_IDT_PA       0x00001000u
+#define C6OS_PML4_PA      0x00002000u
+#define C6OS_PDPT_PA      0x00003000u
+#define C6OS_PD_PA        0x00004000u
+#define C6OS_E820_PA      0x00005000u
+#define C6OS_GDT_PA       0x00005400u
+#define C6OS_BOOTINFO_PA  0x00007000u
+#define C6OS_KERNEL_PA    0x00011000u
+#define C6OS_ROOTFS_PA    0x00800000u
+#define C6OS_KERNEL_MAX   (0x000a0000u - C6OS_KERNEL_PA)  /* VGA/BIOS 空洞前 */
+#define C6OS_BOOTINFO_MAGIC 0x53493643u                    /* 'C','6','I','S' */
+
+static void c6os_wr64(u32 pa, u64 v)
+{
+    u32 i = 0;
+    for (i = 0; i < 8; i++) {
+        mem_w8(pa + i, (u8)(v & 0xffu));
+        v = v >> 8;
+    }
+}
+
+/* 恒等映射 0..128MiB（2MiB 大页）：c6os 的 _start64/port_init 先用这套
+ * 页表跑，port_mmu_init 之后会换成它自己的直接映射。 */
+static void c6os_page_tables(void)
+{
+    u32 i = 0;
+    u64 pml4 = C6OS_PML4_PA;
+    u64 pdpt = C6OS_PDPT_PA;
+    u64 pd = C6OS_PD_PA;
+
+    for (i = 0; i < 512; i++) {
+        mem_w64(pml4 + i * 8, 0);
+        mem_w64(pdpt + i * 8, 0);
+        mem_w64(pd + i * 8, 0);
+    }
+    mem_w64(pml4, pdpt | 3);
+    mem_w64(pdpt, pd | 3);
+    for (i = 0; i < 64; i++)
+        mem_w64(pd + i * 8, ((u64)i << 21) | 0x83);
+}
+
+static void c6os_gdt_idt(void)
+{
+    u32 i = 0;
+    for (i = 0; i < 8; i++) mem_w64(C6OS_GDT_PA + i * 8, 0);
+    /* 和 build_gdt_idt 一样分两半写，避开 c6 wasm 后端的 64 位字面量问题 */
+    mem_w32(C6OS_GDT_PA + 8,  0x0000ffffu);      /* 0x08：64 位代码 */
+    mem_w32(C6OS_GDT_PA + 12, 0x00af9b00u);
+    mem_w32(C6OS_GDT_PA + 16, 0x0000ffffu);      /* 0x10：64 位数据 */
+    mem_w32(C6OS_GDT_PA + 20, 0x00cf9300u);
+    for (i = 0; i < 512; i++) mem_w64(C6OS_IDT_PA + i * 8, 0);
+}
+
+static void c6os_e820(void)
+{
+    /* c6os 的表：count@0x5000，条目 24B/条 @0x5010（base/len/type） */
+    mem_w32(C6OS_E820_PA, 4);
+    c6os_wr64(C6OS_E820_PA + 0x10u + 0u, 0ull);
+    c6os_wr64(C6OS_E820_PA + 0x10u + 8u, 0x9fc00ull);
+    mem_w32(C6OS_E820_PA + 0x10u + 16u, 1u);
+    c6os_wr64(C6OS_E820_PA + 0x10u + 24u, 0x9fc00ull);
+    c6os_wr64(C6OS_E820_PA + 0x10u + 32u, 0x400ull);
+    mem_w32(C6OS_E820_PA + 0x10u + 40u, 2u);
+    c6os_wr64(C6OS_E820_PA + 0x10u + 48u, 0xf0000ull);
+    c6os_wr64(C6OS_E820_PA + 0x10u + 56u, 0x10000ull);
+    mem_w32(C6OS_E820_PA + 0x10u + 64u, 2u);
+    c6os_wr64(C6OS_E820_PA + 0x10u + 72u, 0x100000ull);
+    /* usable 上界停在 ATA_DATA_PA：顶部 8MiB 是 c6os 的 /data 盘镜像，
+     * 不能让 c6os 的页分配器把它当空闲页框。 */
+    c6os_wr64(C6OS_E820_PA + 0x10u + 80u,
+              (u64)ATA_DATA_PA - 0x100000ull);
+    mem_w32(C6OS_E820_PA + 0x10u + 88u, 1u);
+}
+
+static void c6os_bootinfo(u32 klen, u32 rlen)
+{
+    mem_w32(C6OS_BOOTINFO_PA + 0,  C6OS_BOOTINFO_MAGIC);
+    mem_w32(C6OS_BOOTINFO_PA + 4,  1u);                  /* version */
+    mem_w32(C6OS_BOOTINFO_PA + 8,  1u);                  /* flags：内存 rootfs */
+    mem_w32(C6OS_BOOTINFO_PA + 12, C6OS_KERNEL_PA);
+    mem_w32(C6OS_BOOTINFO_PA + 16, klen);
+    mem_w32(C6OS_BOOTINFO_PA + 20, C6OS_ROOTFS_PA);
+    mem_w32(C6OS_BOOTINFO_PA + 24, rlen);
+    mem_w32(C6OS_BOOTINFO_PA + 28, 0u);                  /* data_lba：无数据盘 */
+}
+
+int machine_boot_c6os(u8 *base, u32 koff, u32 klen,
+                      u32 roff, u32 rlen, u32 doff, u32 dlen)
+{
+    struct CPUState *c = &g_m.cpu;
+
+    if (base == 0 || klen == 0) return -1;
+    if (klen > C6OS_KERNEL_MAX) return -2;
+    if (rlen > (RAM_TOP - C6OS_ROOTFS_PA)) return -3;
+    if (dlen > ATA_DATA_SIZE) return -6;
+
+    c6os_page_tables();
+    c6os_gdt_idt();
+    c6os_e820();
+    c6os_bootinfo(klen, rlen);
+    copy_to_ram(C6OS_KERNEL_PA, base + koff, klen);
+    copy_to_ram(C6OS_ROOTFS_PA, base + roff, rlen);
+    /* /data 的 FAT16 镜像（C6FW v2 的 data 槽）：放在 ATA_DATA_PA，由
+     * dev.c6 的 ATA PIO 主盘直接读写。没有 data 槽时 /data 挂不上，
+     * c6os 的演示例程会停在挂载失败——打包时默认带上 data.img。 */
+    if (dlen > 0)
+        copy_to_ram(ATA_DATA_PA, base + doff, dlen);
+
+    cpu_init(c);
+    c->r[4] = 0x80000;                 /* 早期栈；_start64 立刻换成自己的 */
+    c->r[3] = 0;
+    c->r[6] = 0;
+    c->rip = C6OS_KERNEL_PA;           /* _start64 */
+    c->cr[3] = C6OS_PML4_PA;
+    c->cr[4] = CR4_PAE | CR4_PSE | CR4_OSFXSR | CR4_OSXMMEXCPT;
+    c->efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE;
+    c->cr[0] = CR0_PE | CR0_MP | CR0_PG;
+    c->gdtr_base = C6OS_GDT_PA;
+    c->gdtr_limit = 0x17;
+    c->idtr_base = C6OS_IDT_PA;
+    c->idtr_limit = 0xfff;
+    c->sel[1] = 0x08;                  /* CS：本文件写进去的 64 位代码段 */
+    c->sel[2] = 0x10;                  /* DS */
+    c->sel[3] = 0x10;                  /* ES */
+    c->sel[4] = 0;
+    c->sel[5] = 0;
+    c->sel[0] = 0x10;                  /* SS */
+    c->msr_apicbase = 0xfee00800u;
+    c->msr_lstar = 0xffffffffffff0000u;
+
+    g_m.halted = 0;
+    g_m.exit_code = 0;
+    g_m.instructions = 0;
+    g_m.tsc = 0;
+    g_m.last_pit_tsc = 0;
+    mem_tlb_flush();
+    dev_init();
+    return 0;
+}
+
+/* C6FW v2：kernel 槽 = c6os 平铺内核，initrd 槽 = Alpine initramfs */
+int machine_boot_c6os_fw(u8 *base, u32 len)
+{
+    u32 ko = 0, kl = 0, ro = 0, rl = 0, dof = 0, dl = 0;
+
+    if (base == 0 || len < FW_HDR_SIZE) return -1;
+    if (base[0] != FW_MAGIC0 || base[1] != FW_MAGIC1 ||
+        base[2] != FW_MAGIC2 || base[3] != FW_MAGIC3) return -2;
+    if (rd32(base + 4) != FW_VERSION_C6OS) return -3;
+    ko = rd32(base + 16);
+    kl = rd32(base + 20);
+    ro = rd32(base + 24);
+    rl = rd32(base + 28);
+    /* v2 把 v1 的 cmdline 槽借给 /data 的 FAT 镜像 */
+    dof = rd32(base + 32);
+    dl = rd32(base + 36);
+    if (kl == 0) return -4;
+    if (ko + kl > len || ro + rl > len) return -5;
+    if (dl != 0 && dof + dl > len) return -5;
+    return machine_boot_c6os(base, ko, kl, ro, rl, dof, dl);
+}

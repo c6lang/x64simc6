@@ -2338,3 +2338,143 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      `[DELBAD]/[RSPSC]/[RSPFIRST]`；`./build.sh test` 全过、
      `boot_login.py` PASS、difftest 1252/1252、`wasm_cmp 50000000`
      MATCH、`wasm_login` MARK-OK。
+
+107. **NAT 侧上游代理：`--proxy` / `--dns`（自动识别协议）**。背景：guest
+     出网原来是直连宿主 socket。需要固定出口（或被墙）时，用户手里通常只有
+     一个 HTTP/SOCKS 混合端口（hiddify 的 2334 之类），希望在 NAT 这一层就
+     用上，而不是在 guest 里设 `http_proxy`（busybox wget 的 https 走的是
+     `GET https://…` 而不是 CONNECT，代理不一定支持）。做法是把代理做成
+     NAT 的拨号目标，全部在 `src/net.c6` 里完成：
+
+     - **URL 语法**：`[scheme://][user[:pass]@]host[:port]`。scheme 支持
+       `http`/`https`（都发 `CONNECT`）、`socks5`/`socks5h`/`socks`、
+       `socks4`/`socks4a`；空串 / `none` / `direct` 关闭代理。只支持 IPv4
+       与 `localhost`（NAT 没有 getaddrinfo）。省略端口按协议默认：http
+       8080、https 443、socks 1080。
+     - **自动识别**：不带 scheme 的 `host:port` 是 `PX_AUTO`——首次拨号前
+       用一个临时连接发 SOCKS5 问候 `05 01 00`，看首个回包字节：`0x05` →
+       socks5、`0x04` → socks4、`'H'`（HTTP 代理对二进制垃圾回 400）→
+       http、读超时兜底 http。识别结果写回 `g_px.type`，只探测一次。
+     - **握手状态机**（`conn_hs_*`，全非阻塞）：`hs_state` 1=连代理中、
+       2=握手中、3=就绪；`hs_stage` 10=等 HTTP 响应头、20/21/22=SOCKS5 的
+       方法选择/用户名密码/`CONNECT` 应答、30=SOCKS4 应答。`host_ok` 只在
+       握手成功后置位，所以 guest 数据继续攒在原来的 `wbuf` 里，
+       `conn_flush_wbuf` 一行没改；握手超时 12s（`hs_deadline`），失败直接
+       RST 给 guest。shim 模式原有的「guest 第一个数据段才拨号」保留，
+       只是拨号目标从远端换成了代理。
+     - **认证**：HTTP Basic（`Proxy-Authorization`，自己实现 base64）、
+       SOCKS5 用户名密码（RFC 1929）、SOCKS4 userid。
+     - **一个容易丢字节的细节**：握手读到的多余字节属于隧道数据（SOCKS5
+       应答和服务器首段数据粘在同一个 TCP 包里很常见），成功后按
+       `hs_used` 把剩余部分搬回 `sbuf` 再交给 guest；否则首段数据被吞。
+     - **DNS**：`--dns=ip[:port]` 覆盖 `/etc/resolv.conf` 和原来写死的 53
+       端口（新增 `NetState.dns_port`）。现场例子：LAN 解析器
+       `192.168.68.1` 把 `www.google.com` 答成 `69.171.235.22`（Facebook
+       的 IP，污染），而 hiddify 的本地 DNS `127.0.0.1:6450` 给出真的
+       `142.251.x`；`resolv.conf` 写不出端口，所以必须由 NAT 支持非 53。
+     - **页面 / 网关**：页面新增「上游代理」「DNS」两栏，点连接时拼成
+       `ws://…:8787/?proxy=…&dns=…`；`tools/ws_slip_proxy.js` 做字符集校验
+       （这个网关没有认证，不能把任意字符串拼进子进程参数）后追加到
+       `build/sim --netshim` 的参数里。native 直接跑同理：
+       `build/sim --proxy=… --dns=… build/firmware.bin`。
+     - **测试**：`tools/test_proxy.js` 是测试用的 HTTP CONNECT / SOCKS5 /
+       SOCKS4 三合一代理（可开 Basic 与用户名密码认证，并模仿真实 HTTP
+       代理对二进制垃圾回 400 以便测自动识别）；`tests/netshim_proxy.js`
+       不跑 Linux，用合成 SLIP 包驱动 `build/sim --netshim`，几秒内覆盖
+       20 项：无代理回归、http/socks5/socks4、自动识别两条路径、两种认证、
+       错误密码（guest 收到 RST 且不过数据）、`--dns` 覆盖。
+     - **实测**：`node tests/netshim_proxy.js` → 20/20 PASS；
+       `C6_TEST_PROXY=http://127.0.0.1:18999 C6_TEST_DNS=127.0.0.1:6450
+       node tests/wasm_net_proxy.js`（真实 wasm guest，上游是本仓库的
+       测试代理）→ 登录 + ping 10.0.2.2 + `wget http://example.com/` 全过，
+       代理侧日志 `HTTP 104.20.23.154:80`（example.com 的解析结果），
+       说明 guest 的 TCP 确实从代理走的；`wasm_net_proxy.js` 新增
+       `C6_TEST_PROXY`/`C6_TEST_DNS` 两个环境变量就是给这种跑法用的。
+     - **限制**：只代理 TCP；UDP/ICMP 仍直连（DNS 靠 `--dns` 指到干净解析器
+       解决，还没有 DNS-over-proxy / SOCKS5 UDP ASSOCIATE）；不支持 IPv6 和
+       域名形式的代理主机；`--netshim` 本来就把宿主网络给了 guest，WS 网关
+       也没有认证，仍然只能绑 127.0.0.1 或可信网段。
+
+108. **C6FW v2：在模拟器里引导 c6os + Alpine（本轮新增）**
+   - 目标：`~/rtos-c6` 的 x86-64 内核（c6os）已经能在 QEMU 里把 Alpine
+     的 musl rootfs 跑到 shell；同一份内核 + initramfs 也要能在 native 和
+     浏览器里起来，页面还可以直接选本机 `.bin`。
+   - **固件格式 v2**：还是 64 字节头、`'C6FW'` 魔数，只把 `version` 从 1
+     改成 2；字段与 v1 同序，v1 的 cmdline 槽（`+32/+36`）借给 `/data`
+     的 FAT 镜像：
+
+     | 偏移 | 字段 | v2 含义 |
+     | --- | --- | --- |
+     | +0 | `'C6FW'` | 魔数 |
+     | +4 | u32 version | 2 = c6os/Alpine |
+     | +8 | u32 hdr | 64 |
+     | +16/+20 | kernel_off/len | c6os 平铺内核（`stage2.bin`）|
+     | +24/+28 | rootfs_off/len | Alpine initramfs（`u64 长度 + 512 填充 + newc cpio`）|
+     | +32/+36 | data_off/len | `/data` 的 8MiB FAT16 镜像（`data.img`）|
+
+     `tools/mkc6os.py` 默认从 `~/rtos-c6/build/x86/iso/stage2.bin`、
+     `~/rtos-c6/build/x86/alpine/full.cpio`、`…/data.img` 取材
+     （`--no-data` 可以不带盘），`./build.sh c6os` 是它的入口。
+   - **内存布局**：不能复用 Linux 引导那套低地址（PD `0x5000`、GDT
+     `0x7000`、IDT `0x8000` 会压在 c6os 的 E820 表和引导块上），
+     `machine_boot_c6os` 重新排：
+
+     | 物理地址 | 用途 |
+     | --- | --- |
+     | `0x1000` | IDT（256 × 16B）|
+     | `0x2000/0x3000/0x4000` | PML4 / PDPT / PD（恒等映射 0..128MiB，2MiB 大页）|
+     | `0x5000` | E820：count @0x5000，条目 24B/条 @0x5010 |
+     | `0x5400` | GDT（CS=0x08、DS/ES/SS=0x10）|
+     | `0x7000` | 引导信息块：magic `'C6IS'`、version=1、flags=1、kernel/rootfs pa+len、data_lba |
+     | `0x11000..0xA0000` | c6os 内核（`stage2.ld` 断言 `__bss_end <= 0xA0000`）|
+     | `0x800000` | Alpine initramfs（13.1MB）|
+     | `0x07800000..0x08000000` | `/data` 的 FAT16 盘镜像 |
+
+     E820 的 usable 项上界停在 `ATA_DATA_PA`，否则 c6os 的页分配器会把
+     顶部 8MiB 当空闲页框踩掉盘上的数据。CPU 状态按 c6os 的契约设：
+     `rip=0x11000`、`cr3=0x2000`、`cr4=PAE|PSE|OSFXSR|OSXMMEXCPT`、
+     `efer=SCE|LME|LMA|NXE`、`lstar=0xffffffffffff0000`，与 Linux 引导的
+     `0x10/0x18` 选择子不同。
+   - **ATA PIO 主盘**：`src/dev.c6` 补了 `0x1F0..0x1F7` + `0x3F6` 的最小
+     PIO：LBA28、READ(0x20)/WRITE(0x30)/FLUSH(0xE7)、每交付 512 字节按
+     多扇区计数清/拉 DRQ、`inw 0x1F0` 走 16 位数据口（不能拆成
+     `io_r8(0x1F0)+io_r8(0x1F1)`，后者是 error 寄存器）。盘内容就是
+     `ATA_DATA_PA` 起的 8MiB；c6os 的 `port/x86_64/ata.c` 只用 PIO，正好
+     对得上，`LOS_FsMount(..., "fatfs")` 能挂上 `/data`。写落在客户机
+     RAM 里，刷新页面即丢，宿主磁盘不受影响。
+   - **native/wasm 入口**：`machine_boot_c6os_fw` 与 `wasm.c6` 的
+     `sim_init` 都先认 `version==2` 再回落 v1；v2 分支校验 kernel/rootfs/
+     data 槽不越界后直接 `machine_boot_c6os`，不再走 Linux 的
+     `machine_load_firmware`。页面「固件与网络」新增「本地固件」文件选择
+     （`#fwfile`），`FileReader` 读进 `FW_STAGE` 后 `sim_init`；URL 与
+     本地文件共用 `bootFirmware()`，`WASM_VER` 升到 2.2。
+   - **实测**：native `timeout 90 ./build/sim --no-pace build/c6os.bin` →
+     E820 4 项、`cr3=00409000`、rootfs 667 节点、`/data = FAT16 数据盘`，
+     约 7700 万条到 Alpine 用户态，busybox sweep 打出
+     `OK|echo / OK|printf / OK|cat / …`（90s 只看得到前半段）；
+     wasm（node，clang -O2）同样 7700 万条、5.7 秒出现
+     `bx-sweep-alive`；`node tests/browser_e2e.js` 用 `#fwfile` 选
+     `build/c6os.bin` 后能读到 `c6os alpine M12` 串口日志。
+   - **限制**：内核必须整体落在 `0x11000..0xA0000`（c6os 的链接断言），
+     超过会返回 -2；sweep 有 300 多个 applet，全量跑完要几分钟（不是卡死）；
+     c6os 目前没有 e1000 驱动（`net: 没有 e1000`），网络相关 applet 会失败；
+     `/data` 不持久化。
+
+109. **#PF 错误码漏了 P 位：COW 写被当成缺页（本轮修复）**
+   - 现象：c6os 的 Alpine 在 native/wasm 里一进 `/bin/sh` 就 SIGSEGV：
+     `exc vec=14 err=6 cr2=0x7fffffffd538 rip=0x7f000004397b`，RIP 在 musl
+     ld.so 的 `call` 上（`push` 返回地址），进程随即被杀；同一个 ISO 在
+     QEMU 里能跑完 busybox sweep，所以是模拟器语义差异，不是 guest 的 bug。
+   - 根因：`src/mem.c6` 的 `pg_fault()` 只拼了 `(wr?2:0)|(us?4:0)`，
+     **bit0（P）永远是 0**。`fork` 之后父子进程的栈页是「存在 + 只读」
+     （COW），父进程 `call` 压栈写该页时硬件应报 `P=1,W=1,U=1`（err=7），
+     模拟器却报 6。c6os 的 `x86_exc_dump` 按 bit0 分流：P=0 走
+     `lx_vma_fault` 的按需补页，`port_as_map_zero` 看到 PTE 已存在返回失败，
+     于是把信号投成 SIGSEGV；QEMU 报 P=1，走 `port_pf_resolve` 的 COW
+     路径复制一页就好了。
+   - 修复：`pg_fault` 增加 `present` 参数并置 bit0；四个调用点里
+     「层级不存在」传 0，「U/S 违规、只读页写、NX 取指」传 1。
+     这同时让 Linux 的 COW 缺页错误码与真机一致（以前 Linux 也是靠
+     `handle_pte_fault` 自己再看 PTE 才没出事）。
+   - 验证：修复后 c6os 在 native/wasm 都能跑 Alpine 用户态（见 §108 的
+     `OK|…` 日志）；`./build.sh test` 全过，回归见提交说明。

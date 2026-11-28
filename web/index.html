@@ -12,6 +12,9 @@
   <section class="panel">
     <h2>固件与网络</h2>
     <label>固件 URL <input id="fwurl" value="firmware.bin"></label>
+    <label>本地固件（直接选 .bin，不上传）<input id="fwfile" type="file"
+      accept=".bin,application/octet-stream"></label>
+    <p class="hint">Linux 固件和 c6os/Alpine 固件都行；选完点「启动」。</p>
     <div class="row">
       <button id="load">加载固件</button>
       <button id="start">启动</button>
@@ -21,7 +24,9 @@
     <label>请求 URL（测试和 guest 网络桥）<input id="neturl" placeholder="https://example.com/"></label>
     <button id="netfetch">fetch 并注入 __net/last</button>
     <h2 style="margin-top:14px">网络代理（wasm 真上网）</h2>
-    <label>代理地址 <input id="proxyurl" value="ws://127.0.0.1:8787"></label>
+    <label>代理地址（WebSocket 网关）<input id="proxyurl" value="ws://127.0.0.1:8787"></label>
+    <label>上游代理（走 NAT 的 TCP，留空=直连）<input id="upproxy" placeholder="http://127.0.0.1:2334"></label>
+    <label>DNS（留空=宿主 resolv.conf）<input id="updns" placeholder="127.0.0.1:6450"></label>
     <div class="row">
       <button id="netconnect">连接</button>
       <button id="netdisconnect">断开</button>
@@ -49,6 +54,6 @@
   </section>
 </main>
 <script src="vendor/xterm.js"></script>
-<script src="app.js?v=2.1"></script>
+<script src="app.js?v=2.2"></script>
 </body>
 </html>

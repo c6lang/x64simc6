@@ -337,3 +337,43 @@
       临时措施：根因修掉后内核恢复默认 oops/致命信号栈回显，批量 find
       仍正常
 
+## 阶段 13 —— NAT 侧上游代理（DESIGN §107）
+
+- [x] `src/net.c6`：`--proxy=<url>` 解析（http/https/socks4/socks5，带
+      `user:pass@`；不带 scheme 时首次连接自动识别协议，结果缓存）
+- [x] 非阻塞握手状态机 `conn_hs_*`（HTTP CONNECT / SOCKS5 / SOCKS4），
+      `host_ok` 在握手成功后才置位，guest 数据仍走原 `wbuf`；
+      握手超时 12s，失败 RST；握手多读的字节回收进 `sbuf`
+- [x] 认证：HTTP Basic、SOCKS5 用户名密码（RFC 1929）、SOCKS4 userid
+- [x] `--dns=ip[:port]`：覆盖 `/etc/resolv.conf` 与写死的 53 端口
+      （`NetState.dns_port`），便于指到 hiddify 的 `127.0.0.1:6450`
+- [x] `main.c6` 选项与用法；`tools/ws_slip_proxy.js` 解析 WS query
+      `?proxy=&dns=`（字符集校验）并拼到 `build/sim --netshim` 参数
+- [x] 页面：`网络代理` 下新增「上游代理」「DNS」两栏，连接时拼进 WS URL
+- [x] 测试：`tools/test_proxy.js`（HTTP CONNECT/SOCKS5/SOCKS4 测试代理，
+      可开认证）+ `tests/netshim_proxy.js`（合成 SLIP guest，20 项全过：
+      direct/http/socks5/socks4/两条自动识别/两种认证/认证失败/--dns）
+- [x] wasm e2e：`C6_TEST_PROXY=… C6_TEST_DNS=… node tests/wasm_net_proxy.js`
+      经本仓库测试代理登录 + ping + `wget http://example.com/` 全过，
+      代理侧日志 `HTTP 104.20.23.154:80`
+- [x] 文档：DESIGN §107、README「上游代理」
+- [ ] 后续（未做）：DNS-over-proxy（现在 UDP 仍直连）、SOCKS5 UDP
+      ASSOCIATE、IPv6 与域名形式的代理主机、ICMP 经代理
+
+
+## c6os / Alpine（本轮）
+
+- [x] c6os 固件（C6FW v2）：`tools/mkc6os.py` 打包内核/rootfs/data.img，
+      `./build.sh c6os`；native/wasm 入口按 version 分派
+- [x] c6os 引导内存布局重排（IDT 0x1000、PML4 0x2000、E820 0x5000、
+      GDT 0x5400、引导块 0x7000、内核 0x11000、rootfs 0x800000），
+      避开 Linux 引导用的 0x5000/0x7000/0x8000
+- [x] ATA PIO 主盘（0x1F0..0x1F7 + 0x3F6，8MiB FAT16 @0x07800000），
+      c6os 能挂 `/data`，busybox sweep 能跑
+- [x] `#PF` 错误码补 P 位（`src/mem.c6`）：fork 后写 COW 栈页不再被当成
+      「页不存在」，c6os 的 musl ld.so / busybox 不再 SIGSEGV
+- [x] 页面「本地固件」文件选择（`#fwfile`，不上传）；`browser_e2e`
+      覆盖选 .bin（有 `build/c6os.bin` 时还测 c6os 引导）
+- [x] 文档：DESIGN §108/§109、README「c6os + Alpine」
+- [ ] 后续（未做）：c6os 的 e1000 网卡、`/data` 持久化（现在写客户机 RAM）、
+      busybox sweep 全量跑完的加速

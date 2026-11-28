@@ -43,7 +43,15 @@ int sim_init(u8 *fw, int len)
     il = fw_rd32(28);
     co = fw_rd32(32);
     cl = fw_rd32(36);
-    if (mag != 0x57463643u || hver != 1u) return -2;
+    if (mag != 0x57463643u) return -2;
+    if (hver == FW_VERSION_C6OS) {
+        /* v2：c6os 的 x86-64 内核 + Alpine initramfs + /data 的 FAT 镜像
+         * （页面里选 .bin 也能用）。v1 的 cmdline 槽在这里是 data 槽。 */
+        if (kl == 0 || ko + kl > (u32)len || io + il > (u32)len) return -4;
+        if (cl != 0 && co + cl > (u32)len) return -4;
+        return machine_boot_c6os(g_fw_stage, ko, kl, io, il, co, cl);
+    }
+    if (hver != 1u) return -2;
     if (kl == 0 || ko + kl > (u32)len || io + il > (u32)len) return -4;
     g_boot_user_cmdline_set = g_sim_cmdline_set ? 1u : 0u;
     if (g_sim_cmdline_set)

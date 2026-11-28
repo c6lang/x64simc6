@@ -9,7 +9,7 @@ const FW_MAX = 48 << 20;      // 与 src/wasm.c6 的 g_fw_stage 一致
 const NET_RX = SCRATCH + 4 * 0x100000;   // 252 MiB：代理 -> wasm 的收包缓冲
 const NET_TX = NET_RX + 65536;            // 252 MiB + 64 KiB：wasm -> 代理
 const FS_CAP = 1 << 20;
-const WASM_VER = '2.1';   // 换 wasm 时同步 bump：Cache Storage 按 URL 缓存
+const WASM_VER = '2.2';   // 换 wasm 时同步 bump：Cache Storage 按 URL 缓存
 
 let wasm = null;
 let mem = null;
@@ -184,27 +184,45 @@ async function initWasm() {
              : 'wasm 已就绪，IndexedDB 文件已导入');
 }
 
+/* URL 与本地文件共用：把固件放进 FW_STAGE，再交给 sim_init。
+ * Linux 固件（C6FW v1）和 c6os/Alpine 固件（C6FW v2）都走这里，
+ * 由 wasm 侧按头里的 version 分派。 */
+async function bootFirmware(fw, label) {
+  if (!wasm) throw new Error('请先加载 wasm');
+  if (fw.length > FW_MAX) throw new Error(`固件超过 ${FW_MAX >> 20} MiB staging 上限`);
+  const need = FW_STAGE + fw.length;
+  if (need > wasm.memory.buffer.byteLength) {
+    const pages = Math.ceil((need - wasm.memory.buffer.byteLength) / 65536);
+    if (wasm.memory.grow(pages) < 0)
+      throw new Error(`内存不足：固件需要 ${need} 字节线性内存`);
+    mem = wasm.memory;
+  }
+  put(FW_STAGE, fw);
+  const rc = wasm.sim_init(FW_STAGE, fw.length);
+  if (rc !== 0) throw new Error(`sim_init 返回 ${rc}（不是可引导的固件？）`);
+  term.reset();
+  serialLog = '';
+  sawSerial = false;
+  term.focus();
+  status(`固件已加载：${label}（${(fw.length / 1048576).toFixed(1)} MiB），点「启动」`);
+}
+
 async function loadFirmware() {
   if (!wasm) { status('请先加载 wasm'); return; }
   const url = $('fwurl').value.trim();
   try {
-    const fw = await fetchAsset(url);
-    if (fw.length > FW_MAX) throw new Error(`固件超过 ${FW_MAX >> 20} MiB staging 上限`);
-    const need = FW_STAGE + fw.length;
-    if (need > wasm.memory.buffer.byteLength) {
-      const pages = Math.ceil((need - wasm.memory.buffer.byteLength) / 65536);
-      if (wasm.memory.grow(pages) < 0)
-        throw new Error(`内存不足：固件需要 ${need} 字节线性内存`);
-      mem = wasm.memory;
-    }
-    put(FW_STAGE, fw);
-    const rc = wasm.sim_init(FW_STAGE, fw.length);
-    if (rc !== 0) throw new Error(`sim_init 返回 ${rc}`);
-    term.reset();
-    serialLog = '';
-    sawSerial = false;
-    term.focus();
-    status(`固件已加载：${fw.length} 字节`);
+    await bootFirmware(await fetchAsset(url), url);
+  } catch (e) { status(`固件加载失败：${e.message}`); }
+}
+
+/* 本机 .bin：FileReader 不进缓存，也不上传，直接读进 wasm 线性内存。
+ * 页面重新加载后要重新选（文件句柄不能持久化）。 */
+async function loadFirmwareFile() {
+  if (!wasm) { status('请先加载 wasm'); return; }
+  const f = $('fwfile').files && $('fwfile').files[0];
+  if (!f) return;
+  try {
+    await bootFirmware(new Uint8Array(await f.arrayBuffer()), f.name);
   } catch (e) { status(`固件加载失败：${e.message}`); }
 }
 
@@ -302,13 +320,23 @@ function connectProxy() {
   const url = $('proxyurl').value.trim();
   if (!url) { netstatus('请输入代理地址'); return; }
   if (!ensureNetBuf()) { netstatus('线性内存不足'); return; }
+  /* 上游代理/DNS 通过 WS URL 的 query 传给 tools/ws_slip_proxy.js，
+   * 再由它拼到 build/sim --netshim 的参数里（NAT 侧拨号 + 解析）。 */
+  const upproxy = $('upproxy') ? $('upproxy').value.trim() : '';
+  const updns = $('updns') ? $('updns').value.trim() : '';
+  const qs = new URLSearchParams();
+  if (upproxy) qs.set('proxy', upproxy);
+  if (updns) qs.set('dns', updns);
+  const target = qs.toString()
+    ? url + (url.indexOf('?') >= 0 ? '&' : '?') + qs.toString()
+    : url;
   try {
-    const w = new WebSocket(url);
+    const w = new WebSocket(target);
     w.binaryType = 'arraybuffer';
     netws = w;
     w.onopen = () => {
       netRx = netTx = 0;
-      netstatus('已连接 ' + url);
+      netstatus('已连接 ' + url + (upproxy ? '（上游 ' + upproxy + '）' : ''));
       netTimer = setInterval(pumpNet, 4);
     };
     w.onmessage = (ev) => {
@@ -343,6 +371,7 @@ $('clearcache').onclick = async () => {
 };
 window.addEventListener('beforeunload', disconnectProxy);
 $('load').onclick = loadFirmware;
+$('fwfile').onchange = loadFirmwareFile;
 $('start').onclick = () => {
   if (!wasm) { status('请先加载 wasm'); return; }
   if (!running) { running = true; setTimeout(() => term.focus(), 0); status('运行中…'); loop(); }

@@ -3,6 +3,7 @@ const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 const net = require('net');
+const path = require('path');
 
 let PORT = 0;
 let CDP_PORT = 0;
@@ -161,6 +162,60 @@ async function main() {
     })()`);
     if (tput < 12000000) throw new Error('页面运行吞吐过低（5s 只跑了 ' + tput + ' 条）');
     console.log('[browser] 页面 5s 跑 ' + tput + ' 条指令 OK');
+
+    // 本地 .bin 文件选择（页面新增的 #fwfile）：不走 fetch/Cache，直接读进
+    // wasm staging。先用 Linux 固件验证 picker 本身，再（如果有）用 c6os
+    // 固件验证 C6FW v2 分派与 Alpine 引导。
+    await send('DOM.enable');
+    const doc = await send('DOM.getDocument');
+    const input = await send('DOM.querySelector',
+                             { nodeId: doc.result.root.nodeId, selector: '#fwfile' });
+    if (!input.result.nodeId) throw new Error('页面没有 #fwfile');
+    await evaluate(`document.getElementById('status').textContent = '选择中…'`);
+    await send('DOM.setFileInputFiles',
+               { nodeId: input.result.nodeId, files: [path.resolve('web/firmware.bin')] });
+    // CDP 放文件不一定派发 change；显式补一次，等价于用户选完文件
+    await evaluate(`document.getElementById('fwfile').dispatchEvent(new Event('change'))`);
+    let pick = '';
+    for (let i = 0; i < 200; i++) {
+      pick = await evaluate(`document.getElementById('status').textContent`) || '';
+      if (pick.includes('已加载') || pick.includes('失败')) break;
+      await sleep(100);
+    }
+    if (!pick.includes('已加载') || !pick.includes('firmware.bin'))
+      throw new Error('本地 firmware.bin 选择失败: ' + pick);
+    console.log('[browser] 本地 firmware.bin 选择 OK:', pick);
+
+    // c6os/Alpine 固件（C6FW v2）：可选。build/c6os.bin 由 ./build.sh c6os
+    // 打包（依赖 ~/rtos-c6 的内核与 Alpine rootfs），没有就跳过这一段。
+    if (fs.existsSync('build/c6os.bin')) {
+      await evaluate(`document.getElementById('status').textContent = '选择中…'`);
+      await send('DOM.setFileInputFiles',
+                 { nodeId: input.result.nodeId, files: [path.resolve('build/c6os.bin')] });
+      await evaluate(`document.getElementById('fwfile').dispatchEvent(new Event('change'))`);
+      let c6 = '';
+      for (let i = 0; i < 300; i++) {
+        c6 = await evaluate(`document.getElementById('status').textContent`) || '';
+        if (c6.includes('已加载') || c6.includes('失败')) break;
+        await sleep(100);
+      }
+      if (!c6.includes('已加载') || !c6.includes('c6os.bin'))
+        throw new Error('本地 c6os.bin 选择失败: ' + c6);
+      const boot = await evaluate(`(async () => {
+        document.getElementById('start').click();
+        for (let i = 0; i < 300; i++) {
+          if (serialLog.includes('c6os alpine M12')) return serialLog;
+          await new Promise(r => setTimeout(r, 100));
+        }
+        return serialLog;
+      })()`);
+      await evaluate(`document.getElementById('pause').click()`);
+      if (!boot.includes('c6os alpine M12'))
+        throw new Error('c6os 固件没有引导到内核: ' + boot.slice(0, 300));
+      console.log('[browser] 本地 c6os.bin 引导 OK（C6FW v2 → Alpine 内核）');
+    } else {
+      console.log('[browser] 跳过 c6os.bin（没有 build/c6os.bin）');
+    }
 
     // xterm.js：终端要能渲染文本与 ANSI 颜色（引导前 200M 条还没有串口输出，
     // 所以这里直接往终端写一行带颜色的测试串，验证缓冲区/渲染路径）

@@ -204,9 +204,13 @@ static u64 g_pft_cr3;
 static u32 g_pft_n;
 #endif
 
-static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
+/* present：页表项存在（P=1）时置错误码 bit0。SDM：COW/只读页的写保护
+ * 缺页必须报 P=1，否则内核会当成「页不存在」走按需补页，而 PTE 其实已经
+ * 存在，补页失败就只能给进程 SIGSEGV。c6os 的 fork 后写 COW 栈页正是
+ * 踩在这条上（err=6 而不是 7）。 */
+static void pg_fault(u64 va, u32 wr, u32 us, u32 present, u32 *pf_ec)
 {
-    u32 ec = (wr ? 2 : 0) | (us ? 4 : 0);
+    u32 ec = (wr ? 2u : 0u) | (us ? 4u : 0u) | (present ? 1u : 0u);
     u32 sup0 = g_m.emu_sup;
 #if !defined(C6_WASM)
     /* 同一地址反复缺页说明页错误处理没有进展（自陷死循环）；打一条
@@ -397,21 +401,21 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         shift = 39 - level * 9;
         e = phys_r64(pa + (((va >> shift) & 0x1ff) << 3));
         if (!(e & 1)) {
-            pg_fault(va, wr, is_user, pf_ec);
+            pg_fault(va, wr, is_user, 0, pf_ec);
             return 0;
         }
         if (is_user && !(e & 4)) {
-            pg_fault(va, wr, 1, pf_ec);
+            pg_fault(va, wr, 1, 1, pf_ec);
             return 0;
         }
         if (wr && !(e & 2)) {
-            pg_fault(va, wr, is_user, pf_ec);
+            pg_fault(va, wr, is_user, 1, pf_ec);
             return 0;
         }
         if (level == 3 && (e & 0x80)) {
             /* 1 GiB 页 */
             if ((g_m.cpu.efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
-                pg_fault(va, wr, is_user, pf_ec);
+                pg_fault(va, wr, is_user, 1, pf_ec);
                 return 0;
             }
             flags = TV_P;
@@ -426,7 +430,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         if (level == 2 && (e & 0x80)) {
             /* 2 MiB 页 */
             if ((g_m.cpu.efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
-                pg_fault(va, wr, is_user, pf_ec);
+                pg_fault(va, wr, is_user, 1, pf_ec);
                 return 0;
             }
             flags = TV_P;
@@ -441,7 +445,7 @@ u64 mem_translate(u64 va, u32 wr, u32 user, u32 *pf_ec)
         pa = e & 0x000ffffffffff000ull;
     }
     if ((g_m.cpu.efer & EFER_NXE) && (e & ((u64)1 << 63)) && user == 2) {
-        pg_fault(va, wr, is_user, pf_ec);
+        pg_fault(va, wr, is_user, 1, pf_ec);
         return 0;
     }
     /* 4 KiB 页：TV_X 表示「该页可执行」，必须按 PTE 的 NX 位来置；TV_U

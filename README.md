@@ -110,6 +110,22 @@ wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
 （登录 + ping + wget http）。HTTPS 走同一条 TCP 中继，但 wasm guest 目前
 实测会被 CDN 边缘关闭连接（native 的 HTTPS 正常），见 DESIGN §101 的已知问题。
 
+**上游代理（可选）**：NAT 可以先把代理连上再中继，页面「上游代理」「DNS」
+两栏对应 `--proxy=` / `--dns=`（native 直接
+`build/sim --proxy=… --dns=… build/firmware.bin`）：
+
+| 写法 | 行为 |
+| --- | --- |
+| `http://127.0.0.1:2334` | HTTP `CONNECT`，可带 `user:pass@`（Basic 认证）|
+| `socks5://127.0.0.1:1080` | SOCKS5，含用户名密码认证 |
+| `socks4://127.0.0.1:1080` | SOCKS4 |
+| `127.0.0.1:2334` | 不带协议：首次连接自动识别（先发 SOCKS5 问候看首字节）|
+
+`--dns=127.0.0.1:6450` 把 guest 的 DNS 指到指定解析器：`resolv.conf` 写不出
+端口，而 hiddify 这类工具的本地 DNS 不在 53。UDP/ICMP 仍直连，只有 TCP 走
+代理。`node tests/netshim_proxy.js` 用合成 SLIP 包在几秒内把这些行为
+（含认证/失败/自动识别）覆盖一遍，不需要真的引导 Linux。
+
 注意：`--netshim` 把宿主的网络能力开放给 guest（默认只绑 127.0.0.1，
 不要暴露到公网）；GitHub Pages 是 HTTPS，浏览器对 `ws://127.0.0.1` 的
 混合内容策略各版本不同，本地 `http://localhost` 页面最稳。Pages 上的
@@ -122,6 +138,21 @@ wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
   --initrd build/alpine/minirootfs.tar.gz --out build/firmware.bin
 ./build/sim build/firmware.bin
 ```
+
+### c6os + Alpine（C6FW v2）
+
+如果 `~/rtos-c6` 已经 `make x86-alpine`，也可以把 c6os 的 x86-64 内核和
+Alpine initramfs 打成 v2 固件：
+
+```sh
+./build.sh c6os          # 默认取 ~/rtos-c6/build/x86/{iso/stage2.bin,alpine/full.cpio,alpine/data.img}
+./build/sim build/c6os.bin
+```
+
+页面里不用改 URL：「固件与网络」下的**本地固件**可以直接选 `build/c6os.bin`
+（或任何 C6FW v1/v2 的 `.bin`），文件只读进 wasm 线性内存，不上传。c6os 的
+`/data` 是一块模拟的 ATA PIO 盘（8MiB FAT16，随固件打包），写操作落在
+客户机 RAM 里，刷新页面即丢。
 
 在真实终端里跑时模拟器会把终端切到 raw：输入不会显示两遍，`Ctrl-C` 原样
 送给 guest，**`Ctrl-]` 退出**。约 1 分钟出现 `(none) login:`，输入 `root`
@@ -230,7 +261,7 @@ ICMP 的缓冲都在 `net_tick()` 里推进，`dev_tick()` 负责把 COM2 的 RX
 ./build.sh test                                   # 5 项：payload/单元/CPL3/C6SIM64/wasm 冒烟
 ./build.sh jit                                    # wasm JIT POC + 12 条直线块对拍
 SIM=build/sim python3 tools/difftest/difftest.py  # 1236 条指令级差分用例
-node tests/browser_e2e.js                         # fetch/Cache Storage/IndexedDB/hostfs
+node tests/browser_e2e.js                         # 上述 + 本地 .bin 选择；有 build/c6os.bin 时还测 c6os 引导
 node tests/browser_alpine.js                      # 浏览器里跑到 login 并自动登录
 node tests/wasm_login.js                          # wasm 里跑到 login 并自动登录
 ```
@@ -276,6 +307,9 @@ python3 tools/make_demo_gif.py --out docs/img/net-demo.gif
   可能与真机不同（十进制解析/格式化的末位会差；`docs/DESIGN.md` §89）。
 - 浏览器 virtio-net / c6blk 是 MMIO 寄存器桩；真正的网络与文件系统走
   `hostfs` 桥（`fetch()` / Cache Storage / IndexedDB），已由 `browser_e2e` 验证。
+- c6os 固件要求内核整体落在 `0x11000..0xA0000`；`/data` 固定 8MiB FAT16，
+  写不持久化；c6os 暂未带 e1000 驱动，busybox sweep 里网络相关项会失败，
+  全量 300 多个 applet 跑完要几分钟（不是卡死）。
 
 ## 性能
 

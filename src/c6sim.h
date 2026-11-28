@@ -47,6 +47,12 @@ int printf(const char *fmt, ...);
 #define LAPIC_PA        0xfee00000u
 #define VIRTIO_NET_PA  0xfeb00000u
 #define C6BLK_PA       0xfeb01000u
+/* c6os 的 /data：ATA PIO 主盘，8MiB FAT 镜像放在客户机 RAM 顶部（C6FW
+ * v2 的 data 槽）。e820 的 usable 上界也在 ATA_DATA_PA 之前，c6os 的
+ * 页分配器不会踩到盘上的数据。 */
+#define ATA_DATA_PA     0x07800000u
+#define ATA_DATA_SIZE   (8u << 20)
+#define ATA_DATA_SECTORS (ATA_DATA_SIZE / 512u)
 
 /* RFLAGS */
 #define RF_CF 0x1ull
@@ -76,6 +82,7 @@ int printf(const char *fmt, ...);
 #define CR4_MCE 0x40ull
 #define CR4_PSE 0x10ull
 #define CR4_OSFXSR 0x200ull
+#define CR4_OSXMMEXCPT 0x400ull
 #define CR4_OSXSAVE 0x40000ull
 #define EFER_SCE 0x1ull
 #define EFER_LME 0x100ull
@@ -107,6 +114,9 @@ int printf(const char *fmt, ...);
 #define FW_MAGIC2 'F'
 #define FW_MAGIC3 'W'
 #define FW_VERSION 1
+/* v2 = c6os（~/rtos-c6）的 x86-64 内核：kernel 槽是链接在 0x11000 的平铺
+ * 镜像，initrd 槽是 Alpine 的「8 字节长度 + 512 字节填充 + newc cpio」。 */
+#define FW_VERSION_C6OS 2
 #define FW_HDR_SIZE 64
 
 struct Operand {
@@ -249,6 +259,9 @@ void machine_reset_noram(void);
 int machine_load_firmware(u8 *fw, u32 len);
 int machine_boot(void);
 int machine_boot_payload(u8 *code, u32 len, u64 addr);
+int machine_boot_c6os(u8 *base, u32 koff, u32 klen,
+                      u32 roff, u32 rlen, u32 doff, u32 dlen);
+int machine_boot_c6os_fw(u8 *base, u32 len);
 int machine_run(u64 count);
 void machine_set_cmdline(const char *s);
 extern u32 g_boot_user_cmdline_set;
@@ -372,6 +385,9 @@ void net_reset(void);
 void net_tick(void);
 void net_input_ip(const u8 *pkt, u32 len);
 void slip_rx_byte(u32 v);
+/* --proxy=<url> / --dns=<ip[:port]>：成功返回 1，地址非法返回 0 */
+int net_set_proxy(const char *url);
+int net_set_dns(const char *spec);
 #endif
 
 /* host.c6 / wasm.c6 */
