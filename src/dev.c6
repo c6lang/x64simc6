@@ -773,13 +773,17 @@ void dev_tick(void)
 
     if (delta > 0) {
         g_tick_cnt = g_tick_cnt + 1;
-        /* mode 2 = 频率发生器，mode 3 = 方波，两者都是周期性中断 */
-        if (g_m.pit.reload[0] > 0 && (g_m.pit.mode[0] == 2 || g_m.pit.mode[0] == 3)) {
-            u64 sub = delta;
-            if (sub > 0xffffffffu) sub = 0xffffffffu;
-            if (g_m.pit.count[0] > sub)
+        /* PIT 输入时钟 1.193182MHz，TSC 2.4GHz：把 TSC 差换算成 PIT 时钟。
+         * mode 2/3 是周期性的；mode 0 是 one-shot（TSC clocksource/NO_HZ
+         * 下内核会用它，必须也能在终端计数时投 IRQ0）。 */
+        if (g_m.pit.reload[0] > 0 && g_m.pit.mode[0] != 4) {
+            u64 sub = delta * 1193182ull / 2400000000ull;
+            if (sub > 0 && g_m.pit.count[0] > sub)
                 g_m.pit.count[0] -= (u32)sub;
-            else {
+            else if (sub > 0 && g_m.pit.mode[0] == 0) {
+                g_m.pit.count[0] = 0;
+                pic_raise(&g_m, 0);
+            } else if (sub > 0) {
                 g_m.pit.count[0] = g_m.pit.reload[0];
                 pic_raise(&g_m, 0);
             }

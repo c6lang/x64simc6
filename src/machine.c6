@@ -27,8 +27,11 @@ static u64 pace_wall_ns(void)
 }
 #endif
 
-static u32 g_tsc_acc = 0;      /* TSC 分频累加器 */
-static u32 g_tsc_div = 17;     /* 每多少条指令走 1 个 TSC；交互模式按实测速率校准 */
+/* TSC 跑 2.4GHz（和 CPUID 0x16 报的频率一致）：每条指令加 g_tsc_mul 个
+ * TSC。批处理按实测速率校准，交互/wasm 页面的宿主毫秒到了也校准，让
+ * guest 时间≈墙钟；PIT 输入时钟仍是 1.193182MHz，在 dev_tick 里换算。 */
+static u32 g_tsc_mul = 160;    /* 每条指令的 TSC 增量 */
+static u64 g_dev_next = 0;     /* 下一次 dev_tick 的 TSC 阈值（~1ms） */
 static u32 g_calib = 0;
 static u64 g_calib_w = 0;
 static u64 g_calib_i = 0;
@@ -57,7 +60,7 @@ static int pace_ahead(void)
         return 0;
     }
     wall_el = w - g_pace_w0;
-    guest_el = (g_m.tsc - g_pace_t0) * 838ull;   /* 1 TSC ≈ 838ns */
+    guest_el = (g_m.tsc - g_pace_t0) * 5ull / 12ull;   /* 1 TSC = 5/12 ns（2.4GHz） */
     if (guest_el > wall_el + 20000000ull)
         return 1;
     if (wall_el > guest_el + 2000000000ull) {    /* 落后 2 秒以上：重设基准 */
@@ -95,7 +98,7 @@ static int bad_stack_ptr(u64 rsp)
 
 static const char default_cmdline[] =
     "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 "
-    "loglevel=7 panic=-1 reboot=k acpi=off pci=conf1";
+    "loglevel=7 tsc=unstable panic=-1 reboot=k acpi=off pci=conf1";
 
 void machine_reset(void)
 {
@@ -116,6 +119,7 @@ void machine_reset(void)
     m->tsc = 0;
     m->pit_ticks = 0;
     m->last_pit_tsc = 0;
+    g_dev_next = 0;
     m->halted = 0;
     m->exit_code = 0;
     m->fw_kernel = 0;
@@ -139,6 +143,7 @@ void machine_reset_noram(void)
     m->tsc = 0;
     m->pit_ticks = 0;
     m->last_pit_tsc = 0;
+    g_dev_next = 0;
     m->halted = 0;
     m->exit_code = 0;
     m->serial.lsr = 0x60;
@@ -154,9 +159,12 @@ void machine_reset_noram(void)
 void machine_set_paced(int v)
 {
     g_pace_idle = v ? 1 : 0;
-    g_calib = 0;
-    g_tsc_div = 17;
-    g_tsc_acc = 0;
+    g_calib = v ? 1 : 0;
+    if (!v)
+        g_tsc_mul = 160;       /* 固定 2.4GHz 模型，native/wasm 逐字节一致 */
+    g_calib_w = 0;
+    g_calib_i = 0;
+    g_dev_next = 0;
 }
 
 void machine_init(void)
@@ -166,8 +174,8 @@ void machine_init(void)
 #else
     g_pace_idle = 1;           /* 宿主毫秒由 sim_set_host_ms() 提供 */
 #endif
-    if (g_pace_idle) {
-        g_calib = 1;
+    {
+        g_calib = 1;           /* native 有 clock_gettime；wasm 等 host_ms 到了再测 */
         g_calib_w = pace_wall_ns();
         g_calib_i = g_m.instructions;
     }
@@ -230,25 +238,23 @@ static int machine_step_loop(u64 count)
              * 最多晚 0x40000 条指令被发现。 */
             {
                 u64 step = 0x2000;
+                int ahead = 0;
                 /* 跑在墙钟前面就先不推进时间（但仍然要 dev_tick，
                  * 否则挂起的串口中断永远投递不出去，敲键没反应）。 */
-                if (pace_ahead())
+                ahead = pace_ahead();
+                if (ahead)
                     step = 0;
-                if (g_m.pit.reload[0] > 0 &&
+                if (!ahead && g_m.pit.reload[0] > 0 &&
                     (g_m.pit.mode[0] == 2 || g_m.pit.mode[0] == 3) &&
                     g_m.pit.count[0] > 0x2000) {
-                    u64 want = (u64)g_m.pit.count[0];
-                    if (want > 0x40000ull) want = 0x40000ull;
-                    if (want > step) step = want;
+                    u64 want = (u64)g_m.pit.count[0];          /* PIT 时钟 */
+                    u64 want_tsc = want * 2400000000ull / 1193182ull;
+                    u64 want_ins = want_tsc / g_tsc_mul;
+                    if (want_ins > 0x40000ull) want_ins = 0x40000ull;
+                    if (want_ins > step) step = want_ins;
                 }
                 if (step > 0) {
-                    if (g_pace_idle) {
-                        g_tsc_acc = g_tsc_acc + (u32)step;
-                        g_m.tsc += (u64)(g_tsc_acc / g_tsc_div);
-                        g_tsc_acc = g_tsc_acc % g_tsc_div;
-                    } else {
-                        g_m.tsc += step;
-                    }
+                    g_m.tsc += (u64)step * g_tsc_mul;
                     g_m.instructions += step;
                 }
             }
@@ -259,8 +265,8 @@ static int machine_step_loop(u64 count)
          * 以外的副作用，也不跨 dev_tick 边界，所以只在这里补指令数、TSC
          * 分频和循环配额。取指/异常/调试模式一律回退解释器。 */
         if (g_jit_on && !dbg_any && !g_m.cpu.exc_pending && !g_m.cpu.halted &&
-            !g_m.cpu.fault_abort &&
-            (g_m.instructions & 0x3ffffull) != 0x3ffffull) {
+            !g_m.cpu.fault_abort && g_m.tsc < g_dev_next &&
+            g_m.tsc + (u64)0x40000ull * g_tsc_mul < g_dev_next + 0x40000ull) {
             u64 jlim = (u64)n + 1ull;
             u64 bdist = 0x40000ull - (g_m.instructions & 0x3ffffull);
             u32 jn = 0;
@@ -288,9 +294,7 @@ static int machine_step_loop(u64 count)
                 if ((u64)jn > jlim) g_jit_bad_budget++;
                 g_m.cur_rip = g_m.cpu.rip;
                 g_m.instructions += (u64)jn;
-                g_tsc_acc += jn;
-                g_m.tsc += g_tsc_acc / 17u;
-                g_tsc_acc %= 17u;
+                g_m.tsc += (u64)jn * g_tsc_mul;
                 if ((g_m.instructions & 0x3ffffull) == 0) g_jit_bad_boundary++;
                 /* 块的最后一条可能缺页（栈/call/ret 最常见）：补上解释器
                  * 循环尾部的投递，不能留到下一轮再重试一条指令。 */
@@ -304,15 +308,9 @@ static int machine_step_loop(u64 count)
         }
 #endif
         g_m.instructions++;
-        /* TSC 每 17 条指令加 1：内核用 PIT 标定出的 TSC 频率约 1.19MHz，
-         * 1 指令 1 TSC 会让 guest 时间比墙钟快 15 倍（login 超时 4 秒就到）。
-         * 17:1 之后忙时 guest 时间和墙钟一致，配和上面的空闲节流，
-         * 空闲时也不跑快。 */
-        g_tsc_acc++;
-        if (g_tsc_acc >= g_tsc_div) {
-            g_tsc_acc = 0;
-            g_m.tsc++;
-        }
+        /* TSC 2.4GHz：每条指令加 g_tsc_mul（交互/批处理都按实测速率校准），
+         * 忙时 guest 时间≈墙钟；空闲由上面的 pace_ahead 节流。 */
+        g_m.tsc += g_tsc_mul;
         if (dbg_any) {
         if (g_m.sample_on) {   /* 只在 --sample 时记录，避免每指令两次写 */
             g_ring[g_ring_i & 15] = g_m.cpu.rip;
@@ -520,21 +518,23 @@ static int machine_step_loop(u64 count)
 #endif
         if (g_m.halted)
             break;
-        if ((g_m.instructions & 0x3ffffu) == 0)
+        if (g_m.tsc >= g_dev_next) {
             dev_tick();
+            g_dev_next = g_m.tsc + 2400000ull;   /* ~1ms */
+        }
     }
     return g_m.halted ? 0 : 1;
 }
 
-/* 交互/wasm 下按实测指令速率校准 TSC 分频：guest 时间 ≈ 墙钟。
- * 固定 1/17 是按 ~20M 条/秒调的；pty/终端模拟只有 ~10M 条/秒，
- * guest 钟会慢一半，top 的刷新间隔被拉长到“看起来不刷新”。 */
+/* 按实测指令速率校准 TSC 倍数：TSC 跑 2.4GHz，guest 时间 ≈ 墙钟。
+ * native 总能拿到 clock_gettime；wasm 等页面每帧写 sim_set_host_ms()。 */
 static void pace_calibrate(void)
 {
     u64 w = 0;
     u64 dt = 0;
     u64 di = 0;
-    u64 div = 0;
+    u64 mul = 0;
+    u64 rate = 0;
     if (!g_calib)
         return;
     w = pace_wall_ns();
@@ -549,13 +549,17 @@ static void pace_calibrate(void)
     if (dt < 150000000ull)
         return;
     di = g_m.instructions - g_calib_i;
-    g_calib = 0;
+    g_calib_w = w;
+    g_calib_i = g_m.instructions;
     if (di == 0)
         return;
-    div = di * 1000000000ull / dt / 1190000ull;
-    if (div < 4ull) div = 4ull;
-    if (div > 64ull) div = 64ull;
-    g_tsc_div = (u32)div;
+    rate = di * 1000000000ull / dt;
+    if (rate == 0)
+        return;
+    mul = 2400000000ull / rate;
+    if (mul < 8ull) mul = 8ull;
+    if (mul > 4096ull) mul = 4096ull;
+    g_tsc_mul = (u32)mul;
 }
 
 int machine_run(u64 count)

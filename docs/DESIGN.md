@@ -2215,18 +2215,35 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      `pci 0000:00:00.0: Limiting direct PCI/PCI transfers` 是 i440FX 的
      正常 quirk 输出（KERN_INFO，loglevel=4 看不到），不是错误。
 
-103. **CPUID 0x16：让 `/proc/cpuinfo` 的 CPU MHz 不再是 0**。guest 日志里
-     `tsc: Fast TSC calibration failed` / `Unable to calibrate against PIT` /
-     `No reference (HPET/PMTIMER) available` —— 我们没模拟 PIT 通道 2、
-     HPET 和 ACPI PM timer，TSC 校不准，`cpu_khz = 0`，`/proc/cpuinfo`
-     于是显示 `cpu MHz : 0.000`。修法不是去补 PIT 校准（校出来也只有
-     ~1.19MHz，因为快进 TSC 本来就这么慢），而是暴露 CPUID 0x16
-     （base/max/bus = 2400/2400/100 MHz）并把基本叶子上限提到 0x16：
-     内核的 `cpu_freq_khz` 被填上，`/proc/cpuinfo` 显示 `2400.000`；同
-     时它用 2400MHz 去校验 TSC，watchdog 发现实际 TSC 慢得多，照旧把
-     TSC 标成 unstable 并回落到 refined-jiffies——**时间、定时器、
-     login/top/ping 的行为都不变**，只是 dmesg 多一条 watchdog 警告。
-     验证：guest 里 `/proc/cpuinfo` 2400.000，`date`/`sleep 5` 正常。
+103. **TSC 2.4GHz：`/proc/cpuinfo` 的 CPU MHz、BogoMIPS 和 watchdog**。
+     guest 里原来有 `tsc: Fast TSC calibration failed` / `Unable to
+     calibrate against PIT` / `No reference (HPET/PMTIMER) available` ——
+     模拟器没实现 PIT 通道 2、HPET 和 ACPI PM timer，TSC 校不准，
+     `cpu_khz = 0`，`/proc/cpuinfo` 的 cpu MHz 显示 0.000，clocksource
+     回落到 refined-jiffies；BogoMIPS 77.8 是解释器真实的 delay-loop 速度。
+
+     只把 CPUID 0x16 报成 2400MHz 不行：内核会相信 TSC 就是 2.4GHz（实际
+     只有 ~1.19MHz），`delay_tsc`/`udelay` 慢约 2000 倍，引导期 NMI 自检
+     卡 26 秒（`BUG: soft lockup`），clocksource watchdog 报 -505ms skew。
+
+     最终实现（`machine.c6`/`dev.c6`/`cpu.c6`）：
+     - TSC 真跑 2.4GHz：每条指令加 `g_tsc_mul`；native 用 clock_gettime、
+       wasm 用 `sim_set_host_ms()`，每 150ms 按实测指令速率重算 mul，
+       让 guest 的 TSC 时间≈墙钟。
+     - PIT 仍是独立的 1.193182MHz：`dev_tick` 里按
+       `delta_tsc * 1193182 / 2400000000` 换算成 PIT 时钟；mode 2/3 周期、
+       mode 0 one-shot 都要投 IRQ0（TSC clocksource/NO_HZ 会用 one-shot）。
+     - `dev_tick` 从「每 0x40000 条指令」改成「每 ~1ms TSC」触发，否则
+       HZ=300/PIT 周期下会丢 tick，NO_HZ 的 sleep 被拉长甚至卡住。
+     - CPUID 0x16 报 base/max/bus = 2400/2400/100MHz，基本叶子上限 0x16。
+     - cmdline 加 `tsc=unstable`：内核不去跑 tsc-early 的 watchdog（否则
+       tsc-early 与 refined-jiffies 的 101ms epoch 差会把它标 unstable），
+       但 TSC 频率是真的，`delay_tsc`/`udelay` 仍正确，BogoMIPS 按 2.4GHz
+       算成 4801；时间走 refined-jiffies/PIT，引导 46s、top/ping 正常。
+
+     验证：`/proc/cpuinfo` 2400.000、BogoMIPS 4801、无 watchdog/soft
+     lockup、`date`/`sleep` 准确、`top -d 1` 12s 9 帧；`build.sh test`、
+     `boot_login`、`wasm_net_proxy`、`browser_e2e` 全过。
 
 104. **启动回归修复（本轮）**：`2ad2583`（CPUID 0x16）之后 900M 条到不了
      login，并且 wasm/native 对拍在低 1MB 出现分叉。根因有四层：
@@ -2240,13 +2257,15 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      - **RTC**：native 用宿主时间、wasm 用固定 epoch，开机路径读 RTC → 随机
        分叉。新增 native `--rtc=SECS`；wasm_cmp/fixed/snap 两侧都固定
        `1795000000`。
-     - **clocksource**：CPUID 0x16 报 2400MHz，而快进 TSC 只有 ~1.19MHz，
-       watchdog 判 TSC unstable → `No current clocksource`，内核时间基停摆；
-       并且 `noapic nolapic` 下内核走 8259/PIT，SMP 初始化后卡死。修：
-       `machine_boot` 统一从 guest cmdline 里剥掉 `noapic/nolapic`，并在
-       用户没写时追加 `tsc=unstable`（内核直接回落 refined-jiffies）。
-       实测 native/wasm 都在 830M 条前到 `(none) login:`；wasm_login
-       `MARK-OK`（829,716,603 条 / 52s），JIT 开/关串口 SHA 完全相同。
+     - **clocksource**：CPUID 0x16 报 2400MHz（现在 TSC 也真跑 2.4GHz，
+       见 §103），但 `tsc-early` 和 refined-jiffies 有 ~101ms epoch 差，
+       watchdog 会把它标 unstable → `No current clocksource`，内核时间基
+       停摆；并且 `noapic nolapic` 下内核走 8259/PIT，SMP 初始化后卡死。
+       修：`machine_boot` 统一从 guest cmdline 里剥掉 `noapic/nolapic`，
+       并在用户没写时追加 `tsc=unstable`（时钟源走 refined-jiffies/PIT，
+       `delay_tsc`/`udelay` 仍按真实 2.4GHz TSC 算）。实测 native/wasm
+       都在 830M 条前到 `(none) login:`；wasm_login `MARK-OK`
+       （829,716,603 条 / 52s），JIT 开/关串口 SHA 完全相同。
      - **工具/测试**：`parse_num` 支持 `0x`（`--memhash/--snap/--stopt`）；
        `sim_mem_hash_region(u32,u32)` 修 wasm 传参（原 u64 全区间同哈希）；
        `--dumpregs` 先补换行（payload 串口无结尾换行时 `[REG]` 被前缀吞）；
@@ -2254,7 +2273,6 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
        RTC、payload_cmp 的默认 payload 等测试 bug 全修。
      **验收**：`./build.sh test`、difftest **1252/1252**、wasm_cmp 50M
      MATCH（JIT 0/1）、wasm_login MARK-OK（串口 SHA 一致）、`./build.sh jit`、
-     boot_smoke/payload_cmp/fixed/snap/shrd/smoke 全过。
-     **后续（TODO）**：模拟 PIT ch2/HPET/ACPI PM timer，让内核能校准 TSC，
-     取代 `tsc=unstable`，同时保住 `/proc/cpuinfo` 的 2400MHz。
+     boot_smoke/payload_cmp/fixed/snap/shrd/smoke 全过。PIT ch2 校准可后续
+     补，但有了 §103 的 TSC 2.4GHz 已不阻塞 CPU MHz/BogoMIPS。
 
