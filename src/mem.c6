@@ -198,10 +198,34 @@ static void phys_w64(u64 a, u64 v)
     phys_w32(a + 4, (u32)(v >> 32));
 }
 
+#if !defined(C6_WASM)
+static u64 g_pft_va;
+static u32 g_pft_n;
+#endif
+
 static void pg_fault(u64 va, u32 wr, u32 us, u32 *pf_ec)
 {
     u32 ec = (wr ? 2 : 0) | (us ? 4 : 0);
     u32 sup0 = g_m.emu_sup;
+#if !defined(C6_WASM)
+    /* 同一地址反复缺页说明页错误处理没有进展（自陷死循环）；打一条
+     * 带 RIP/CR3 的日志，方便用 System.map 定位内核代码路径。 */
+    if (va == g_pft_va) {
+        g_pft_n++;
+        if (g_pft_n == 4) {
+            printf("[PFT] va=%llx rip=%llx ec=%x cr3=%llx insns=%llu\n",
+                   (unsigned long long)va,
+                   (unsigned long long)g_m.cpu.rip,
+                   (unsigned)ec,
+                   (unsigned long long)g_m.cpu.cr[3],
+                   (unsigned long long)g_m.instructions);
+            fflush(stdout);
+        }
+    } else {
+        g_pft_va = va;
+        g_pft_n = 0;
+    }
+#endif
     if (pf_ec)
         *pf_ec = ec;
     g_m.cpu.fault_abort = 1;
