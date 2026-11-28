@@ -709,7 +709,7 @@ static void do_cpuid(struct CPUState *c)
     u32 sub = (u32)c->r[2];
     u32 a = 0, b = 0, cc = 0, d = 0;
     if (leaf == 0) {
-        a = 0x0d;                 /* 基本叶子到 0x0d */
+        a = 0x16;                 /* 基本叶子到 0x16（0x16=频率信息） */
         b = 0x756e6547;           /* GenuineIntel */
         d = 0x49656e69;
         cc = 0x6c65746e;
@@ -724,6 +724,12 @@ static void do_cpuid(struct CPUState *c)
         a = 0; b = 0; cc = 0; d = 0;
     } else if (leaf == 0x0d) {
         a = 1; b = 512; cc = 512; d = 0;
+    } else if (leaf == 0x16) {
+        /* 只给 /proc/cpuinfo 显示用：内核会拿 base MHz 去对 TSC，但本机
+         * TSC 是 ~1.19MHz 的快进钟，watchdog 很快判 skew 并回落到
+         * refined-jiffies（时间/定时器行为不变，dmesg 里会有一条
+         * "Marking TSC unstable due to clocksource watchdog"）。 */
+        a = 2400; b = 2400; cc = 100; d = 0;   /* base/max/bus MHz */
     } else if (leaf == 0x80000000) {
         a = 0x80000008;
     } else if (leaf == 0x80000001) {
