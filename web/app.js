@@ -10,6 +10,7 @@ const NET_RX = SCRATCH + 4 * 0x100000;   // 252 MiB：代理 -> wasm 的收包�
 const NET_TX = NET_RX + 65536;            // 252 MiB + 64 KiB：wasm -> 代理
 const FS_CAP = 1 << 20;
 const WASM_VER = '2.2';   // 换 wasm 时同步 bump：Cache Storage 按 URL 缓存
+const FW_VER = '2';       // 换内置固件（firmware.bin/c6os.bin）时 bump
 
 let wasm = null;
 let mem = null;
@@ -232,12 +233,15 @@ async function bootFirmware(fw, label, seq) {
 
 async function loadFirmware() {
   if (!wasm) { status('请先加载 wasm'); return; }
-  const url = $('fwurl').value.trim();
+  const raw = $('fwurl').value.trim();
+  /* 内置固件也按 URL 进 Cache Storage；加 ?v= 让重编过的 c6os.bin 不被旧缓存
+   * 顶掉（否则页面上永远是上一次的内核）。 */
+  const url = raw.indexOf('?') < 0 ? raw + '?v=' + FW_VER : raw;
   const seq = ++fwSeq;
   try {
     const fw = await fetchAsset(url);
     if (seq !== fwSeq) return;
-    await bootFirmware(fw, url, seq);
+    await bootFirmware(fw, raw, seq);
   } catch (e) { if (seq === fwSeq) status(`固件加载失败：${e.message}`); }
 }
 
