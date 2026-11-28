@@ -212,7 +212,8 @@ static void copy_to_ram(u32 pa, const u8 *src, u32 len)
  * （实测 wasm.c6 写 fw_kernel_len、boot.c6 读出来是 0），所以固件字段的
  * 写入必须和 machine_boot() 在同一个 TU 内完成。 */
 int machine_boot_staged(u8 *base, u32 koff, u32 klen,
-                        u32 ioff, u32 ilen, u32 coff, u32 clen)
+                        u32 ioff, u32 ilen, u32 coff, u32 clen,
+                        const char *cmd)
 {
     u32 k = 0;
     g_m.fw_kernel = base + koff;
@@ -228,6 +229,9 @@ int machine_boot_staged(u8 *base, u32 koff, u32 klen,
         g_m.cmdline[k] = 0;
         g_m.cmdline_len = n;
     }
+    /* 和 native 的时序一致：先固件内建 cmdline，再让调用者的覆盖 */
+    if (cmd != 0)
+        machine_set_cmdline(cmd);
     return machine_boot();
 }
 

@@ -238,7 +238,8 @@ extern int g_ntrace;
 extern int g_net_shim;
 u64 boot_probe(void);
 int machine_boot_staged(u8 *base, u32 koff, u32 klen,
-                        u32 ioff, u32 ilen, u32 coff, u32 clen);
+                        u32 ioff, u32 ilen, u32 coff, u32 clen,
+                        const char *cmd);
 
 /* machine.c6 */
 void machine_init(void);

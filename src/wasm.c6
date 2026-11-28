@@ -29,8 +29,7 @@ int sim_init(u8 *fw, int len)
     for (i = 0; i < (u32)len; i++) g_fw_stage[i] = fw[i];
     machine_init();
     g_m.watch_fd = -1;      /* wasm 没有 main() 的初始化；默认 -1 才不关快通道/JIT */
-    if (g_sim_cmdline_set)
-        machine_set_cmdline(g_sim_cmdline);   /* 恢复调用者在 init 前设置的 cmdline */
+
     mag = fw_rd32(0);
     hver = fw_rd32(4);
     ko = fw_rd32(16);
@@ -41,7 +40,8 @@ int sim_init(u8 *fw, int len)
     cl = fw_rd32(36);
     if (mag != 0x57463643u || hver != 1u) return -2;
     if (kl == 0 || ko + kl > (u32)len || io + il > (u32)len) return -4;
-    return machine_boot_staged(g_fw_stage, ko, kl, io, il, co, cl);
+    return machine_boot_staged(g_fw_stage, ko, kl, io, il, co, cl,
+                               g_sim_cmdline_set ? g_sim_cmdline : 0);
 }
 
 static u8 g_payload_stage[8192];
