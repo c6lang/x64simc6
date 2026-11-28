@@ -361,6 +361,37 @@ static int machine_step_loop(u64 count)
             g_lastrsp[g_lastrip_i & 63u] = g_m.cpu.r[4];
             g_lastrip_i = g_lastrip_i + 1;
         }
+        /* 回归探针（--rspcheck）：内核态(CPL0) + 用户地址 RSP 只允许出现在
+         * syscall 入口窗口(0x81c00080..0xad) 和 sysret 返回窗口
+         * (0x81c0027d..0x288)。其它位置出现，说明中断投递时序又错了
+         * （DESIGN §106：中断必须在执行下一条指令之前投递）。 */
+        if (g_rsp_check && g_m.instructions > 500000000ull &&
+            (g_m.cpu.sel[1] & 3) == 0 &&
+            g_m.cpu.r[4] >= 0x10000ull && g_m.cpu.r[4] < 0x800000000000ull &&
+            !(g_m.cpu.rip >= 0xffffffff81c00080ull &&
+              g_m.cpu.rip <  0xffffffff81c000adull) &&
+            !(g_m.cpu.rip >= 0xffffffff81c0027dull &&
+              g_m.cpu.rip <= 0xffffffff81c00288ull)) {
+            u32 wk = 0;
+            printf("[RSPSC] insns=%llu rip=%llx rsp=%llx cs=%llx flags=%llx"
+                   " cr2=%llx\n",
+                   (unsigned long long)g_m.instructions,
+                   (unsigned long long)g_m.cpu.rip,
+                   (unsigned long long)g_m.cpu.r[4],
+                   (unsigned long long)g_m.cpu.sel[1],
+                   (unsigned long long)g_m.cpu.flags,
+                   (unsigned long long)g_m.cpu.cr[2]);
+            printf("[SCRING]");
+            for (wk = 0; wk < 64; wk++) {
+                u32 kk = (g_lastrip_i + 64u - 64u + wk) & 63u;
+                printf(" %llx/%llx", (unsigned long long)g_lastrip[kk],
+                       (unsigned long long)g_lastrsp[kk]);
+            }
+            printf("\n");
+            fflush(stdout);
+            g_m.halted = 1;
+            break;
+        }
         /* 页错误入口第一次落在非法栈上时立刻停：这时 RSP 就是那个坏值，
          * 环里最后几条是把它带飞的 iret/栈切换指令。 */
         if (g_rsp_check && g_m.instructions > 500000000ull &&
@@ -368,17 +399,18 @@ static int machine_step_loop(u64 count)
             bad_stack_ptr(g_m.cpu.r[4])) {
             u32 rk = 0;
             printf("[RSPFIRST] insns=%llu rip=%llx rsp=%llx cpl=%u"
-                   " rax=%llx rdi=%llx gs=%llx\n",
+                   " cr2=%llx rax=%llx rdi=%llx gs=%llx\n",
                    (unsigned long long)g_m.instructions,
                    (unsigned long long)g_m.cpu.rip,
                    (unsigned long long)g_m.cpu.r[4],
                    (unsigned)(g_m.cpu.sel[1] & 3),
+                   (unsigned long long)g_m.cpu.cr[2],
                    (unsigned long long)g_m.cpu.r[0],
                    (unsigned long long)g_m.cpu.r[7],
                    (unsigned long long)g_m.cpu.msr_gs_base);
-            printf("[RING8]");
-            for (rk = 0; rk < 8; rk++) {
-                u32 kk = (g_lastrip_i + 64u - 8u + rk) & 63u;
+            printf("[RING64]");
+            for (rk = 0; rk < 64; rk++) {
+                u32 kk = (g_lastrip_i + 64u - 64u + rk) & 63u;
                 printf(" %llx/%llx", (unsigned long long)g_lastrip[kk],
                        (unsigned long long)g_lastrsp[kk]);
             }
@@ -388,7 +420,18 @@ static int machine_step_loop(u64 count)
             break;
         }
 #endif
-        cpu_step(&g_m.cpu);
+        /* 中断/异常必须在执行下一条指令之前投递。以前这段在 cpu_step
+         * 之后：上一轮末尾 dev_tick 用 IF=1 抬起的定时器中断，会先让
+         * `syscall` 执行完（CS 已切 ring0、RSP 仍是用户栈、IF 被 FMASK
+         * 清掉），再把硬件帧压到用户栈上——用户栈正好在页边界时
+         * push 触发 #PF，页错误处理又在同一用户栈上压帧，整机自陷。
+         * find 偶发卡死/开机偶发 page fault 的根因（DESIGN §106）。 */
+        if (g_m.cpu.exc_pending) {
+            g_m.cpu.halted = 0;
+            cpu_deliver(&g_m.cpu);
+        } else {
+            cpu_step(&g_m.cpu);
+        }
 #if !defined(C6_WASM)
         /* 调试：RSP 落进 0xffffffff8…/c…（内核 text / 模块区）不可能是栈，
          * 一出现就打印最近 64 条 (RIP,RSP) 并停机。 */
@@ -490,13 +533,6 @@ static int machine_step_loop(u64 count)
             break;
         }
 #endif
-        if (g_m.cpu.exc_pending) {
-            /* HLT 之后立刻投递挂起中断：CPU 被唤醒，必须清 halted，
-             * 否则下一轮会被「halted 且 IF=0」误判成永久停机
-             * （实测 2261778433 条处 idle 的 sti;hlt 就撞在这条路径上）。 */
-            g_m.cpu.halted = 0;
-            cpu_deliver(&g_m.cpu);
-        }
 #if !defined(C6_WASM)
         if (g_m.snap_step != 0 && g_m.instructions >= g_m.snap_start &&
             (g_m.stopt == 0 || g_m.instructions <= g_m.stopt) &&

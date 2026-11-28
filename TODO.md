@@ -327,11 +327,13 @@
 - [x] 文档：DESIGN §103、README 启动说明
 - [ ] 模拟 PIT ch2 + HPET/ACPI PM timer，让内核校准 TSC（不再依赖启动时
       注入 `tsc=unstable`），同时保住 CPUID 0x16 的 2400MHz（DESIGN §104）
-- [x] `find /` 批处理被内核“致命信号栈回显”卡死：init 关
-      `debug/exception-trace` + `print-fatal-signals`，批量可跑完（22498
-      项）；交互/pty 仍偶发（DESIGN §105）
-- [ ] 入口栈问题：偶发 CPL=0 却用用户 RSP 进 `asm_exc_page_fault`
-      （`[RSPFIRST]`/`[RING8]`），用户栈边界上的递归 #PF 自陷；
-      `pcpu_hot.top_of_stack`/TSS.sp0/SYSCALL FMASK 均已验证正常，需继续
-      定位 `entry_SYSCALL_64`/`error_entry` 的栈切换（DESIGN §105）
+- [x] `find /` 卡死根因（DESIGN §106）：`exc_pending` 的投递原来在
+      `cpu_step()` 之后，dev_tick 在 IF=1 下抬起的定时器中断会先让
+      `syscall` 执行完（ring0 + 用户 RSP + IF=0），再把 5 槽硬件帧压到
+      用户栈上；栈指针在页边界时 #PF 递归自陷。已把投递移到 `cpu_step()`
+      之前（`[DELBAD]` 实测 vec=0x30/next_rip=entry_SYSCALL_64 命中）。
+      验证：native `find /` 连跑 15 次全完成，boot/difftest/wasm 全过
+- [x] 去掉 init 里关 `debug/exception-trace` + `print-fatal-signals` 的
+      临时措施：根因修掉后内核恢复默认 oops/致命信号栈回显，批量 find
+      仍正常
 

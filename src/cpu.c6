@@ -455,6 +455,7 @@ void cpu_deliver(struct CPUState *c)
     u8 has_ec = 0, type = 0;
     u32 sup0 = 0;
     u64 frf = 0;
+    u32 async0 = 0;
 
     if (!c->exc_pending) return;
     sup0 = g_m.emu_sup;
@@ -463,6 +464,7 @@ void cpu_deliver(struct CPUState *c)
     vec = c->exc_vec;
     has_ec = c->exc_has_ec;
     ec = c->exc_ec;
+    async0 = c->exc_async;
     c->exc_pending = 0;
     c->exc_async = 0;
     if (c->idtr_limit == 0) {
@@ -492,6 +494,25 @@ void cpu_deliver(struct CPUState *c)
         u64 old_cs = c->sel[1];
         u64 old_ss = c->sel[2];
         u32 cpl = (u32)(old_cs & 3);
+#if !defined(C6_WASM)
+        /* 回归探针（--rspcheck）：内核态（CPL0）却要在用户地址栈上投递
+         * 中断/异常。正常内核不会这样——定时器中断必须在执行下一条指令
+         * 之前投递（见 machine.c6），否则 syscall 之后的入口窗口里会
+         * 把硬件帧压到用户栈上（DESIGN §106）。 */
+        if (g_rsp_check && g_m.instructions > 500000000ull && cpl == 0 &&
+            old_rsp >= 0x10000ull && old_rsp < 0x800000000000ull) {
+            printf("[DELBAD] vec=%x async=%u next_rip=%llx rsp=%llx flags=%llx"
+                   " if=%u ec=%llx insns=%llu\n",
+                   (unsigned)vec, (unsigned)async0,
+                   (unsigned long long)c->rip,
+                   (unsigned long long)old_rsp,
+                   (unsigned long long)c->flags,
+                   (unsigned)((c->flags & RF_IF) != 0),
+                   (unsigned long long)ec,
+                   (unsigned long long)g_m.instructions);
+            fflush(stdout);
+        }
+#endif
         if (cpl != 0) {
             u64 toff = c->tr_sel & 0xfff8u;
             u64 d0 = mem_r64(c->gdtr_base + toff);

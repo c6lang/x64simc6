@@ -2299,6 +2299,42 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      否则内核为用户的致命信号展开 vmap 栈底时再次缺页，整机必陷。
      关闭后**批处理** `find / > /tmp/find.out` 可跑完（22498 项）；
      交互/pty 下仍偶发（与用户栈边界有关）。
-   - 探针（`C6_WASM` 外）：`--rspcheck`/`[RSPFIRST]`/`[RING8]`、`[PFT]`
+   - 探针（`C6_WASM` 外）：`--rspcheck`/`[RSPFIRST]`/`[RING64]`、`[PFT]`
      （同一内核地址反复缺页打 RIP/CR3）、`--no-pace`（关墙钟校准与 idle
      快进，便于逐条复现）。
+   - **后续（§106）**：根因是中断投递晚了一条指令——`exc_pending` 的
+     投递原本在 `cpu_step()` 之后，dev_tick 用 IF=1 抬起的定时器中断
+     会先让 `syscall` 执行完（ring0 + 用户 RSP + IF=0），再把硬件帧压到
+     用户栈上，栈指针在页边界时 #PF 递归自陷。已修复，并去掉 init 里
+     关致命信号回显的临时措施。
+
+106. **`find /` 卡死根因：中断投递晚了一条指令（本轮修复）**
+   - 现象：guest 里 `find / > /dev/null` 偶发整机卡死；开机也偶发
+     `login:` 前 `BUG: unable to handle page fault`。
+   - 探针：`--rspcheck` 新增 `[DELBAD]`（内核态却用用户地址栈投递）、
+     `[RSPSC]`（ring0+用户 RSP 出现在 syscall 入口/返回窗口之外）和
+     `[RSPFIRST]` 的 CR2；命中即停机并打印 64 条 (RIP,RSP) 环。
+   - 实测一次命中（约 13.7 亿条处）：
+     `[DELBAD] vec=30 async=1 next_rip=ffffffff81c00080 rsp=7ffe... flags=46 if=0`
+     —— 向量 0x30 是内核的 IRQ0_VECTOR（PIT），`next_rip` 正是
+     `entry_SYSCALL_64`。
+   - 机理：`machine_step_loop` 里 `if (exc_pending) cpu_deliver()` 原来在
+     `cpu_step()` **之后**。`dev_tick()` 在循环尾用 IF=1 抬起定时器中断，
+     下一轮却先执行了一条指令：若它是 `syscall`，CPU 已切到 ring0、
+     RIP=LSTAR、RSP 仍是用户栈、IF 被 FMASK 清零；随后投递时 CPU 认为
+     没有权限级变化，直接把 5 槽硬件帧压到用户栈上。用户栈指针正好
+     落在页边界（栈底 guard page）时，`push` 触发 #PF；#PF 的投递同样
+     在用户栈上压帧 → 页错误处理自陷。内核给用户致命信号展开 vmap
+     栈底（`ffffc90000003ff8`）时也是同一条路走到死循环。
+   - 修复：把挂起异常/中断的投递移到 `cpu_step()` **之前**——有 pending
+     就只投递、本轮不再执行指令。同步异常顺延到下一轮顶部投递，与
+     原来"指令执行后立刻投递"等价；HLT 唤醒路径不变（仍在 `dev_tick()`
+     之后立刻投递）。
+   - 连带清理：`tools/mkfw.py` 里"关 `debug/exception-trace` 和
+     `print-fatal-signals`"的临时措施不再需要，已去掉，内核恢复默认的
+     oops/致命信号栈回显。
+   - 验证：native `find / > /dev/null` 连跑 15 次全完成（修复前 1~2 次
+     内必卡，`[PFT]` 在 vmap 栈底打转）；`--rspcheck` 下 12 次无
+     `[DELBAD]/[RSPSC]/[RSPFIRST]`；`./build.sh test` 全过、
+     `boot_login.py` PASS、difftest 1252/1252、`wasm_cmp 50000000`
+     MATCH、`wasm_login` MARK-OK。
