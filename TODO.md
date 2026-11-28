@@ -174,11 +174,10 @@
 - [ ] wasm 代理下的 HTTPS：guest 的 ClientHello 已到代理、直接重放能拿到
       完整 ServerHello，但 example.com 的 CDN 边缘 ~2.4s 后直接关闭连接
       （native HTTPS 正常）；待查（DESIGN §101）。测试暂只断言 HTTP/ICMP
-- [ ] TSC/PIT 时间基准重做：现在没模拟 PIT 通道 2/HPET/PMTIMER，TSC 校不
-      准，`/proc/cpuinfo` 的 cpu MHz 是 0.000、BogoMIPS 77.80（这是诚实的
-      delay-loop 速度）。只伪造 CPUID 0x16=2400 会让 delay_tsc/udelay 慢
-      2000 倍、引导期 NMI 自检 soft lockup；要真实 TSC 频率 + PIT
-      1.193182MHz 解耦 + dev_tick 按 TSC 触发（DESIGN §104）
+- [x] TSC/PIT 时间基准重做：TSC 真跑 2.4GHz（每 150ms 按实测速率校准）、
+      PIT 1.193182MHz 换算、dev_tick 每 ~1ms、PIT mode 0 one-shot、
+      CPUID 0x16 报 2400MHz、cmdline 加 tsc=unstable；`/proc/cpuinfo`
+      2400.000、BogoMIPS 4801、无 watchdog/soft lockup（DESIGN §104）
 - [ ] 引导期偶发的「跳进 0x48/0x4a/0x4d 填充页」`#UD`（`--udtrace` 可见，
       进程被 SIGILL 但整机继续跑；引导、登录、`top` 都不受影响）。下一步用
       `--udtrace` + `dmesg` 的 `traps:` 行定位是哪条跳转把 RIP 带进数据页。
