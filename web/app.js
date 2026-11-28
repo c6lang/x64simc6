@@ -17,6 +17,7 @@ let term = null;
 let serialLog = '';
 let db = null;
 let running = false;
+let fwLoaded = false;      /* sim_init 成功过才允许「启动」 */
 let raf = 0;
 let totalInsns = 0;
 let lastSync = 0;
@@ -221,6 +222,7 @@ async function bootFirmware(fw, label, seq) {
   put(FW_STAGE, fw);
   const rc = wasm.sim_init(FW_STAGE, fw.length);
   if (rc !== 0) throw new Error(`sim_init 返回 ${rc}（不是可引导的固件？）`);
+  fwLoaded = true;
   term.reset();
   serialLog = '';
   sawSerial = false;
@@ -402,6 +404,10 @@ $('load').onclick = loadFirmware;
 $('fwfile').onchange = loadFirmwareFile;
 $('start').onclick = () => {
   if (!wasm) { status('请先加载 wasm'); return; }
+  if (!fwLoaded) {
+    status('请先「加载固件」：下拉选内置固件，或选本地 .bin');
+    return;
+  }
   if (!running) { running = true; setTimeout(() => term.focus(), 0); status('运行中…'); loop(); }
 };
 $('pause').onclick = () => { running = false; cancelAnimationFrame(raf); status('已暂停'); exportFiles(); };

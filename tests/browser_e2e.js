@@ -138,6 +138,13 @@ async function main() {
     if (!get.includes('hello')) throw new Error('hostfs get UI 失败: ' + get);
     console.log('[browser] wasm hostfs get OK:', get);
 
+    // 没加载固件就点「启动」：必须被拦住（否则跑的是复位向量，只有计数没有串口）
+    await evaluate(`document.getElementById('start').click()`);
+    await sleep(100);
+    const noFw = await evaluate(`document.getElementById('status').textContent`);
+    if (!(noFw || '').includes('请先')) throw new Error('未加载固件时启动没被拦下: ' + noFw);
+    console.log('[browser] 未加载固件时启动被拦下 OK:', noFw);
+
     // 固件下拉：两个内置固件都能选
     const fwOpts = await evaluate(`[...document.querySelectorAll('#fwurl option')].map(o => o.value).join(',')`);
     if (fwOpts !== 'firmware.bin,c6os.bin') throw new Error('固件下拉选项不对: ' + fwOpts);
