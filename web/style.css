@@ -8,7 +8,8 @@ main { display: grid; grid-template-columns: 340px 1fr; gap: 12px; padding: 12px
 .panel.grow { grid-row: span 2; display: flex; flex-direction: column; }
 h2 { font-size: 14px; margin: 0 0 10px; color: #7fd1c1; }
 label { display: block; margin: 8px 0; font-size: 12px; color: #9fb2c4; }
-input { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px; background: #0d1218; color: #d6e0ea; border: 1px solid #33404f; border-radius: 4px; }
+input, select { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px; background: #0d1218; color: #d6e0ea; border: 1px solid #33404f; border-radius: 4px; }
+select { cursor: pointer; }
 .row { display: flex; gap: 6px; align-items: center; }
 .row input { flex: 1; }
 button { padding: 6px 10px; background: #2a6f68; color: white; border: 0; border-radius: 4px; cursor: pointer; }

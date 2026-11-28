@@ -11,10 +11,13 @@
 <main>
   <section class="panel">
     <h2>固件与网络</h2>
-    <label>固件 URL <input id="fwurl" value="firmware.bin"></label>
+    <label>固件 <select id="fwurl">
+      <option value="firmware.bin" selected>firmware.bin（Linux）</option>
+      <option value="c6os.bin">c6os.bin（c6os + Alpine）</option>
+    </select></label>
     <label>本地固件（直接选 .bin，不上传）<input id="fwfile" type="file"
       accept=".bin,application/octet-stream"></label>
-    <p class="hint">Linux 固件和 c6os/Alpine 固件都行；选完点「启动」。</p>
+    <p class="hint">下拉选内置固件，或选本地 .bin；选完点「启动」。</p>
     <div class="row">
       <button id="load">加载固件</button>
       <button id="start">启动</button>
