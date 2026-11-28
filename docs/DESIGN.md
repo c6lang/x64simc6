@@ -2206,3 +2206,29 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      **顺带记录**：`pci=conf1` 让内核真的枚举到 8086:1237 之后，
      `pci 0000:00:00.0: Limiting direct PCI/PCI transfers` 是 i440FX 的
      正常 quirk 输出（KERN_INFO，loglevel=4 看不到），不是错误。
+
+104. **CPU MHz 0、BogoMIPS 77.8：不要伪造 CPUID 0x16 的频率**。guest 里
+     `tsc: Fast TSC calibration failed` / `Unable to calibrate against PIT` /
+     `No reference (HPET/PMTIMER) available`，因为模拟器没实现 PIT 通道 2、
+     HPET 和 ACPI PM timer，TSC 校不准，`cpu_khz = 0`，于是
+     `/proc/cpuinfo` 显示 `cpu MHz : 0.000`，clocksource 回落到
+     refined-jiffies；`BogoMIPS 77.80` 是这台解释器真实的 delay-loop 速度，
+     不是 bug（JSLinux 的 BogoMIPS 高来自它自己的虚拟 TSC/CPU 模型，不能
+     直接比）。
+
+     踩过的坑：只把 CPUID 0x16 的 base/max 报成 2400MHz 能让
+     `/proc/cpuinfo` 显示 2400.000，但内核会**相信 TSC 就是 2.4GHz**；
+     实际 TSC 只有 ~1.19MHz。`delay_tsc`/`udelay` 于是慢约 2000 倍：
+     引导期 NMI 自检 `nmi_selftest` 里的 delay 把 CPU 卡住 26 秒，打出
+     `BUG: soft lockup - CPU#0 stuck for 26s!` 和 clocksource watchdog
+     的 `skewed -505ms`；`tsc=unstable`/`notsc` 也挡不住 delay_tsc 的
+     选择。随后试了「TSC 真跑 2.4GHz + PIT 按 1.193182MHz 换算 + 每条
+     指令按实测速率加 TSC」：watchdog 干净、BogoMIPS 变成 4801（内核按
+     2.4GHz 直接算的），但引导在 SLIP init 附近变得极慢/卡住（PIT 中断
+     频率、dev_tick 间隔和指令速率耦合），交互引导 300 秒都到不了
+     login，只能回滚。
+
+     **结论**：0.000MHz / 77.8 BogoMIPS 是当前实现的诚实结果；要修就得做
+     完整的 TSC/PIT 时间基准重做（真实 TSC 频率、PIT 1.193MHz 与 TSC
+     解耦、dev_tick 按 TSC 而不是按指令数触发、同步改 wasm/difftest 的
+     确定性），不能只改 CPUID 0x16。
