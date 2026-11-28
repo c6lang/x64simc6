@@ -107,6 +107,13 @@ def make_initrd(tar_path, modules_dir=None):
         # /dev 必须是 devtmpfs，否则 getty/login 打不开 /dev/ttyS0
         f.write('mkdir -p /dev\n')
         f.write('mount -t devtmpfs dev /dev 2>/dev/null\n')
+        # 内核在用户进程致命信号/缺页 oops 时会 dump 栈；本模拟器的
+        # get_stack_info 展开在 vmap 栈底会再次缺页，页错误处理自陷，
+        # 整个 guest 卡死（find / 的 /proc/<pid>/net 路径、网络固件
+        # 偶发 login 前 #PF 都是这个）。关掉致命信号栈回显，进程照常
+        # 被 SIGSEGV 杀死，整机不再自陷。
+        f.write('echo 0 > /proc/sys/debug/exception-trace 2>/dev/null\n')
+        f.write('echo 0 > /proc/sys/kernel/print-fatal-signals 2>/dev/null\n')
         if kver:
             # 用户态外网：第二串口 ttyS1 跑 SLIP，模拟器侧是用户态 NAT。
             # 地址沿用 QEMU user networking：guest 10.0.2.15 / peer 10.0.2.2 /

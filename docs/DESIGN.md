@@ -2278,3 +2278,27 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      boot_smoke/payload_cmp/fixed/snap/shrd/smoke 全过。PIT ch2 校准可后续
      补，但有了 §103 的 TSC 2.4GHz 已不阻塞 CPU MHz/BogoMIPS。
 
+
+105. **`find /` 卡死 / 内核栈跑到用户栈（诊断中）**：guest 连续做大量
+   `/proc`/`/sys` 访问（`find / > /dev/null`）时偶发整机自陷。`--rspcheck`
+   （`bad_stack_ptr` 命中即停）抓到：
+   - 停机点：`asm_exc_page_fault+0x0`，RSP=`0x7ffe...`（**用户栈**），
+     但 CS 的 CPL=0；前 8 条 RIP 是 `common_interrupt+0x27..0x6b`，即外部
+     中断在 **CPL=0 且 RSP 仍在用户栈**时投递，随后压栈/取页触发 #PF；
+     递归 `get_stack_info_noinstr`（`ffffffff81bb728c`）在
+     `ffffc90000003ff8`（vmap 栈底）反复缺页 → 死循环。
+   - 已排除：`pcpu_hot.top_of_stack`（`gs+0x2e818`，CONFIG_CALL_DEPTH_TRACKING
+     下偏移 0x18）正确指向任务内核栈顶（`ffffc900001e0000`）；TSS.sp0 正确
+     （CEA 入口栈 `fffffe0000003000`）；SYSCALL 的 FMASK=`0x257fd5` 含 IF
+     （0x200），入口前几条指令 IF=0；PIC 投递检查 IF；用户态异常经 TSS/CEA
+     栈再 `sync_regs` 到任务栈，均正常。
+   - 仍疑：某条入口/返回路径让内核在用户 RSP 上继续执行（疑似
+     `entry_SYSCALL_64` 的 `mov %gs:top,%rsp` 或 `error_entry` 的栈切换
+     在竞态下未生效），尚未定位到指令级。
+   - 缓解：init 关 `debug/exception-trace` 与 `print-fatal-signals`——
+     否则内核为用户的致命信号展开 vmap 栈底时再次缺页，整机必陷。
+     关闭后**批处理** `find / > /tmp/find.out` 可跑完（22498 项）；
+     交互/pty 下仍偶发（与用户栈边界有关）。
+   - 探针（`C6_WASM` 外）：`--rspcheck`/`[RSPFIRST]`/`[RING8]`、`[PFT]`
+     （同一内核地址反复缺页打 RIP/CR3）、`--no-pace`（关墙钟校准与 idle
+     快进，便于逐条复现）。

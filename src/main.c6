@@ -504,6 +504,7 @@ int main(int argc, char **argv)
     int a = 1;
     (void)0;
     int payload = 0;
+    int nopace = 0;
     int ppt = 0;
     int sample = 0;
     int sys_trace = 0;
@@ -523,6 +524,8 @@ int main(int argc, char **argv)
     for (a = 1; a < argc; a++) {
         if (strcmp(argv[a], "--payload") == 0)
             payload = 1;
+        else if (strcmp(argv[a], "--no-pace") == 0)
+            nopace = 1;
         else if (strncmp(argv[a], "--cmdline=", 10) == 0)
             cmdline = argv[a] + 10;
         else if (strncmp(argv[a], "--rtc=", 6) == 0)
@@ -618,6 +621,8 @@ int main(int argc, char **argv)
         }
     }
 
+    if (nopace)
+        machine_set_paced(0);   /* 交互/调试：不做墙钟校准和 idle 快进 */
     g_m.watch_fd = -1;
 #if !defined(C6_WASM)
     g_m.watch_fd = open("/tmp/simwatch.bin", 1 | 0x40 | 0x200 | 0x400, 0644);

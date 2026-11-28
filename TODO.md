@@ -327,4 +327,11 @@
 - [x] 文档：DESIGN §103、README 启动说明
 - [ ] 模拟 PIT ch2 + HPET/ACPI PM timer，让内核校准 TSC（不再依赖启动时
       注入 `tsc=unstable`），同时保住 CPUID 0x16 的 2400MHz（DESIGN §104）
+- [x] `find /` 批处理被内核“致命信号栈回显”卡死：init 关
+      `debug/exception-trace` + `print-fatal-signals`，批量可跑完（22498
+      项）；交互/pty 仍偶发（DESIGN §105）
+- [ ] 入口栈问题：偶发 CPL=0 却用用户 RSP 进 `asm_exc_page_fault`
+      （`[RSPFIRST]`/`[RING8]`），用户栈边界上的递归 #PF 自陷；
+      `pcpu_hot.top_of_stack`/TSS.sp0/SYSCALL FMASK 均已验证正常，需继续
+      定位 `entry_SYSCALL_64`/`error_entry` 的栈切换（DESIGN §105）
 
