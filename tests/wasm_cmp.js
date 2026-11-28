@@ -60,7 +60,7 @@ async function wasmSnapshot() {
   inst = await WebAssembly.instantiate(mod, hasJit ? { env: jit.env } : {});
   const w = inst.exports;
   if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
-  const STAGE = 0x0d800000;
+  const STAGE = w.sim_fw_stage_ptr ? Number(w.sim_fw_stage_ptr()) : 0x0d800000;
   const fw = new Uint8Array(fs.readFileSync(FW));
   const mem = new Uint8Array(w.memory.buffer);
   if (STAGE + fw.length > mem.length) throw new Error('stage overflow');

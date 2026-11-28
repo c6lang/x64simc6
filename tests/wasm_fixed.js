@@ -14,7 +14,7 @@ const { makeJitEnv } = require('./jit_hooks');
 
 const ROOT = path.dirname(__dirname);
 const N = Number(process.argv[2] || 20000000);
-const STAGE = 0x0d800000;
+const STAGE = w.sim_fw_stage_ptr ? Number(w.sim_fw_stage_ptr()) : 0x0d800000;
 const SCRATCH = 0x0f800000;
 const CAP = 1 << 16;
 

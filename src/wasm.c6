@@ -21,6 +21,11 @@ void sim_set_paced(int v)
     machine_set_paced(v);
 }
 
+u32 sim_fw_stage_ptr(void)
+{
+    return (u32)(unsigned long)g_fw_stage;
+}
+
 int sim_init(u8 *fw, int len)
 {
     u32 i = 0;
