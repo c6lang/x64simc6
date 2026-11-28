@@ -321,3 +321,6 @@
       `boot_login.py` PASS（880B LOG）；`wasm_login.js` OK（49s/418B）；
       `./build.sh test` 全过；difftest 1252/1252
 - [x] 文档：DESIGN §103、README 启动说明
+- [ ] 模拟 PIT ch2 + HPET/ACPI PM timer，让内核校准 TSC（不再依赖启动时
+      注入 `tsc=unstable`），同时保住 CPUID 0x16 的 2400MHz（DESIGN §104）
+

@@ -20,6 +20,10 @@
 #define H_VERSION        0x15u
 #define H_HEADER_MAGIC   0x11u
 
+/* wasm 调用者在 sim_init 里已设过 cmdline 时置 1：machine_boot_staged
+ * 不再用固件内建值覆盖它（native 的 --cmdline 也是在 load 之后覆盖）。 */
+u32 g_boot_user_cmdline_set = 0;
+
 /* 固件长度单独放全局：c6 的 wasm 后端在「结构体里紧跟在指针后的 u32 成员」上
  * 读写偏移不一致（native 正常），用它绕开，保证浏览器也能引导完整固件。 */
 u32 g_fw_klen = 0;
@@ -222,17 +226,38 @@ int machine_boot_staged(u8 *base, u32 koff, u32 klen,
     g_m.fw_initrd_len = ilen;
     g_fw_klen = klen;
     g_fw_ilen = ilen;
-    if (coff != 0 && clen != 0) {
+    if (!g_boot_user_cmdline_set && coff != 0 && clen != 0) {
         u32 n = clen;
         if (n > sizeof(g_m.cmdline) - 1) n = sizeof(g_m.cmdline) - 1;
         for (k = 0; k < n; k++) g_m.cmdline[k] = base[coff + k];
         g_m.cmdline[k] = 0;
         g_m.cmdline_len = n;
     }
-    /* 和 native 的时序一致：先固件内建 cmdline，再让调用者的覆盖 */
-    if (cmd != 0)
-        machine_set_cmdline(cmd);
+    /* 调用者的 cmdline 已在 machine_boot_staged 之前由 sim_init 设好；
+     * 第 8 个参数（cmd）在 c6 wasm 后端不可靠，保留但忽略。 */
+    (void)cmd;
     return machine_boot();
+}
+
+static char g_boot_cmd[256];   /* machine_boot 组装 guest cmdline 的暂存 */
+
+static int cmpn_tok(const u8 *p, const char *tok, u32 n)
+{
+    u32 i = 0;
+    for (i = 0; i < n; i++)
+        if (p[i] != (u8)tok[i]) return 0;
+    return 1;
+}
+
+static int cmd_has(const char *s, const char *pat)
+{
+    int i = 0, j = 0;
+    for (i = 0; s[i] != 0; i++) {
+        for (j = 0; pat[j] != 0; j++)
+            if (s[i + j] != pat[j]) break;
+        if (pat[j] == 0) return 1;
+    }
+    return 0;
 }
 
 int machine_boot(void)
@@ -254,10 +279,42 @@ int machine_boot(void)
        也是字节循环，这里按 4 字节块搬（wasm32 下 u32 指针最稳）。 */
     copy_to_ram(KERNEL_PA, g_m.fw_kernel, g_fw_klen);
     copy_to_ram(INITRD_PA, g_m.fw_initrd, g_fw_ilen);
-    for (i = 0; i < g_m.cmdline_len; i++)
-        mem_w8(CMDLINE_PA + i, g_m.cmdline[i]);
-    mem_w8(CMDLINE_PA + g_m.cmdline_len, 0);
-    cmdlen = g_m.cmdline_len;
+    /* guest cmdline 统一处理：
+     * - 去掉 noapic/nolapic：本机 LAPIC/IOAPIC 是模拟的，关掉后内核走
+     *   8259/PIT 路径，在 CPUID 0x16 + TSC 快进钟下会卡在 smp/IPI 后
+     *   （实测 1.5G 指令仍未到 init）。
+     * - 补 tsc=unstable：快进 TSC（1.19MHz）对内核是不稳定时钟源，不补
+     *   会走 tsc-early，watchdog 判 skew 后 No current clocksource 卡死；
+     *   补上后回落 refined-jiffies。用户显式写了就不重复。 */
+    {
+        u32 cl = 0, ci = 0, n = (u32)g_m.cmdline_len;
+        char *cmd = g_boot_cmd;
+        if (n > 240) n = 240;
+        while (ci < n) {
+            u32 st = ci, tl = 0, k = 0;
+            while (ci < n && g_m.cmdline[ci] != ' ') ci++;
+            tl = ci - st;
+            if (!(tl == 6 && cmpn_tok(&g_m.cmdline[st], "noapic", 6)) &&
+                !(tl == 7 && cmpn_tok(&g_m.cmdline[st], "nolapic", 7)) &&
+                tl != 0) {
+                if (cl != 0 && cl < 250) cmd[cl++] = ' ';
+                for (k = 0; k < tl && cl < 250; k++)
+                    cmd[cl++] = (char)g_m.cmdline[st + k];
+            }
+            if (ci < n) ci++;
+        }
+        cmd[cl] = 0;
+        if (!cmd_has(cmd, "tsc=unstable")) {
+            const char *t = " tsc=unstable";
+            u32 k = 0;
+            while (t[k] != 0 && cl < 254) cmd[cl++] = t[k++];
+            cmd[cl] = 0;
+        }
+        for (i = 0; i < cl; i++)
+            mem_w8(CMDLINE_PA + i, (u8)cmd[i]);
+        mem_w8(CMDLINE_PA + cl, 0);
+        cmdlen = cl;
+    }
 
     build_e820(m);
     build_pvh_start_info();

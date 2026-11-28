@@ -2227,3 +2227,34 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      TSC 标成 unstable 并回落到 refined-jiffies——**时间、定时器、
      login/top/ping 的行为都不变**，只是 dmesg 多一条 watchdog 警告。
      验证：guest 里 `/proc/cpuinfo` 2400.000，`date`/`sleep 5` 正常。
+
+104. **启动回归修复（本轮）**：`2ad2583`（CPUID 0x16）之后 900M 条到不了
+     login，并且 wasm/native 对拍在低 1MB 出现分叉。根因有四层：
+     - **cmdline 传参**：`sim_set_cmdline` 收的是 wasm 线性内存偏移，测试却
+       直接传 JS 字符串（=垃圾指针），于是 wasm 一直用固件内建 cmdline，
+       native 用 `--cmdline`，boot_params/cmdline 在低 1MB 就不同 → chunk 0
+       差异、1M 起 r1 分叉。修：`sim_set_cmdline` 真正拷贝到 `g_sim_cmdline`
+       并置 `g_sim_cmdline_set`；`machine_boot_staged` 只在调用者没给 cmdline
+       时才用固件内建（`g_boot_user_cmdline_set`）；测试统一把串写进
+       `sim_fw_stage_ptr()+fw.length` 再传偏移（不再写死 0x0d800000）。
+     - **RTC**：native 用宿主时间、wasm 用固定 epoch，开机路径读 RTC → 随机
+       分叉。新增 native `--rtc=SECS`；wasm_cmp/fixed/snap 两侧都固定
+       `1795000000`。
+     - **clocksource**：CPUID 0x16 报 2400MHz，而快进 TSC 只有 ~1.19MHz，
+       watchdog 判 TSC unstable → `No current clocksource`，内核时间基停摆；
+       并且 `noapic nolapic` 下内核走 8259/PIT，SMP 初始化后卡死。修：
+       `machine_boot` 统一从 guest cmdline 里剥掉 `noapic/nolapic`，并在
+       用户没写时追加 `tsc=unstable`（内核直接回落 refined-jiffies）。
+       实测 native/wasm 都在 830M 条前到 `(none) login:`；wasm_login
+       `MARK-OK`（829,716,603 条 / 52s），JIT 开/关串口 SHA 完全相同。
+     - **工具/测试**：`parse_num` 支持 `0x`（`--memhash/--snap/--stopt`）；
+       `sim_mem_hash_region(u32,u32)` 修 wasm 传参（原 u64 全区间同哈希）；
+       `--dumpregs` 先补换行（payload 串口无结尾换行时 `[REG]` 被前缀吞）；
+       wasm_login/fixed 的 `w` 未定义、boot_smoke 的安静 cmdline、snap 的
+       RTC、payload_cmp 的默认 payload 等测试 bug 全修。
+     **验收**：`./build.sh test`、difftest **1252/1252**、wasm_cmp 50M
+     MATCH（JIT 0/1）、wasm_login MARK-OK（串口 SHA 一致）、`./build.sh jit`、
+     boot_smoke/payload_cmp/fixed/snap/shrd/smoke 全过。
+     **后续（TODO）**：模拟 PIT ch2/HPET/ACPI PM timer，让内核能校准 TSC，
+     取代 `tsc=unstable`，同时保住 `/proc/cpuinfo` 的 2400MHz。
+

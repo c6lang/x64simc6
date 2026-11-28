@@ -21,7 +21,8 @@ function nativeSnapshot() {
   try {
     const args = ['--stopt=' + N, '--dumpregs'];
     if (process.env.REGION) args.push('--memhash=' + process.env.REGION);
-    args.push('--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1', FW);
+    args.push('--cmdline=console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1',
+              '--rtc=1795000000', FW);
     out = execFileSync(SIM, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
                                    timeout: 600000 });
   } catch (e) {
@@ -65,7 +66,15 @@ async function wasmSnapshot() {
   const mem = new Uint8Array(w.memory.buffer);
   if (STAGE + fw.length > mem.length) throw new Error('stage overflow');
   mem.set(fw, STAGE);
-  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
+  /* sim_set_cmdline 收的是 wasm 线性内存指针（C 字符串），不能直接传 JS 串；
+   * 写到 staging 固件之后（g_fw_stage 内、boot 不会读的区域）再传偏移。 */
+  {
+    const cmd = 'console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1';
+    const off = STAGE + fw.length;
+    new Uint8Array(w.memory.buffer).set(new TextEncoder().encode(cmd + '\0'), off);
+    w.sim_set_cmdline(off);
+    w.sim_set_rtc(1795000000);
+  }
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
   if (w.sim_set_paced) w.sim_set_paced(0);   /* 对拍/序列：固定 1/17，不按墙钟校准 */
@@ -124,7 +133,7 @@ async function wasmSnapshot() {
            memregion: (() => {
              if (!process.env.REGION) return null;
              const [rs, rl] = process.env.REGION.split(',').map(Number);
-             return BigInt.asUintN(64, w.sim_mem_hash_region(BigInt(rs), BigInt(rl))).toString(16);
+             return BigInt.asUintN(64, w.sim_mem_hash_region(rs, rl)).toString(16);
            })() };
 }
 

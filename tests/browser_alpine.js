@@ -95,7 +95,12 @@ async function main() {
       const mem = new Uint8Array(w.memory.buffer);
       if (STAGE + fw.length > mem.length) throw new Error('stage overflow ' + mem.length);
       mem.set(fw, STAGE);
-      w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
+      {
+    const _cmd = 'console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1';
+    const _off = STAGE + fw.length;
+    new Uint8Array(w.memory.buffer).set(new TextEncoder().encode(_cmd + '\0'), _off);
+    w.sim_set_cmdline(_off);
+  }
       const rc = w.sim_init(STAGE, fw.length);
       w.sim_riptrace_start();
       window.__w = w;

@@ -45,8 +45,10 @@ int sim_init(u8 *fw, int len)
     cl = fw_rd32(36);
     if (mag != 0x57463643u || hver != 1u) return -2;
     if (kl == 0 || ko + kl > (u32)len || io + il > (u32)len) return -4;
-    return machine_boot_staged(g_fw_stage, ko, kl, io, il, co, cl,
-                               g_sim_cmdline_set ? g_sim_cmdline : 0);
+    g_boot_user_cmdline_set = g_sim_cmdline_set ? 1u : 0u;
+    if (g_sim_cmdline_set)
+        machine_set_cmdline(g_sim_cmdline);
+    return machine_boot_staged(g_fw_stage, ko, kl, io, il, co, cl, 0);
 }
 
 static u8 g_payload_stage[8192];
@@ -166,7 +168,7 @@ u32 sim_ram_byte(u32 pa)
     return (u32)g_m.ram[pa];
 }
 
-u64 sim_mem_hash_region(u64 start, u64 len)
+u64 sim_mem_hash_region(u32 start, u32 len)
 {
     u64 h = 0xcbf29ce484222325ull;
     u64 i = 0;
@@ -225,6 +227,12 @@ int sim_set_host_ms(u32 ms)
 
 int sim_set_cmdline(const char *s)
 {
+    u32 i = 0;
+    if (s == 0) return -1;
+    for (i = 0; s[i] != 0 && i < sizeof(g_sim_cmdline) - 1; i++)
+        g_sim_cmdline[i] = s[i];
+    g_sim_cmdline[i] = 0;
+    g_sim_cmdline_set = 1;
     machine_set_cmdline(s);
     return 0;
 }

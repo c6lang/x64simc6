@@ -2,8 +2,9 @@
 // RIP、flags。秒级完成（payload 只有几条指令）。
 // 用法: node tests/wasm_payload_cmp.js <payload.bin> [N] [--quiet]
 const fs = require('fs');
+const path = require('path');
 const { execFileSync } = require('child_process');
-const payload = process.argv[2];
+const payload = process.argv[2] || path.join(path.dirname(__dirname), 'build', 'hello64.bin');
 const N = parseInt(process.argv[3] || '8', 10);
 const quiet = process.argv.includes('--quiet');
 const SIM = process.env.SIM || 'build/sim';

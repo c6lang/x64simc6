@@ -322,3 +322,8 @@ wasm 也从 tcc-c6 换成了同一套「ctu + `clang -O2` + `wasm-ld`」：20M �
 Jcc rel32，200M 条宿主指令再降到 **66.4G（-6.1%）**，配对墙钟 9.60s →
 9.33s；difftest 1252/1252、wasm_cmp 50M MATCH、boot_login 全过。
 细节见 `docs/DESIGN.md` §97。
+
+> **启动/对拍注意**：固件默认 cmdline 是 `console=ttyS0,115200 earlycon=... loglevel=7 ... acpi=off pci=conf1`；
+> `machine_boot` 会在 guest cmdline 里剥掉 `noapic/nolapic` 并追加 `tsc=unstable`
+> （否则 clocksource watchdog 停掉时间基，900M 条也到不了 login）。对拍时两端要用
+> `--rtc=SECS` / `sim_set_rtc(SECS)` 固定 RTC，否则开机路径读 RTC 会随机分叉（DESIGN §104）。

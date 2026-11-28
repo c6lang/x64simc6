@@ -95,7 +95,7 @@ static int bad_stack_ptr(u64 rsp)
 
 static const char default_cmdline[] =
     "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 "
-    "loglevel=7 panic=-1 reboot=k acpi=off noapic nolapic pci=conf1";
+    "loglevel=7 panic=-1 reboot=k acpi=off pci=conf1";
 
 void machine_reset(void)
 {

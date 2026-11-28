@@ -251,6 +251,7 @@ int machine_boot(void);
 int machine_boot_payload(u8 *code, u32 len, u64 addr);
 int machine_run(u64 count);
 void machine_set_cmdline(const char *s);
+extern u32 g_boot_user_cmdline_set;
 
 #if defined(C6_JIT)
 /* jit_wasm.c：wasm 后端 JIT 编码器（默认构建不链接，JIT=1 时启用） */

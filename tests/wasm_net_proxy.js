@@ -97,7 +97,12 @@ function freePort() {
   }
 
   try {
-    w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
+    {
+    const _cmd = 'console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1';
+    const _off = STAGE + fw.length;
+    new Uint8Array(w.memory.buffer).set(new TextEncoder().encode(_cmd + '\0'), _off);
+    w.sim_set_cmdline(_off);
+  }
     if (w.sim_init(STAGE, fw.length) !== 0) throw new Error('sim_init 失败');
     if (!await runFor(300000, () => text.includes('login:'))) throw new Error('没到 login:');
     console.log('[wasm-net] 进入 login（insns=%d，代理 rx/tx=%d/%d）',

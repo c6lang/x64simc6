@@ -14,7 +14,7 @@ const fs = require('fs');
 
 const FW = process.env.FW || 'build/firmware.bin';
 const WASM = process.env.WASM || 'web/sim.wasm';
-const MAX = Number(process.env.MAX_INSNS || 8000000);
+const MAX = Number(process.env.MAX_INSNS || 50000000);
 const CHUNK = 2000000;
 const STAGE = 0x0d800000;   /* 固件暂存区 */
 const SCRATCH = 0x0f800000; /* 串口取字节的暂存区（都在线性内存内） */
@@ -28,7 +28,8 @@ const CAP = 1 << 16;
   if (STAGE + fw.length > mem.length) throw new Error('stage 越界');
   mem.set(fw, STAGE);
 
-  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
+  /* 用固件内建 cmdline（earlycon + loglevel=7）：内核早期日志能进串口；
+   * 传 loglevel=4 的安静 cmdline 会让串口直到 login(~830M) 才有字节。 */
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) { console.log('sim_init 失败 rc =', rc); process.exit(1); }
 
@@ -51,7 +52,9 @@ const CAP = 1 << 16;
 
   const insns = Number(w.sim_insns());
   const hi = Number(w.sim_halt_info());
-  console.log(`insns=${insns} serial=${bytes}B halt_info=${hi} last_rip=0x${Number(w.sim_last_rip()).toString(16)}`);
+  const ripv = w.sim_last_rip();
+  const ripHex = typeof ripv === 'bigint' ? ripv.toString(16) : Number(ripv).toString(16);
+  console.log(`insns=${insns} serial=${bytes}B halt_info=${hi} last_rip=0x${ripHex}`);
   if (bytes > 0) {
     console.log('串口片段:', JSON.stringify(text.slice(0, 300)));
   } else {

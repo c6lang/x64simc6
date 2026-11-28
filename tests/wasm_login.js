@@ -14,7 +14,6 @@ const ROOT = path.dirname(__dirname);
 const MAX = Number(process.env.MAX_INSNS || 3000000000);
 const CHUNK = Number(process.env.CHUNK || 2000000);
 const SCRATCH = 0x0f800000;
-const STAGE = w.sim_fw_stage_ptr ? Number(w.sim_fw_stage_ptr()) : 0x0d800000;
 const INBUF = 0x0f900000;
 const CAP = 1 << 16;
 
@@ -27,6 +26,7 @@ const CAP = 1 << 16;
   const jit = makeJitEnv(() => instance);
   instance = await WebAssembly.instantiate(mod, hasJit ? { env: jit.env } : {});
   const w = instance.exports;
+  const STAGE = w.sim_fw_stage_ptr ? Number(w.sim_fw_stage_ptr()) : 0x0d800000;
   if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
   if (hasJit && process.env.JIT_MIN_N && w.sim_set_jit_min_n) w.sim_set_jit_min_n(Number(process.env.JIT_MIN_N));
   const mem = new Uint8Array(w.memory.buffer);

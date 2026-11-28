@@ -14,7 +14,6 @@ const { makeJitEnv } = require('./jit_hooks');
 
 const ROOT = path.dirname(__dirname);
 const N = Number(process.argv[2] || 20000000);
-const STAGE = w.sim_fw_stage_ptr ? Number(w.sim_fw_stage_ptr()) : 0x0d800000;
 const SCRATCH = 0x0f800000;
 const CAP = 1 << 16;
 
@@ -27,11 +26,18 @@ const CAP = 1 << 16;
   const jit = makeJitEnv(() => inst);
   inst = await WebAssembly.instantiate(mod, hasJit ? { env: jit.env } : {});
   const w = inst.exports;
+  const STAGE = w.sim_fw_stage_ptr ? Number(w.sim_fw_stage_ptr()) : 0x0d800000;
   if (hasJit && process.env.JIT_OFF === '1' && w.sim_set_jit) w.sim_set_jit(0);
 
   const mem = new Uint8Array(w.memory.buffer);
   mem.set(fw, STAGE);
-  w.sim_set_cmdline('console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1');
+  {
+    const cmd = 'console=ttyS0,115200 loglevel=4 panic=-1 acpi=off pci=conf1';
+    const off = STAGE + fw.length;
+    new Uint8Array(w.memory.buffer).set(new TextEncoder().encode(cmd + '\0'), off);
+    w.sim_set_cmdline(off);
+    w.sim_set_rtc(1795000000);
+  }
   const rc = w.sim_init(STAGE, fw.length);
   if (rc !== 0) throw new Error('sim_init rc=' + rc);
   if (w.sim_set_paced) w.sim_set_paced(0);   /* 对拍/序列：固定 1/17，不按墙钟校准 */
