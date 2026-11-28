@@ -98,7 +98,7 @@ PY
 # 快速路径：每个 TU 各自 --emit-ctu → 宿主 cc -O2 → 一次性链接
 native_fast() {
     mkdir -p build/ctu
-    for f in $CORE src/main.c6; do
+    for f in $CORE src/wsgate.c6 src/main.c6; do
         n=$(basename "$f" .c6)
         "$C6C" --emit-ctu -I src "$f" -o "build/ctu/$n.c"
         ctu_fixup "build/ctu/$n.c"
@@ -110,7 +110,7 @@ native_fast() {
 }
 
 native_pure() {
-    "$C6C" -DC6_PURE=1 -I src $CORE src/main.c6 -o build/sim
+    "$C6C" -DC6_PURE=1 -I src $CORE src/wsgate.c6 src/main.c6 -o build/sim
     echo "native: build/sim (c6c 自举)"
 }
 
@@ -198,12 +198,14 @@ test_all() {
     echo "test: payload smoke OK"
     for t in tests/test_cpu.c6 tests/test_cpl3.c6 tests/test_pcache.c6; do
         if [ -f "$t" ]; then
-            "$C6C" -I src $CORE src/hostfs.c6 "$t" -o "build/$(basename "$t" .c6)" >/dev/null
+            "$C6C" -I src $CORE src/hostfs.c6 src/wsgate.c6 "$t" -o "build/$(basename "$t" .c6)" >/dev/null
             "./build/$(basename "$t" .c6)"
         fi
     done
     node tests/netshim_proxy.js
     echo "test: netshim upstream proxy OK"
+    node tests/serve_e2e.js
+    echo "test: --serve HTTP+WebSocket+SLIP OK"
     wasm
     node tests/wasm_smoke.js web/sim.wasm build/hello64.bin
 }

@@ -377,3 +377,15 @@
 - [x] 文档：DESIGN §108/§109、README「c6os + Alpine」
 - [ ] 后续（未做）：c6os 的 e1000 网卡、`/data` 持久化（现在写客户机 RAM）、
       busybox sweep 全量跑完的加速
+
+## build/sim --serve（去掉 Node 网关）
+
+- [x] `src/wsgate.c6`：C6 实现 HTTP 静态站 + WebSocket 握手/帧 +
+      SLIP↔NAT（`--serve [--port=8787] [--web=web]`，只绑 127.0.0.1）
+- [x] `dev.c6` 的 `serial2_feed` 在 `--serve` 下改走 WebSocket；
+      `main.c6` 解析 `--serve/--port/--web`；`build.sh` native 编入 wsgate
+- [x] 页面 `detectGateway()` 探测 `/__c6sim`，自动把网关填成同源 `/ws`
+- [x] `tests/serve_e2e.js` 10 项（HTTP/101/拆帧 SLIP ping）；
+      `browser_e2e` 验证自动填 WS 并连接
+- [x] 文档：DESIGN §110、README「两种跑法」
+- [ ] 后续（未做）：--serve 的 wss/TLS、多客户端并发、HTTP keep-alive

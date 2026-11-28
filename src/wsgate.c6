@@ -1,0 +1,653 @@
+/* src/wsgate.c6 —— build/sim 自带的 HTTP + WebSocket 网关（native）
+ *
+ * 取代 tools/ws_slip_proxy.js：同一个进程里做三件事
+ *   1) 把 web/ 当静态站点发给浏览器（index.html / app.js / sim.wasm /
+ *      firmware.bin / c6os.bin…），所以不用再另起 python3 -m http.server；
+ *   2) 接 WebSocket（/ws），把二进制帧交给 net.c6 的 SLIP 解码器；
+ *   3) NAT 的回包（serial2_feed）直接打回 WS，不再经过 stdout/Node。
+ *
+ * 为什么必须有一个宿主进程：浏览器页面只有 fetch 和 WebSocket 两种字节
+ * 通道，拿不到裸 TCP socket()，而 hiddify 的 mixed 端口是 SOCKS5/HTTP
+ * CONNECT（二进制/隧道协议），WS 的 Upgrade 握手它不认。SLIP ↔ 宿主
+ * socket 的转接只能留在宿主；本文件只是把“宿主进程”从 Node 换成 sim，
+ * 少一个依赖、少一次进程间搬运。
+ *
+ * 只绑 127.0.0.1（页面是本地演示，不要把宿主网络暴露到公网）。 */
+#if !defined(C6_WASM)
+
+#include <stdio.h>
+#include "c6sim.h"
+
+/* c6c 没有 libc 头，按 net.c6 的做法手写 extern。 */
+extern int socket(int domain, int type, int protocol);
+extern int bind(int fd, const void *addr, unsigned int len);
+extern int listen(int fd, int backlog);
+extern int accept(int fd, void *addr, void *len);
+extern int setsockopt(int fd, int level, int optname, const void *optval,
+                      unsigned int optlen);
+extern long send(int fd, const void *buf, unsigned long n, int flags);
+extern long recv(int fd, void *buf, unsigned long n, int flags);
+extern int close(int fd);
+extern int poll(void *fds, unsigned long n, int timeout);
+extern int open(const char *path, int flags, int mode);
+extern long read(int fd, void *buf, unsigned long n);
+extern long write(int fd, const void *buf, unsigned long n);
+extern long lseek(int fd, long off, int whence);
+
+struct ws_sa {
+    unsigned short sa_family;
+    unsigned short sa_port;
+    unsigned int sa_addr;
+    unsigned int sa_zero[2];
+};
+struct ws_pollfd { int fd; short events; short revents; };
+
+#define WS_AF_INET       2
+#define WS_SOCK_STREAM   1
+#define WS_SOL_SOCKET    1
+#define WS_SO_REUSEADDR  2
+#define WS_POLLIN        1
+#define WS_MSG_NOSIGNAL  0x4000
+#define WS_REQ_MAX       16384u
+#define WS_RX_MAX        131072u
+#define WS_FILE_MAX      (48u << 20)
+
+/* 本文件唯一对外状态：dev.c6 的 serial2_feed 看到它为 1 就把 SLIP 帧交给
+ * wsgate_out()，而不是写 stdout。 */
+int g_wsgate_on = 0;
+void wsgate_out(const u8 *buf, u32 n);
+
+static const char *g_web_root = "web";
+static int g_ws_fd = -1;
+static u32 g_ws_rx_n = 0;
+static u8 g_ws_rx[WS_RX_MAX];
+static u8 g_filebuf[65536];
+static char g_req[WS_REQ_MAX];
+static char g_path[512];
+
+/* ---------------- 小工具（不依赖 string.h） ---------------- */
+
+static u32 ws_len(const char *s)
+{
+    /* 不用 strlen()、也不写成教科书的「数到 NUL」循环：c6c 的直编路径
+     * 会把后者改写成它运行时里的 __c6_strlen_rep，而测试/自举链接没有
+     * 这个符号。多一个字节分支就够打断改写模式。 */
+    u32 n = 0;
+    u8 c = 0;
+    for (;;) {
+        c = (u8)s[n];
+        if (c == 0) break;
+        if (c == 0xffu) return n;
+        n = n + 1u;
+    }
+    return n;
+}
+
+static void ws_put(char *b, u32 *o, const char *s)
+{
+    while (*s != 0) b[(*o)++] = *s++;
+}
+
+static void ws_put_dec(char *b, u32 *o, u64 v)
+{
+    char t[24] = {0};
+    u32 n = 0;
+    if (v == 0) { b[(*o)++] = '0'; return; }
+    while (v > 0 && n < 24) {
+        t[n] = (char)('0' + (int)(v % 10u));
+        v = v / 10u;
+        n++;
+    }
+    while (n > 0) { n--; b[(*o)++] = t[n]; }
+}
+
+static int ws_lower(int c)
+{
+    return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+static int ws_has_ci(const char *h, const char *n)
+{
+    u32 i = 0, j = 0;
+    while (h[i] != 0) {
+        j = 0;
+        while (n[j] != 0 && h[i + j] != 0 &&
+               ws_lower((u8)h[i + j]) == ws_lower((u8)n[j]))
+            j++;
+        if (n[j] == 0) return 1;
+        i++;
+    }
+    return 0;
+}
+
+static int ws_starts(const char *s, const char *p)
+{
+    u32 i = 0;
+    while (p[i] != 0) {
+        if (s[i] != p[i]) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static int ws_ends(const char *s, const char *tail)
+{
+    u32 n = ws_len(s), t = ws_len(tail);
+    if (t > n) return 0;
+    return ws_starts(s + (n - t), tail);
+}
+
+static char *ws_hdr(char *req, const char *name)
+{
+    u32 i = 0, j = 0;
+    u32 nl = ws_len(name);
+    while (req[i] != 0) {
+        if (req[i] == '\r' && req[i + 1] == '\n') {
+            j = 0;
+            while (j < nl && ws_lower((u8)req[i + 2 + j]) ==
+                             ws_lower((u8)name[j]))
+                j++;
+            if (j == nl && req[i + 2 + j] == ':') {
+                char *v = req + i + 2 + j + 1;
+                while (*v == ' ') v++;
+                return v;
+            }
+        }
+        i++;
+    }
+    return (char *)0;
+}
+
+static int ws_write_all(int fd, const void *p, u32 n)
+{
+    const u8 *b = (const u8 *)p;
+    u32 off = 0;
+    while (off < n) {
+        long w = send(fd, b + off, n - off, WS_MSG_NOSIGNAL);
+        if (w <= 0) return -1;
+        off += (u32)w;
+    }
+    return 0;
+}
+
+/* ---------------- SHA-1（WS 握手用） ---------------- */
+
+struct ws_sha1 { u32 h[5]; u32 n; u64 len; u8 buf[64]; };
+
+static u32 ws_rol(u32 v, u32 n)
+{
+    return (v << n) | (v >> (32u - n));
+}
+
+static void ws_sha1_block(struct ws_sha1 *s, const u8 *p)
+{
+    u32 w[80] = {0};
+    u32 i = 0, a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, k = 0, t = 0;
+
+    for (i = 0; i < 16u; i++)
+        w[i] = ((u32)p[i * 4u] << 24) | ((u32)p[i * 4u + 1u] << 16) |
+               ((u32)p[i * 4u + 2u] << 8) | (u32)p[i * 4u + 3u];
+    for (i = 16u; i < 80u; i++)
+        w[i] = ws_rol(w[i - 3u] ^ w[i - 8u] ^ w[i - 14u] ^ w[i - 16u], 1);
+
+    a = s->h[0]; b = s->h[1]; c = s->h[2]; d = s->h[3]; e = s->h[4];
+    for (i = 0; i < 80u; i++) {
+        if (i < 20u) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5a827999u;
+        } else if (i < 40u) {
+            f = b ^ c ^ d;
+            k = 0x6ed9eba1u;
+        } else if (i < 60u) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8f1bbcdcu;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xca62c1d6u;
+        }
+        t = ws_rol(a, 5) + f + e + k + w[i];
+        e = d; d = c; c = ws_rol(b, 30); b = a; a = t;
+    }
+    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d; s->h[4] += e;
+}
+
+static void ws_sha1_init(struct ws_sha1 *s)
+{
+    s->h[0] = 0x67452301u; s->h[1] = 0xefcdab89u; s->h[2] = 0x98badcfeu;
+    s->h[3] = 0x10325476u; s->h[4] = 0xc3d2e1f0u;
+    s->n = 0;
+    s->len = 0;
+}
+
+static void ws_sha1_update(struct ws_sha1 *s, const u8 *p, u32 n)
+{
+    u32 i = 0;
+    for (i = 0; i < n; i++) {
+        s->buf[s->n] = p[i];
+        s->n++;
+        s->len++;
+        if (s->n == 64u) {
+            ws_sha1_block(s, s->buf);
+            s->n = 0;
+        }
+    }
+}
+
+static void ws_sha1_final(struct ws_sha1 *s, u8 out[20])
+{
+    u64 bits = s->len * 8ull;
+    u8 pad[8] = {0};
+    u32 i = 0;
+
+    s->buf[s->n] = 0x80u;
+    s->n++;
+    if (s->n > 56u) {
+        while (s->n < 64u) s->buf[s->n++] = 0;
+        ws_sha1_block(s, s->buf);
+        s->n = 0;
+    }
+    while (s->n < 56u) s->buf[s->n++] = 0;
+    for (i = 0; i < 8u; i++)
+        s->buf[56u + i] = (u8)((bits >> (56u - i * 8u)) & 0xffu);
+    ws_sha1_block(s, s->buf);
+    for (i = 0; i < 5u; i++) {
+        out[i * 4u]      = (u8)((s->h[i] >> 24) & 0xffu);
+        out[i * 4u + 1u] = (u8)((s->h[i] >> 16) & 0xffu);
+        out[i * 4u + 2u] = (u8)((s->h[i] >> 8) & 0xffu);
+        out[i * 4u + 3u] = (u8)(s->h[i] & 0xffu);
+    }
+}
+
+/* ---------------- base64 ---------------- */
+
+static const char ws_b64tab[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static u32 ws_b64(u8 *out, const u8 *in, u32 n)
+{
+    u32 i = 0, o = 0;
+    while (i + 2u < n) {
+        u32 v = ((u32)in[i] << 16) | ((u32)in[i + 1u] << 8) | (u32)in[i + 2u];
+        out[o++] = (u8)ws_b64tab[(v >> 18) & 63u];
+        out[o++] = (u8)ws_b64tab[(v >> 12) & 63u];
+        out[o++] = (u8)ws_b64tab[(v >> 6) & 63u];
+        out[o++] = (u8)ws_b64tab[v & 63u];
+        i += 3u;
+    }
+    if (i < n) {
+        u32 v = (u32)in[i] << 16;
+        if (i + 1u < n) v |= (u32)in[i + 1u] << 8;
+        out[o++] = (u8)ws_b64tab[(v >> 18) & 63u];
+        out[o++] = (u8)ws_b64tab[(v >> 12) & 63u];
+        out[o++] = (i + 1u < n) ? (u8)ws_b64tab[(v >> 6) & 63u] : (u8)'=';
+        out[o++] = (u8)'=';
+    }
+    return o;
+}
+
+/* ---------------- HTTP ---------------- */
+
+static const char *ws_mime(const char *p)
+{
+    if (ws_ends(p, ".html")) return "text/html; charset=utf-8";
+    if (ws_ends(p, ".js"))   return "application/javascript; charset=utf-8";
+    if (ws_ends(p, ".css"))  return "text/css; charset=utf-8";
+    if (ws_ends(p, ".json")) return "application/json; charset=utf-8";
+    if (ws_ends(p, ".wasm")) return "application/wasm";
+    if (ws_ends(p, ".png"))  return "image/png";
+    if (ws_ends(p, ".gif"))  return "image/gif";
+    if (ws_ends(p, ".svg"))  return "image/svg+xml";
+    if (ws_ends(p, ".ico"))  return "image/x-icon";
+    return "application/octet-stream";
+}
+
+static void ws_err(int fd, int code, const char *msg)
+{
+    char b[320] = {0};
+    u32 o = 0;
+    ws_put(b, &o, "HTTP/1.1 ");
+    ws_put_dec(b, &o, (u64)code);
+    ws_put(b, &o, " ");
+    ws_put(b, &o, msg);
+    ws_put(b, &o, "\r\nContent-Type: text/plain; charset=utf-8\r\n");
+    ws_put(b, &o, "Content-Length: ");
+    ws_put_dec(b, &o, (u64)ws_len(msg));
+    ws_put(b, &o, "\r\nConnection: close\r\n\r\n");
+    ws_put(b, &o, msg);
+    ws_write_all(fd, b, o);
+}
+
+static void ws_serve(int fd, const char *path)
+{
+    u32 o = 0;
+    const char *r = g_web_root;
+    int f = -1;
+    long sz = 0;
+
+    while (*r != 0 && o < 500u) g_path[o++] = *r++;
+    if (o > 0 && g_path[o - 1u] != '/') g_path[o++] = '/';
+    while (*path == '/') path++;
+    while (*path != 0 && o < 500u) g_path[o++] = *path++;
+    g_path[o] = 0;
+
+    f = open(g_path, 0, 0);
+    if (f < 0) { ws_err(fd, 404, "Not Found"); return; }
+    sz = lseek(f, 0, 2);
+    lseek(f, 0, 0);
+
+    o = 0;
+    ws_put(g_req, &o, "HTTP/1.1 200 OK\r\nContent-Type: ");
+    ws_put(g_req, &o, ws_mime(g_path));
+    ws_put(g_req, &o, "\r\nContent-Length: ");
+    ws_put_dec(g_req, &o, (u64)sz);
+    ws_put(g_req, &o, "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n");
+    if (ws_write_all(fd, g_req, o) != 0) { close(f); return; }
+    for (;;) {
+        long n = read(f, g_filebuf, sizeof(g_filebuf));
+        if (n <= 0) break;
+        if (ws_write_all(fd, g_filebuf, (u32)n) != 0) break;
+    }
+    close(f);
+}
+
+/* 读请求头：最多 WS_REQ_MAX，遇到 \r\n\r\n 就停。 */
+static int ws_read_request(int fd, char *buf, u32 cap)
+{
+    u32 n = 0;
+    while (n + 1u < cap) {
+        struct ws_pollfd p = {0};
+        long r = 0;
+        p.fd = fd;
+        p.events = WS_POLLIN;
+        p.revents = 0;
+        if (poll(&p, 1, 2000) <= 0) return -1;
+        r = recv(fd, buf + n, cap - 1u - n, 0);
+        if (r <= 0) return -1;
+        n += (u32)r;
+        buf[n] = 0;
+        if (ws_has_ci(buf, "\r\n\r\n")) return (int)n;
+    }
+    return -1;
+}
+
+/* ---------------- WebSocket ---------------- */
+
+#define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+static void ws_close(void)
+{
+    if (g_ws_fd >= 0) close(g_ws_fd);
+    g_ws_fd = -1;
+    g_ws_rx_n = 0;
+}
+
+static int ws_send_op(u8 op, const u8 *p, u32 n)
+{
+    u8 h[10] = {0};
+    u32 hn = 0;
+    if (g_ws_fd < 0) return -1;
+    h[0] = (u8)(0x80u | op);
+    if (n < 126u) {
+        h[1] = (u8)n;
+        hn = 2;
+    } else if (n < 65536u) {
+        h[1] = 126;
+        h[2] = (u8)(n >> 8);
+        h[3] = (u8)n;
+        hn = 4;
+    } else {
+        h[1] = 127;
+        h[2] = h[3] = h[4] = h[5] = 0;
+        h[6] = (u8)(n >> 24); h[7] = (u8)(n >> 16);
+        h[8] = (u8)(n >> 8);   h[9] = (u8)n;
+        hn = 10;
+    }
+    if (send(g_ws_fd, h, hn, WS_MSG_NOSIGNAL) != (long)hn) return -1;
+    if (n > 0 && send(g_ws_fd, p, n, WS_MSG_NOSIGNAL) != (long)n) return -1;
+    return 0;
+}
+
+/* dev.c6 的 serial2_feed 在 --serve 下把 SLIP 帧送到这里。 */
+void wsgate_out(const u8 *buf, u32 n)
+{
+    if (g_ws_fd < 0) return;      /* 页面还没连：NAT 回包丢弃，guest 会重试 */
+    if (ws_send_op(0x2, buf, n) != 0)
+        ws_close();
+}
+
+/* 解析 g_ws_rx 里的完整帧；opcode 0x1/0x2/0x0 的负载按字节喂 slip_rx_byte。 */
+static void ws_frames(void)
+{
+    u32 off = 0, i = 0;
+    while (g_ws_rx_n - off >= 2u) {
+        u8 b0 = g_ws_rx[off];
+        u8 b1 = g_ws_rx[off + 1u];
+        u32 op = (u32)(b0 & 0x0fu);
+        u32 masked = (u32)(b1 & 0x80u);
+        u32 len = (u32)(b1 & 0x7fu);
+        u32 hl = 2;
+        u32 mk = 0;
+        u8 *p = (u8 *)0;
+
+        if (len == 126u) {
+            if (g_ws_rx_n - off < 4u) break;
+            len = ((u32)g_ws_rx[off + 2u] << 8) | (u32)g_ws_rx[off + 3u];
+            hl = 4;
+        } else if (len == 127u) {
+            if (g_ws_rx_n - off < 10u) break;
+            /* 浏览器一帧最多 64KiB，高 32 位忽略 */
+            len = ((u32)g_ws_rx[off + 6u] << 24) |
+                  ((u32)g_ws_rx[off + 7u] << 16) |
+                  ((u32)g_ws_rx[off + 8u] << 8) |
+                  (u32)g_ws_rx[off + 9u];
+            hl = 10;
+        }
+        if (masked) {
+            if (g_ws_rx_n - off < hl + 4u) break;
+            mk = ((u32)g_ws_rx[off + hl] << 24) |
+                 ((u32)g_ws_rx[off + hl + 1u] << 16) |
+                 ((u32)g_ws_rx[off + hl + 2u] << 8) |
+                 (u32)g_ws_rx[off + hl + 3u];
+            hl += 4u;
+        }
+        if (len > WS_RX_MAX || g_ws_rx_n - off < hl + len) break;
+        p = g_ws_rx + off + hl;
+        if (masked) {
+            for (i = 0; i < len; i++)
+                p[i] = (u8)(p[i] ^ (u8)((mk >> (24u - (i & 3u) * 8u)) & 0xffu));
+        }
+        if (op == 0x8u) {                 /* close */
+            ws_close();
+            return;
+        } else if (op == 0x9u) {          /* ping */
+            ws_send_op(0xau, p, len);
+        } else if (op == 0x1u || op == 0x2u || op == 0x0u) {
+            for (i = 0; i < len; i++)
+                slip_rx_byte((u32)p[i]);
+        }
+        off += hl + len;
+    }
+    if (off > 0) {
+        u32 left = g_ws_rx_n - off;
+        for (i = 0; i < left; i++) g_ws_rx[i] = g_ws_rx[off + i];
+        g_ws_rx_n = left;
+    }
+}
+
+static void ws_pump(void)
+{
+    long r = 0;
+    if (g_ws_fd < 0) return;
+    if (g_ws_rx_n >= WS_RX_MAX) { ws_close(); return; }
+    r = recv(g_ws_fd, g_ws_rx + g_ws_rx_n, WS_RX_MAX - g_ws_rx_n, 0);
+    if (r <= 0) { ws_close(); return; }
+    g_ws_rx_n += (u32)r;
+    ws_frames();
+}
+
+static int ws_handshake(int fd, char *req)
+{
+    char *key = ws_hdr(req, "sec-websocket-key");
+    char kb[128] = {0};
+    u32 kn = 0;
+    struct ws_sha1 s = {0};
+    u8 dig[20] = {0};
+    u8 b64[32] = {0};
+    u32 bn = 0;
+    char h[320] = {0};
+    u32 o = 0;
+
+    if (key == (char *)0) { ws_err(fd, 400, "Bad Request"); return 0; }
+    while (*key != 0 && *key != '\r' && *key != '\n' && kn < 120u) {
+        if (*key != ' ') kb[kn++] = *key;
+        key++;
+    }
+    kb[kn] = 0;
+
+    ws_sha1_init(&s);
+    ws_sha1_update(&s, (const u8 *)kb, kn);
+    ws_sha1_update(&s, (const u8 *)WS_GUID, (u32)ws_len(WS_GUID));
+    ws_sha1_final(&s, dig);
+    bn = ws_b64(b64, dig, 20);
+
+    ws_put(h, &o, "HTTP/1.1 101 Switching Protocols\r\n");
+    ws_put(h, &o, "Upgrade: websocket\r\nConnection: Upgrade\r\n");
+    ws_put(h, &o, "Sec-WebSocket-Accept: ");
+    for (kn = 0; kn < bn; kn++) h[o++] = (char)b64[kn];
+    ws_put(h, &o, "\r\n\r\n");
+
+    if (g_ws_fd >= 0) ws_close();      /* 只服务一个页面 */
+    if (ws_write_all(fd, h, o) != 0) return 0;
+    g_ws_fd = fd;
+    g_ws_rx_n = 0;
+    fprintf(stderr, "[c6sim] --serve: WebSocket 已连接（/ws）\n");
+    return 1;
+}
+
+/* 一个连接：要么是 WS 升级，要么是静态文件 GET。 */
+static void ws_http(int fd)
+{
+    int n = ws_read_request(fd, g_req, WS_REQ_MAX);
+    char *path = 0;
+    char *sp = 0;
+
+    if (n <= 0) { close(fd); return; }
+    if (ws_starts(g_req, "GET ")) {
+        path = g_req + 4;
+    } else {
+        ws_err(fd, 405, "Method Not Allowed");
+        close(fd);
+        return;
+    }
+    sp = path;
+    while (*sp != 0 && *sp != ' ' && *sp != '?') sp++;
+
+    /* 先判断 WS：握手要读后面的 Sec-WebSocket-Key，路径先不能截断 */
+    if (ws_has_ci(g_req, "\r\nupgrade: websocket")) {
+        if (ws_handshake(fd, g_req)) return;   /* 保持打开 */
+        close(fd);
+        return;
+    }
+    *sp = 0;
+    if (ws_has_ci(path, "..")) {
+        ws_err(fd, 403, "Forbidden");
+        close(fd);
+        return;
+    }
+    if (ws_starts(path, "/__c6sim")) {
+        static const char body[] = "{\"gateway\":1,\"ws\":\"/ws\"}";
+        char b[256] = {0};
+        u32 o = 0;
+        ws_put(b, &o, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
+        ws_put(b, &o, "Cache-Control: no-store\r\nConnection: close\r\n");
+        ws_put(b, &o, "Content-Length: ");
+        ws_put_dec(b, &o, (u64)ws_len(body));
+        ws_put(b, &o, "\r\n\r\n");
+        ws_put(b, &o, body);
+        ws_write_all(fd, b, o);
+        close(fd);
+        return;
+    }
+    if (path[0] == 0 || ws_starts(path, "/")) {
+        if (path[0] == 0) {
+            ws_serve(fd, "/index.html");
+        } else if (ws_ends(path, "/")) {
+            char t[512] = {0};
+            u32 o = 0;
+            while (*path != 0 && o < 500u) t[o++] = *path++;
+            ws_put(t, &o, "index.html");
+            t[o] = 0;
+            ws_serve(fd, t);
+        } else {
+            ws_serve(fd, path);
+        }
+    } else {
+        ws_err(fd, 400, "Bad Request");
+    }
+    close(fd);
+}
+
+int wsgate_run(int port, const char *web)
+{
+    int lfd = 0;
+    int one = 1;
+    struct ws_sa sa = {0};
+    u32 i = 0;
+
+    g_web_root = (web != (const char *)0) ? web : "web";
+    lfd = socket(WS_AF_INET, WS_SOCK_STREAM, 0);
+    if (lfd < 0) {
+        fprintf(stderr, "[c6sim] --serve: socket() 失败\n");
+        return -1;
+    }
+    setsockopt(lfd, WS_SOL_SOCKET, WS_SO_REUSEADDR, &one, 4);
+    for (i = 0; i < (u32)sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
+    sa.sa_family = WS_AF_INET;
+    sa.sa_port = (unsigned short)(((u32)port << 8) | (((u32)port >> 8) & 0xffu));
+    sa.sa_addr = 0x0100007fu;      /* 127.0.0.1（小端内存布局） */
+
+    if (bind(lfd, &sa, (unsigned int)sizeof(sa)) != 0) {
+        fprintf(stderr, "[c6sim] --serve: bind 127.0.0.1:%d 失败（端口被占？）\n", port);
+        close(lfd);
+        return -1;
+    }
+    if (listen(lfd, 16) != 0) {
+        fprintf(stderr, "[c6sim] --serve: listen 失败\n");
+        close(lfd);
+        return -1;
+    }
+
+    g_net_shim = 1;
+    g_wsgate_on = 1;
+    net_reset();
+    fprintf(stderr, "[c6sim] --serve: http://127.0.0.1:%d/ （HTTP + WebSocket + NAT，不需要 Node）\n", port);
+
+    for (;;) {
+        struct ws_pollfd p[2] = {0};
+        int nf = 1;
+        int r = 0;
+
+        p[0].fd = lfd;
+        p[0].events = WS_POLLIN;
+        p[0].revents = 0;
+        if (g_ws_fd >= 0) {
+            p[1].fd = g_ws_fd;
+            p[1].events = WS_POLLIN;
+            p[1].revents = 0;
+            nf = 2;
+        }
+        r = poll(p, (unsigned long)nf, 1);
+        if (r > 0) {
+            if ((p[0].revents & WS_POLLIN) != 0) {
+                int c = accept(lfd, (void *)0, (void *)0);
+                if (c >= 0) ws_http(c);
+            }
+            if (nf > 1 && (p[1].revents & WS_POLLIN) != 0)
+                ws_pump();
+        }
+        net_tick();
+    }
+    return 0;
+}
+
+#endif

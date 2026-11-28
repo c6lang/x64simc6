@@ -158,10 +158,16 @@ int serial2_feed(const u8 *buf, u32 n)
     u32 i = 0;
     if (n == 0) return 0;
 #if !defined(C6_WASM)
-    if (g_net_shim) {                         /* --netshim：帧直接写 stdout 给代理 */
+    if (g_net_shim) {                         /* --netshim/--serve：SLIP 帧的宿主出口 */
+        if (g_wsgate_on) {                    /* --serve：直接进 WebSocket */
+            wsgate_out(buf, n);
+            return (int)n;
+        }
+        {
         size_t w = fwrite(buf, 1, (size_t)n, stdout);
         fflush(stdout);
         return (w == (size_t)n) ? (int)n : 0;
+        }
     }
 #endif
     if (n > (u32)serial2_space()) return 0;   /* 整帧要么全进、要么等下一轮 */

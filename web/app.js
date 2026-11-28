@@ -183,6 +183,24 @@ async function initWasm() {
   }
   status(log ? '已恢复上次日志（机器未运行）；请点「加载固件」「启动」'
              : 'wasm 已就绪，IndexedDB 文件已导入');
+  detectGateway();
+}
+
+/* 页面由 build/sim --serve 提供时，/__c6sim 会回 {"gateway":1}：WS 网关
+ * 和页面同源，直接把地址填好。普通静态服务器（python http.server、
+ * GitHub Pages）没有这个端点，保持原来的手填方式。 */
+async function detectGateway() {
+  try {
+    const r = await fetch('__c6sim', { cache: 'no-store' });
+    if (!r.ok) return;
+    const cfg = await r.json();
+    if (!cfg || !cfg.gateway) return;
+    const ws = (location.protocol === 'https:' ? 'wss://' : 'ws://') +
+               location.host + (cfg.ws || '/ws');
+    if ($('proxyurl')) $('proxyurl').value = ws;
+    if ($('netstatus'))
+      netstatus('本页由 build/sim --serve 提供：网关 ' + ws + '，点「连接」后 guest 可上网');
+  } catch (e) { /* 没有网关端点：保持手填 */ }
 }
 
 /* URL 与本地文件共用：把固件放进 FW_STAGE，再交给 sim_init。

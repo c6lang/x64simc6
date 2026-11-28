@@ -265,6 +265,50 @@ async function main() {
     if (!(netOk || '').includes('已连接')) throw new Error('页面连接代理失败: ' + netOk);
     console.log('[browser] 页面网络代理连接 OK:', netOk);
     await evaluate(`document.getElementById('netdisconnect').click()`);
+
+    // build/sim --serve：页面、sim.wasm 和 WS 网关同源，不需要 Node 代理。
+    // 导航到网关发的页面，detectGateway() 应把 WS 地址自动填成同源 /ws。
+    const gwPort = await freePort();
+    const gw = spawn('build/sim', ['--serve', '--port=' + gwPort, '--web=web'],
+                     { stdio: ['ignore', 'ignore', 'pipe'] });
+    let gwLog = '';
+    gw.stderr.on('data', (d) => { gwLog += d.toString(); });
+    try {
+      for (let i = 0; i < 100; i++) {
+        if (gwLog.includes('--serve:')) break;
+        await sleep(50);
+      }
+      if (!gwLog.includes('--serve:')) throw new Error('build/sim --serve 没有起来');
+      await send('Page.navigate', { url: `http://127.0.0.1:${gwPort}/index.html` });
+      let gwStatus = '';
+      for (let i = 0; i < 200; i++) {
+        gwStatus = await evaluate(`document.getElementById('status') ? document.getElementById('status').textContent : ''`) || '';
+        if (gwStatus.includes('已就绪') || gwStatus.includes('失败')) break;
+        await sleep(100);
+      }
+      if (!gwStatus.includes('已就绪')) throw new Error('--serve 页面初始化失败: ' + gwStatus);
+      const wantWs = `ws://127.0.0.1:${gwPort}/ws`;
+      let wsUrl = '';
+      for (let i = 0; i < 50; i++) {
+        wsUrl = await evaluate(`document.getElementById('proxyurl').value`) || '';
+        if (wsUrl === wantWs) break;
+        await sleep(100);
+      }
+      if (wsUrl !== wantWs) throw new Error('detectGateway 没自动填 WS: ' + wsUrl);
+      const gwNet = await evaluate(`(async () => {
+        document.getElementById('netconnect').click();
+        for (let i = 0; i < 100; i++) {
+          const s = document.getElementById('netstatus').textContent || '';
+          if (s.includes('已连接') || s.includes('失败')) return s;
+          await new Promise(r => setTimeout(r, 100));
+        }
+        return document.getElementById('netstatus').textContent || '';
+      })()`);
+      if (!(gwNet || '').includes('已连接')) throw new Error('--serve 网关连接失败: ' + gwNet);
+      console.log('[browser] build/sim --serve 自动填 WS 并连接 OK:', gwNet);
+    } finally {
+      gw.kill();
+    }
     console.log('browser_e2e: all checks passed');
   } finally {
     if (ws) ws.close();

@@ -246,6 +246,12 @@ extern int g_ud_trace;
 extern int g_rsp_check;
 extern int g_ntrace;
 extern int g_net_shim;
+#if !defined(C6_WASM)
+/* --serve：HTTP + WebSocket 网关（src/wsgate.c6），不再需要 Node */
+extern int g_wsgate_on;
+void wsgate_out(const u8 *buf, u32 n);
+int wsgate_run(int port, const char *web);
+#endif
 u64 boot_probe(void);
 int machine_boot_staged(u8 *base, u32 koff, u32 klen,
                         u32 ioff, u32 ilen, u32 coff, u32 clen,

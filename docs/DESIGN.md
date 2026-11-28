@@ -2478,3 +2478,41 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      `handle_pte_fault` 自己再看 PTE 才没出事）。
    - 验证：修复后 c6os 在 native/wasm 都能跑 Alpine 用户态（见 §108 的
      `OK|…` 日志）；`./build.sh test` 全过，回归见提交说明。
+
+110. **`build/sim --serve`：把 WS/HTTP 网关并进模拟器（去掉 Node）**
+   - 背景：浏览器页面只有 fetch 和 WebSocket 两种字节通道，拿不到裸
+     `socket()`；hiddify 的 mixed 端口是 SOCKS5/HTTP CONNECT 隧道协议，
+     WS 的 `Upgrade` 握手它不认。所以「SLIP ↔ 宿主 socket」的转接必须
+     有一个宿主进程，页面直连代理做不到。原来的宿主进程是
+     `tools/ws_slip_proxy.js`（每个 WS 连接再 spawn 一个
+     `build/sim --netshim`）；本轮把这一层直接并进 `build/sim`。
+   - 用法：`./build/sim --serve [--port=8787] [--web=web]`，一个 native
+     进程同时是静态站 + WS 网关 + NAT。`--serve` 只绑 127.0.0.1，不要
+     暴露到公网。
+   - `src/wsgate.c6`（native-only，`#if !defined(C6_WASM)`）：
+     - **HTTP**：读 `GET` 请求头，`web/` 下按路径发文件（`/` →
+       `index.html`、MIME 按扩展名、`Content-Length`、`Cache-Control:
+       no-store`）；`/__c6sim` 回 `{"gateway":1,"ws":"/ws"}` 给页面探测；
+       `..` 路径直接 403，未知路径 404，非 GET 405。
+     - **WebSocket**：标准 101 握手（`SHA-1(key+GUID)` → base64，自己写
+       了 SHA-1/base64，不依赖 string.h）；客户端帧按 mask 解出
+       payload，支持多 WS 消息拼一个 SLIP 帧（页面每 4ms 发一片）、
+       ping→pong、close；NAT 的回包用 0x82 二进制帧发回。
+     - **NAT 接线**：`g_net_shim=1; net_reset();`；WS payload 逐字节喂
+       `slip_rx_byte()`，`net_tick()` 在主循环里跑；`dev.c6` 的
+       `serial2_feed()` 在 `g_wsgate_on` 时改走 `wsgate_out()`，不再写
+       stdout。主循环 `poll()` 同时看 listen fd 和唯一的 WS fd。
+     - 限制：一次一个 WS 客户端（第二个连接会顶掉第一个）；HTTP 连接
+       顺序处理；没有 TLS（GitHub Pages 那种 HTTPS 场景仍需外部网关）。
+   - **页面探测**：`app.js` 的 `detectGateway()` 在 wasm 初始化后
+     `fetch('__c6sim')`，有 gateway 就把「网络代理」地址自动填成同源
+     `ws://<host>/ws`，并提示点「连接」；普通静态服务器没有这个端点，
+     保持手填。
+   - **实测**：`tests/serve_e2e.js` 10/10——`/__c6sim`、`/index.html`、
+     `/sim.wasm` 长度、404、WS 101 握手、把一帧 SLIP 拆成两条 WS 消息
+     后仍能收到 `10.0.2.2` 的 ICMP echo reply（源/目的/ID 都对）、整帧
+     重发也通；`browser_e2e` 里导航到 `--serve` 发的页面，确认
+     `proxyurl` 被自动填成 `ws://127.0.0.1:<port>/ws` 且能连上。
+   - `tools/ws_slip_proxy.js` 保留：页面部署在 GitHub Pages、或想用
+     `python3 -m http.server` 发页面时仍走它；`--netshim` 模式也保留，
+     两者共用 `src/net.c6` 的同一套 NAT。

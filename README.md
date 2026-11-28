@@ -88,10 +88,24 @@ Ctrl-C 送 guest、Ctrl-] 退出，并自己应答 ash 的 `ESC[6n` 光标查询
 
 ### 浏览器里真上网（WebSocket SLIP 代理）
 
-wasm 里没有宿主 socket；guest 的上网走“第二串口 + WebSocket 代理”：
+wasm 里没有宿主 socket；guest 的上网走“第二串口 + WebSocket 代理”，
+宿主侧有两种跑法。
+
+**推荐：单进程（页面 + WS 网关 + NAT 都在 build/sim 里，不需要 Node）**
 
 ```sh
-./build.sh native                    # 需要 build/sim（--netshim 模式）
+./build.sh native
+./build/sim --serve                  # 打开 http://127.0.0.1:8787/
+```
+
+`--serve` 把 `web/` 当静态站，并在同一端口接 `/ws`；页面通过
+`/__c6sim` 探测到网关后会自动把「网络代理」地址填成同源 `ws://…/ws`，
+点「连接」「加载固件」「启动」即可。
+
+**或者：页面用别的静态服务器，网关单独跑**
+
+```sh
+cd web && python3 -m http.server 8000 --bind 127.0.0.1
 node tools/ws_slip_proxy.js          # 默认 ws://127.0.0.1:8787
 ```
 
@@ -101,8 +115,14 @@ guest 里照常 `ping 10.0.2.2`、`wget http://example.com/`，地址仍是
 
 ```
 wasm guest ttyS1(SLIP) <-> sim_net_rx/tx <-> WebSocket
-  <-> tools/ws_slip_proxy.js <-> build/sim --netshim <-> 宿主 socket
+  <-> build/sim --serve 里的 NAT（或 tools/ws_slip_proxy.js <-> build/sim --netshim）
+  <-> 宿主 socket / 上游代理
 ```
+
+浏览器不能直接连 hiddify 的 mixed 端口：页面只有 fetch/WebSocket，没有裸
+TCP，SOCKS5/HTTP CONNECT 是隧道协议，WS 的 Upgrade 握手它也不认；SLIP↔
+宿主 socket 的转接必须在宿主进程里。`--serve` 只是把这一层并进模拟器，
+少一个 Node 依赖，转接逻辑本身仍在宿主。
 
 `--netshim` 不跑 guest，只把 stdin/stdout 上的 SLIP 帧接到 `src/net.c6` 里
 **和 native 完全相同的用户态 NAT**（DNS/TCP/UDP/ICMP），所以 wasm 和 native
