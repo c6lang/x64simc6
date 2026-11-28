@@ -2229,7 +2229,9 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      最终实现（`machine.c6`/`dev.c6`/`cpu.c6`）：
      - TSC 真跑 2.4GHz：每条指令加 `g_tsc_mul`；native 用 clock_gettime、
        wasm 用 `sim_set_host_ms()`，每 150ms 按实测指令速率重算 mul，
-       让 guest 的 TSC 时间≈墙钟。
+       让 guest 的 TSC 时间≈墙钟。对拍/批处理（native 非 tty、wasm
+       `sim_set_paced(0)`）不校准，固定 `g_tsc_mul = 160`，native/wasm
+       逐字节一致；只有交互/浏览器才按墙钟校准。
      - PIT 仍是独立的 1.193182MHz：`dev_tick` 里按
        `delta_tsc * 1193182 / 2400000000` 换算成 PIT 时钟；mode 2/3 周期、
        mode 0 one-shot 都要投 IRQ0（TSC clocksource/NO_HZ 会用 one-shot）。

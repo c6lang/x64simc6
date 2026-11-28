@@ -175,7 +175,9 @@ void machine_init(void)
     g_pace_idle = 1;           /* 宿主毫秒由 sim_set_host_ms() 提供 */
 #endif
     {
-        g_calib = 1;           /* native 有 clock_gettime；wasm 等 host_ms 到了再测 */
+        /* 只有 paced（交互/浏览器）才按墙钟校准；批处理/对拍固定 mul，
+         * 和 wasm 的 sim_set_paced(0) 逐字节一致。 */
+        g_calib = g_pace_idle;
         g_calib_w = pace_wall_ns();
         g_calib_i = g_m.instructions;
     }
