@@ -2214,3 +2214,16 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      **顺带记录**：`pci=conf1` 让内核真的枚举到 8086:1237 之后，
      `pci 0000:00:00.0: Limiting direct PCI/PCI transfers` 是 i440FX 的
      正常 quirk 输出（KERN_INFO，loglevel=4 看不到），不是错误。
+
+103. **CPUID 0x16：让 `/proc/cpuinfo` 的 CPU MHz 不再是 0**。guest 日志里
+     `tsc: Fast TSC calibration failed` / `Unable to calibrate against PIT` /
+     `No reference (HPET/PMTIMER) available` —— 我们没模拟 PIT 通道 2、
+     HPET 和 ACPI PM timer，TSC 校不准，`cpu_khz = 0`，`/proc/cpuinfo`
+     于是显示 `cpu MHz : 0.000`。修法不是去补 PIT 校准（校出来也只有
+     ~1.19MHz，因为快进 TSC 本来就这么慢），而是暴露 CPUID 0x16
+     （base/max/bus = 2400/2400/100 MHz）并把基本叶子上限提到 0x16：
+     内核的 `cpu_freq_khz` 被填上，`/proc/cpuinfo` 显示 `2400.000`；同
+     时它用 2400MHz 去校验 TSC，watchdog 发现实际 TSC 慢得多，照旧把
+     TSC 标成 unstable 并回落到 refined-jiffies——**时间、定时器、
+     login/top/ping 的行为都不变**，只是 dmesg 多一条 watchdog 警告。
+     验证：guest 里 `/proc/cpuinfo` 2400.000，`date`/`sleep 5` 正常。
