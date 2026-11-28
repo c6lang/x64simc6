@@ -147,7 +147,7 @@ async function main() {
 
     // 固件下拉：两个内置固件都能选
     const fwOpts = await evaluate(`[...document.querySelectorAll('#fwurl option')].map(o => o.value).join(',')`);
-    if (fwOpts !== 'firmware.bin,c6os.bin') throw new Error('固件下拉选项不对: ' + fwOpts);
+    if (fwOpts !== 'firmware.bin,c6os.bin,c6os-sh.bin') throw new Error('固件下拉选项不对: ' + fwOpts);
     console.log('[browser] 固件下拉选项 OK:', fwOpts);
 
     // 页面自身的「加载固件」路径：真实 Alpine 固件约 34 MiB，要能扩内存 staging

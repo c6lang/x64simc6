@@ -174,10 +174,32 @@ Alpine initramfs 打成 v2 固件：
 ./build/sim build/c6os.bin
 ```
 
-页面里不用改 URL：「固件与网络」下的**本地固件**可以直接选 `build/c6os.bin`
-（或任何 C6FW v1/v2 的 `.bin`），文件只读进 wasm 线性内存，不上传。c6os 的
-`/data` 是一块模拟的 ATA PIO 盘（8MiB FAT16，随固件打包），写操作落在
-客户机 RAM 里，刷新页面即丢。
+页面「固件」下拉里现在有三项：
+
+| 选项 | 行为 |
+| --- | --- |
+| `firmware.bin` | Linux 6.6（默认）|
+| `c6os.bin` | c6os + Alpine，开机跑 busybox 全量自检，`bx-sweep-done` 后停机 |
+| `c6os-sh.bin` | c6os + Alpine，**交互 shell**，提示符 `/ #`，可以敲命令 |
+
+也可以选本地 `.bin`（任何 C6FW v1/v2），文件只读进 wasm 线性内存，不上传。
+`c6os.bin` 是自检镜像，自检结束会 `[lx] 所有进程都已退出` 停机，所以敲键
+没人读；要输入就用 `c6os-sh.bin`。两个镜像的差别只是编译内核时的
+`-DC6OS_ALPINE_BUSYBOX` / `-DC6OS_ALPINE_INTERACTIVE`：
+
+```sh
+make -C ~/rtos-c6 x86-alpine-busybox                    # 自检版
+make -C ~/rtos-c6 x86-alpine ALPINE_INTERACTIVE=1       # 交互版
+python3 tools/mkc6os.py --kernel ~/rtos-c6/build/x86/iso/stage2.bin -o build/c6os-sh.bin
+```
+
+> 注意：当前 `~/rtos-c6` main 的 stage2 在 sim 里还有一处启动回归（起来后
+> 静默）。本仓库的 `build/c6os.bin` / `build/c6os-sh.bin` 是用能跑的
+> 11/27 源码状态（`6c92e8e`）+ console 的 CRLF 修复编的；等 main 修好再
+> 按上面的命令重编。
+
+c6os 的 `/data` 是一块模拟的 ATA PIO 盘（8MiB FAT16，随固件打包），写操作
+落在客户机 RAM 里，刷新页面即丢。
 
 在真实终端里跑时模拟器会把终端切到 raw：输入不会显示两遍，`Ctrl-C` 原样
 送给 guest，**`Ctrl-]` 退出**。约 1 分钟出现 `(none) login:`，输入 `root`

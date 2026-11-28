@@ -13,7 +13,8 @@
     <h2>固件与网络</h2>
     <label>固件 <select id="fwurl">
       <option value="firmware.bin" selected>firmware.bin（Linux）</option>
-      <option value="c6os.bin">c6os.bin（c6os + Alpine）</option>
+      <option value="c6os.bin">c6os.bin（c6os + Alpine，busybox 全量自检）</option>
+      <option value="c6os-sh.bin">c6os-sh.bin（c6os + Alpine，可交互 shell）</option>
     </select></label>
     <label>本地固件（直接选 .bin，不上传）<input id="fwfile" type="file"
       accept=".bin,application/octet-stream"></label>
