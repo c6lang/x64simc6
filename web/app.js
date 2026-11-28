@@ -307,7 +307,7 @@ function disconnectProxy() {
     netws = null;
     try { w.close(); } catch (e) {}
   }
-  netstatus('未连接：本机先跑 node tools/ws_slip_proxy.js');
+  netstatus('未连接（可选：只有 guest 要上外网才需要；本机先跑 node tools/ws_slip_proxy.js）');
 }
 
 function connectProxy() {
