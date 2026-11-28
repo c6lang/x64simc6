@@ -289,10 +289,11 @@
 - [ ] JIT 子集再扩：setcc/xchg/cmpxchg/bswap、常用 SSE、rep movs/stos
 - [x] JIT 采样编译 + good/bad RIP 位图、去 CR0/CR4 flush：900M 覆盖
       107.5M 条（12.3%），墙钟 +24% → +14%，串口/指令数一致
-- [ ] JIT 链式分发 bug：JIT_CHAIN_FALL=0 在 18M MATCH/19M 分叉；
-      mask 64（push reg）、8192（call）、262144（ret）各自都能恢复
-      MATCH，pop/push imm/push mem/leave 不行；19M RAM 差异是内核 text
-      补丁字节（路径不同），待 19M RIP/块 trace 对齐
+- [x] JIT 链式分叉已修：mask 128（显式内存块）下链式与单块一致，
+      定位到内存块在 JS 批内连续执行；JS 批只链非内存块、内存块由 C
+      单块调用，并补 jit_pending() 交回 C 投递；900M 链式
+      945,486,073 条/串口 f9aaea… 与单块逐字节一致（63.0s，仍慢于
+      单块，仅诊断用）
 - [x] JIT 只编译长块（MIN_N=9）：900M 覆盖 199M（25.3%），
       best-of-3 约 0.5–1% 快于解释器，串口/指令数一致；50M MATCH
 - [ ] JIT 批量/wasm 内 dispatch，消除每块 wasm↔JS 切换

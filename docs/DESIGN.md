@@ -1994,6 +1994,17 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
     下一步的大头仍是批量/wasm 内 dispatch（消除每块 JS 切换）和
     SSE/rep string ops。
 
+    链式根因（已修）：`JIT_CHAIN_FALL=0` 在 900M 上串口/指令数与单块
+    路径不同（a9bd52…/944,863,568 vs f9aaea…/945,486,073）。用
+    `JIT_MASK=128` 禁用显式内存操作数块后链式完全一致（945,486,073
+    条、f9aaea…，55.4s），说明分叉来自「内存操作数块在 JS 批里连续
+    执行」。修法：JS 批只链**非内存块**，内存块作为批的第一块由 C
+    单块调用（e.mem/nx.mem 断开）；并补 `jit_pending()`，批内一旦有
+    pending 异常就交回 C 投递。修后 900M 链式与单块/解释器逐字节一致
+    （63.0s，仍比单块 56.9s 慢，链式保留诊断）。`g_jit_no_mem=1` 的
+    无内存链式在 harness 里 55.4s，但生产 glue 没有链式，默认仍是
+    单块（MIN_N=9）。
+
     链式二分：用 `JIT_MASK` 按指令组禁用后，mask 64（push/pop/call/ret/
     leave）使 19M 恢复 MATCH，问题就在这一组。期间修了 `pop %rsp` 的
     顺序（目的写入必须在 RSP+=8 之后，否则 pop %rsp 的最终 RSP 会错），

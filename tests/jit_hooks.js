@@ -22,7 +22,7 @@ function makeJitEnv(getInst) {
   let lastFlush = -1;
 
   const env = {
-    js_jit_compile(ptr, len, ripLo, ripHi, n, pa, gen, branch) {
+    js_jit_compile(ptr, len, ripLo, ripHi, n, pa, gen, branch, mem) {
       const inst = getInst();
       if (!inst || handles.length >= 32768) return -1;
       try {
@@ -45,7 +45,7 @@ function makeJitEnv(getInst) {
           },
         });
         const h = handles.length;
-        handles.push({ inst: i, n: n >>> 0, pa: pa >>> 0, gen: gen >>> 0, rip: ripLo >>> 0, branch: branch >>> 0 });
+        handles.push({ inst: i, n: n >>> 0, pa: pa >>> 0, gen: gen >>> 0, rip: ripLo >>> 0, branch: branch >>> 0, mem: mem >>> 0 });
         byRip.set(ripLo >>> 0, { h, hi: ripHi >>> 0, rip: ripLo >>> 0 });
         return h;
       } catch (e) {
@@ -85,6 +85,11 @@ function makeJitEnv(getInst) {
         const rc = e.inst.exports.run(state, ram);
         if (rc !== 0) { total += rc; break; }
         total += e.n;
+        /* 块里的 MMIO 访问可能挂起中断/异常；和 C 的单块循环一样，
+         * 立刻交回 C 投递，不能带着 pending 继续链下一块。 */
+        if (inst.exports.sim_jit_pending && inst.exports.sim_jit_pending() !== 0) break;
+        /* 内存操作块只作为批的第一块（由 C 单块调用）；不链进批里。 */
+        if (e.mem) break;
         if (NOCHAIN) break;
         if (BATCH_ONE) break;
         if (FALL_ONLY && e.branch) break;
@@ -92,6 +97,7 @@ function makeJitEnv(getInst) {
         const hi = dv.getUint32((state >>> 0) + (ripOff >>> 0) + 4, true);
         const nx = byRip.get(lo);
         if (!nx || nx.hi !== hi) break;
+        if (nx.mem) break;
         if (PAGE_ONLY && (nx.rip >>> 12) !== (e.rip >>> 12)) break;
         cur = nx.h;
       }

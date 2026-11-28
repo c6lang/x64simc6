@@ -21,6 +21,7 @@ const P = 0x3000;
   inst = await WebAssembly.instantiate(mod, { env: jit.env });
   const w = inst.exports;
   if (w.sim_set_jit_min_n) w.sim_set_jit_min_n(1);   /* 单元测试的块很短 */
+  if (w.sim_set_jit_no_mem) w.sim_set_jit_no_mem(0);
   if (w.sim_reset() !== 0) throw new Error('reset');
 
   const ram = w.sim_ram_base();

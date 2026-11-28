@@ -40,7 +40,7 @@ static u8 jit_mod[JIT_MOD_MAX];
 
 /* 由 JS 提供（build.sh 的 JIT=1 链接加 --allow-undefined） */
 extern int js_jit_compile(u32 ptr, u32 len, u32 rip_lo, u32 rip_hi,
-                          u32 n, u32 pa_page, u32 gen, u32 branch);
+                          u32 n, u32 pa_page, u32 gen, u32 branch, u32 mem);
 extern int js_jit_run(int handle, u32 state_off, u32 ram_off,
                       u32 rip_off, u32 max_ins);
 
@@ -58,6 +58,7 @@ u8 g_jit_good[524288];   /* 64K 个 64-bit 位图：不可翻译的 RIP，C 侧�
 int g_jit_trace = 0;
 int g_jit_mask = 0;   /* 诊断：按组禁用指令 */
 int g_jit_min_n = 9;  /* 只编译 >= n 条指令的长块（短块每次 JS 切换不划算） */
+int g_jit_no_mem = 0; /* 可选：显式内存操作数块不 JIT（默认关，链式测试里用） */
 u32 g_jit_trace_n = 0;
 u64 g_jit_bad_budget = 0;
 
@@ -1348,6 +1349,8 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
     struct JIns ins[JIT_MAX_INS];
     u64 end = 0;
     int n = 0;
+    int mi = 0;
+    int has_mem = 0;
     u32 len = 0;
     int h = 0;
     u64 pa = 0;
@@ -1359,6 +1362,10 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
         return -1;                    /* 真的译不了：标 bad */
     if (n < g_jit_min_n)
         return -1;                    /* 短块净亏：标 bad，交给解释器 */
+    for (mi = 0; mi < n; mi++)
+        if (ins[mi].mem) { has_mem = 1; break; }
+    if (has_mem && g_jit_no_mem)
+        return -1;                    /* 内存块交给解释器/单块路径 */
     if (g_m.cpu.exc_pending)
         return -2;                    /* 取指缺页：交给解释器 */
     pa = mem_translate(rip, 0, 0, 0);
@@ -1369,7 +1376,8 @@ static int jit_compile(u64 rip, u32 *n_out, u32 *pa_page, u32 *gen)
         return -1;
     h = js_jit_compile((u32)(unsigned long)jit_mod, len,
                        (u32)rip, (u32)(rip >> 32), (u32)n,
-                       *pa_page, *gen, (u32)(ins[n - 1].branch || ins[n - 1].callret));
+                       *pa_page, *gen, (u32)(ins[n - 1].branch || ins[n - 1].callret),
+                       (u32)has_mem);
     if (h < 0)
         return -2;
     jit_compiles++;
@@ -1500,6 +1508,11 @@ void jit_flush(void)
     g_jit_flush_gen++;
 }
 
+void jit_set_no_mem(int v)
+{
+    g_jit_no_mem = v ? 1 : 0;
+}
+
 void jit_set_min_n(int n)
 {
     g_jit_min_n = n < 1 ? 1 : n;
@@ -1557,7 +1570,7 @@ int jit_block(u64 rip)
     }
     h = js_jit_compile((u32)(unsigned long)jit_mod, len,
                        (u32)rip, (u32)(rip >> 32), (u32)n, pg, gen,
-                       (u32)(ins[n - 1].branch || ins[n - 1].callret));
+                       (u32)(ins[n - 1].branch || ins[n - 1].callret), 0);
     if (h < 0)
         return -4;
     if (js_jit_run(h, (u32)(unsigned long)&g_m,
@@ -1589,7 +1602,7 @@ static int jit_synth_one(u64 rip, u64 end, u32 imm, u32 is_jmp)
     if (len == 0)
         return -1;
     return js_jit_compile((u32)(unsigned long)jit_mod, len,
-                          (u32)rip, (u32)(rip >> 32), 1, 0, 0, is_jmp);
+                          (u32)rip, (u32)(rip >> 32), 1, 0, 0, is_jmp, 0);
 }
 
 int jit_synth_chain(u64 a, u64 b, u32 ia, u32 ib, u32 mode)

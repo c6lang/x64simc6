@@ -303,6 +303,15 @@ int sim_jit_try2(u64 rip, u32 max_ins)
 #endif
 }
 
+void sim_set_jit_no_mem(int v)
+{
+#if defined(C6_JIT)
+    jit_set_no_mem(v);
+#else
+    (void)v;
+#endif
+}
+
 void sim_set_jit_min_n(int n)
 {
 #if defined(C6_JIT)
@@ -376,6 +385,15 @@ void sim_set_sel(int i, u64 v)
 {
     if (i >= 0 && i < 8)
         g_m.cpu.sel[i] = (u16)v;
+}
+
+int sim_jit_pending(void)
+{
+#if defined(C6_JIT)
+    return jit_pending();
+#else
+    return 0;
+#endif
 }
 
 int sim_cpu_halted(void)

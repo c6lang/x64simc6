@@ -357,6 +357,11 @@ void jit_flags_dec(u64 a, u64 res, int s)
     g_m.cpu.flags = (g_m.cpu.flags & ~RF_CF) | cf;
 }
 
+int jit_pending(void)
+{
+    return g_m.cpu.exc_pending ? 1 : 0;
+}
+
 int jit_faulted(void)
 {
     return (g_m.cpu.fault_abort || g_m.cpu.exc_pending) ? 1 : 0;
