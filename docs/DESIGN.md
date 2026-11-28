@@ -2508,6 +2508,9 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      `fetch('__c6sim')`，有 gateway 就把「网络代理」地址自动填成同源
      `ws://<host>/ws`，并提示点「连接」；普通静态服务器没有这个端点，
      保持手填。
+   - **不引导 guest**：`--serve` 只跑网关，guest 仍是页面里的 wasm；宿主
+     终端只有网关事件（WS 连接/断开），native 启动日志用
+     `./build/sim build/c6os.bin`。带固件参数时会给一行忽略提示。
    - **实测**：`tests/serve_e2e.js` 10/10——`/__c6sim`、`/index.html`、
      `/sim.wasm` 长度、404、WS 101 握手、把一帧 SLIP 拆成两条 WS 消息
      后仍能收到 `10.0.2.2` 的 ICMP echo reply（源/目的/ID 都对）、整帧

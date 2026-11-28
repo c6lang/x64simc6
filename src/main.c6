@@ -600,8 +600,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "[c6sim] DNS 地址非法：%s（要 ip[:port]）\n", dnsspec);
         return 4;
     }
-    if (serve)
+    if (serve) {
+        if (path != 0)
+            fprintf(stderr, "[c6sim] --serve 不引导固件 %s：guest 在浏览器里启动"
+                            "（要 native 引导就去掉 --serve）\n", path);
         return wsgate_run(serve_port, serve_web);
+    }
     if (netshim)
         return net_shim_mode();
     if (blob != 0)

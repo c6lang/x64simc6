@@ -102,6 +102,11 @@ wasm 里没有宿主 socket；guest 的上网走“第二串口 + WebSocket 代�
 `/__c6sim` 探测到网关后会自动把「网络代理」地址填成同源 `ws://…/ws`，
 点「连接」「加载固件」「启动」即可。
 
+注意 `--serve` 本身**不引导 guest**：guest 仍然是页面里的 wasm，串口输出
+在页面终端（xterm），跑 `--serve` 的宿主终端只打印网关事件（WS 连接/断开）。
+要看 native 的启动日志就直接 `./build/sim build/c6os.bin`（或
+`build/firmware.bin`），不要带 `--serve`。
+
 **或者：页面用别的静态服务器，网关单独跑**
 
 ```sh

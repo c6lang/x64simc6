@@ -376,7 +376,10 @@ static int ws_read_request(int fd, char *buf, u32 cap)
 
 static void ws_close(void)
 {
-    if (g_ws_fd >= 0) close(g_ws_fd);
+    if (g_ws_fd >= 0) {
+        close(g_ws_fd);
+        fprintf(stderr, "[c6sim] --serve: WebSocket 断开\n");
+    }
     g_ws_fd = -1;
     g_ws_rx_n = 0;
 }
@@ -621,6 +624,7 @@ int wsgate_run(int port, const char *web)
     g_wsgate_on = 1;
     net_reset();
     fprintf(stderr, "[c6sim] --serve: http://127.0.0.1:%d/ （HTTP + WebSocket + NAT，不需要 Node）\n", port);
+    fprintf(stderr, "[c6sim] guest 在浏览器里跑，本终端只显示网关事件（页面里点「加载固件」「启动」）\n");
 
     for (;;) {
         struct ws_pollfd p[2] = {0};
