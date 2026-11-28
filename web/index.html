@@ -24,9 +24,14 @@
     <label>请求 URL（测试和 guest 网络桥）<input id="neturl" placeholder="https://example.com/"></label>
     <button id="netfetch">fetch 并注入 __net/last</button>
     <h2 style="margin-top:14px">网络代理（wasm 真上网，可选）</h2>
-    <label>代理地址（WebSocket 网关，可选）<input id="proxyurl" value="ws://127.0.0.1:8787"></label>
-    <label>上游代理（走 NAT 的 TCP，留空=直连）<input id="upproxy" placeholder="http://127.0.0.1:2334"></label>
-    <label>DNS（留空=宿主 resolv.conf）<input id="updns" placeholder="127.0.0.1:6450"></label>
+    <p class="hint">桥接网关 = 浏览器连本机的 ws_slip_proxy.js（一般不用改）；
+      上游代理 = 网关/NAT 从哪出网，留空直连。</p>
+    <details>
+      <summary>高级：桥接网关地址（默认 ws://127.0.0.1:8787）</summary>
+      <label>WebSocket 网关 <input id="proxyurl" value="ws://127.0.0.1:8787"></label>
+    </details>
+    <label>上游代理（可选：HTTP/SOCKS5/SOCKS4，留空=直连）<input id="upproxy" placeholder="http://127.0.0.1:2334"></label>
+    <label>DNS（可选，留空=宿主 resolv.conf）<input id="updns" placeholder="127.0.0.1:6450"></label>
     <div class="row">
       <button id="netconnect">连接</button>
       <button id="netdisconnect">断开</button>

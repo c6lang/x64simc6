@@ -174,7 +174,12 @@ async function main() {
     await evaluate(`document.getElementById('status').textContent = '选择中…'`);
     await send('DOM.setFileInputFiles',
                { nodeId: input.result.nodeId, files: [path.resolve('web/firmware.bin')] });
-    // CDP 放文件不一定派发 change；显式补一次，等价于用户选完文件
+    // CDP 放文件是异步落 DOM 的：等 files[0].name 真的换过来，再补 change
+    for (let i = 0; i < 100; i++) {
+      const n = await evaluate(`(document.getElementById('fwfile').files[0] || {}).name`);
+      if (n === 'firmware.bin') break;
+      await sleep(50);
+    }
     await evaluate(`document.getElementById('fwfile').dispatchEvent(new Event('change'))`);
     let pick = '';
     for (let i = 0; i < 200; i++) {
@@ -190,8 +195,22 @@ async function main() {
     // 打包（依赖 ~/rtos-c6 的内核与 Alpine rootfs），没有就跳过这一段。
     if (fs.existsSync('build/c6os.bin')) {
       await evaluate(`document.getElementById('status').textContent = '选择中…'`);
-      await send('DOM.setFileInputFiles',
-                 { nodeId: input.result.nodeId, files: [path.resolve('build/c6os.bin')] });
+      // nodeId 在第一次 setFileInputFiles 后可能失效，重新查一次
+      const doc2 = await send('DOM.getDocument');
+      const input2 = await send('DOM.querySelector',
+                                { nodeId: doc2.result.root.nodeId, selector: '#fwfile' });
+      const setRc = await send('DOM.setFileInputFiles',
+                               { nodeId: input2.result.nodeId,
+                                 files: [path.resolve('build/c6os.bin')] });
+      if (setRc.error) throw new Error('setFileInputFiles: ' + JSON.stringify(setRc.error));
+      let gotName = '';
+      for (let i = 0; i < 100; i++) {
+        gotName = await evaluate(`(document.getElementById('fwfile').files[0] || {}).name`) || '';
+        if (gotName === 'c6os.bin') break;
+        await sleep(50);
+      }
+      if (gotName !== 'c6os.bin')
+        throw new Error('文件输入没有换成 c6os.bin，实际=' + gotName);
       await evaluate(`document.getElementById('fwfile').dispatchEvent(new Event('change'))`);
       let c6 = '';
       for (let i = 0; i < 300; i++) {

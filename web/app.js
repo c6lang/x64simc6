@@ -22,6 +22,7 @@ let totalInsns = 0;
 let lastSync = 0;
 let lastStatus = 0;
 let sawSerial = false;
+let fwSeq = 0;   // 固件加载序号：后一次选择作废前一次（异步读文件/下载会乱序）
 let netws = null;
 let netTimer = 0;
 let netRx = 0, netTx = 0, netStatusAt = 0;
@@ -187,8 +188,9 @@ async function initWasm() {
 /* URL 与本地文件共用：把固件放进 FW_STAGE，再交给 sim_init。
  * Linux 固件（C6FW v1）和 c6os/Alpine 固件（C6FW v2）都走这里，
  * 由 wasm 侧按头里的 version 分派。 */
-async function bootFirmware(fw, label) {
+async function bootFirmware(fw, label, seq) {
   if (!wasm) throw new Error('请先加载 wasm');
+  if (seq !== undefined && seq !== fwSeq) return;   // 已被后一次选择取代
   if (fw.length > FW_MAX) throw new Error(`固件超过 ${FW_MAX >> 20} MiB staging 上限`);
   const need = FW_STAGE + fw.length;
   if (need > wasm.memory.buffer.byteLength) {
@@ -197,6 +199,7 @@ async function bootFirmware(fw, label) {
       throw new Error(`内存不足：固件需要 ${need} 字节线性内存`);
     mem = wasm.memory;
   }
+  if (seq !== undefined && seq !== fwSeq) return;
   put(FW_STAGE, fw);
   const rc = wasm.sim_init(FW_STAGE, fw.length);
   if (rc !== 0) throw new Error(`sim_init 返回 ${rc}（不是可引导的固件？）`);
@@ -210,9 +213,12 @@ async function bootFirmware(fw, label) {
 async function loadFirmware() {
   if (!wasm) { status('请先加载 wasm'); return; }
   const url = $('fwurl').value.trim();
+  const seq = ++fwSeq;
   try {
-    await bootFirmware(await fetchAsset(url), url);
-  } catch (e) { status(`固件加载失败：${e.message}`); }
+    const fw = await fetchAsset(url);
+    if (seq !== fwSeq) return;
+    await bootFirmware(fw, url, seq);
+  } catch (e) { if (seq === fwSeq) status(`固件加载失败：${e.message}`); }
 }
 
 /* 本机 .bin：FileReader 不进缓存，也不上传，直接读进 wasm 线性内存。
@@ -221,9 +227,13 @@ async function loadFirmwareFile() {
   if (!wasm) { status('请先加载 wasm'); return; }
   const f = $('fwfile').files && $('fwfile').files[0];
   if (!f) return;
+  const seq = ++fwSeq;
+  status(`正在读取 ${f.name}…`);
   try {
-    await bootFirmware(new Uint8Array(await f.arrayBuffer()), f.name);
-  } catch (e) { status(`固件加载失败：${e.message}`); }
+    const fw = new Uint8Array(await f.arrayBuffer());
+    if (seq !== fwSeq) return;
+    await bootFirmware(fw, f.name, seq);
+  } catch (e) { if (seq === fwSeq) status(`固件加载失败：${e.message}`); }
 }
 
 function pumpSerial() {
