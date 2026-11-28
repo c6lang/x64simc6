@@ -10,7 +10,7 @@ const NET_RX = SCRATCH + 4 * 0x100000;   // 252 MiB：代理 -> wasm 的收包�
 const NET_TX = NET_RX + 65536;            // 252 MiB + 64 KiB：wasm -> 代理
 const FS_CAP = 1 << 20;
 const WASM_VER = '2.2';   // 换 wasm 时同步 bump：Cache Storage 按 URL 缓存
-const FW_VER = '2';       // 换内置固件（firmware.bin/c6os.bin）时 bump
+const FW_VER = '3';       // 换内置固件（firmware.bin/c6os.bin）时 bump
 
 let wasm = null;
 let mem = null;
