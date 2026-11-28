@@ -120,6 +120,16 @@ class Ws {
 }
 
 /* ---------------- HTTP -> WebSocket ---------------- */
+/* 页面可以把上游代理/DNS 放在 WS URL 的 query 上，例如
+ *   ws://127.0.0.1:8787/?proxy=http%3A%2F%2F127.0.0.1%3A2334&dns=127.0.0.1%3A6450
+ * 这里只做最小字符校验：这个网关没有认证，不能把任意字符串拼进子进程参数。 */
+function safeProxy(v) {
+  return /^[A-Za-z0-9._~:@\[\]/%+-]+$/.test(v);
+}
+function safeDns(v) {
+  return /^[0-9A-Za-z.:\[\]]+$/.test(v);
+}
+
 const server = http.createServer((req, res) => {
   res.writeHead(426, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('WebSocket only: 用 ws:// 连接（页面里的“网络代理”输入框）\n');
@@ -128,6 +138,22 @@ const server = http.createServer((req, res) => {
 server.on('upgrade', (req, socket) => {
   const key = req.headers['sec-websocket-key'];
   if (!key) { socket.destroy(); return; }
+  let px = '', dn = '';
+  try {
+    const u = new URL(req.url, 'ws://localhost');
+    px = (u.searchParams.get('proxy') || '').trim();
+    dn = (u.searchParams.get('dns') || '').trim();
+  } catch (e) { /* 保守起见按空处理 */ }
+  if (px && !safeProxy(px)) {
+    console.error('[ws_slip_proxy] 拒绝非法的 proxy 参数: ' + px);
+    socket.destroy();
+    return;
+  }
+  if (dn && !safeDns(dn)) {
+    console.error('[ws_slip_proxy] 拒绝非法的 dns 参数: ' + dn);
+    socket.destroy();
+    return;
+  }
   const accept = crypto.createHash('sha1').update(key + GUID).digest('base64');
   socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
                'Upgrade: websocket\r\n' +
@@ -137,8 +163,11 @@ server.on('upgrade', (req, socket) => {
   const ws = new Ws(socket);
   // NETSHIM_ARGS 可给 --netshim 传调试参数（例如 --nettrace）
   const extra = (process.env.NETSHIM_ARGS || '').split(/\s+/).filter(Boolean);
+  if (px) extra.push('--proxy=' + px);
+  if (dn) extra.push('--dns=' + dn);
   const shim = spawn(SIM, ['--netshim'].concat(extra), { stdio: ['pipe', 'pipe', 'inherit'] });
-  console.error('[ws_slip_proxy] 客户端接入，启动 ' + SIM + ' --netshim');
+  console.error('[ws_slip_proxy] 客户端接入，启动 ' + SIM + ' --netshim' +
+                (px ? ' --proxy=' + px : '') + (dn ? ' --dns=' + dn : ''));
 
   ws.onmessage = (buf) => {
     if (!shim.stdin.destroyed) shim.stdin.write(buf);

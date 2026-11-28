@@ -118,9 +118,6 @@ def main():
                 buf = b""
                 state = 2
                 print("[boot_login] shell prompt seen, sent 'uname -m'", flush=True)
-            elif b"x86_64" in buf:
-                result = "pass"
-                break
             elif state == 2 and b"x86_64" in buf and b"MARK-OK" in buf:
                 os.write(proc.stdin.fileno(), b"poweroff -f\n")
                 result = "pass"

@@ -56,8 +56,17 @@ function freePort() {
     w.memory.grow(Math.ceil((need - w.memory.buffer.byteLength) / 65536));
   new Uint8Array(w.memory.buffer, STAGE, fw.length).set(fw);
 
-  const ws = new WebSocket('ws://127.0.0.1:' + PORT);
+  /* C6_TEST_PROXY / C6_TEST_DNS 会通过 WS query 传给 ws_slip_proxy.js，
+   * 再由它拼成 build/sim --netshim --proxy=... --dns=...（NAT 侧代理）。 */
+  const px = process.env.C6_TEST_PROXY || '';
+  const dn = process.env.C6_TEST_DNS || '';
+  const qs = new URLSearchParams();
+  if (px) qs.set('proxy', px);
+  if (dn) qs.set('dns', dn);
+  const wsUrl = 'ws://127.0.0.1:' + PORT + (qs.toString() ? '?' + qs.toString() : '');
+  const ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
+  if (px) console.log('[wasm-net] 上游代理 %s%s', px, dn ? '，DNS ' + dn : '');
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error('WebSocket 连接失败')); });
   let rx = 0, tx = 0;
   ws.onmessage = (ev) => {
@@ -121,6 +130,12 @@ function freePort() {
     if (!await runFor(40000, () => text.includes("'/dev/null' saved")))
       throw new Error('wget http://example.com/ 失败');
     console.log('[wasm-net] wget http://example.com/ OK（代理 rx/tx=%d/%d）', rx, tx);
+    if (px && !proxyErr.includes('--proxy=' + px))
+      throw new Error('netshim 没拿到 --proxy：' +
+                      proxyErr.split('\n').filter(Boolean).slice(-3).join(' | '));
+    if (dn && !proxyErr.includes('--dns=' + dn))
+      throw new Error('netshim 没拿到 --dns：' +
+                      proxyErr.split('\n').filter(Boolean).slice(-3).join(' | '));
     console.log('WASM NET PROXY OK');
   } finally {
     clearInterval(pump);

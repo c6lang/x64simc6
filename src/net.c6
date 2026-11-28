@@ -94,6 +94,8 @@ extern int clock_gettime(int clk, struct net_ts *ts);
 #define NET_O_NONBLOCK   0x800
 #define NET_MSG_DONTWAIT 0x40
 #define NET_POLLOUT      4
+#define NET_POLLERR      8
+#define NET_POLLIN       1
 #define NET_CLOCK_MONO   1
 
 /* ---------------- 状态 ---------------- */
@@ -102,8 +104,13 @@ struct NetConn {
     u32 used;
     u32 fd;              /* 0 = 没有 socket */
     u32 state;
-    u32 host_ok;         /* 宿主 connect 已完成 */
+    u32 host_ok;         /* 宿主 connect（含代理握手）已完成 */
     u32 connect_started; /* 代理模式：guest 第一个数据段到了才连宿主 */
+    u32 hs_state;        /* 0 未拨号 1 连代理中 2 握手中 3 就绪 */
+    u32 hs_stage;        /* 握手子阶段（见 conn_hs_*） */
+    u32 hs_len;          /* hsbuf 里已收到的握手字节数 */
+    u32 hs_used;         /* 握手成功时消费掉的字节数（其余转给 guest） */
+    u32 hs_deadline;     /* 握手超时（ms） */
     u32 host_shut;       /* 已对宿主 shutdown(SHUT_WR) */
     u32 guest_fin;       /* guest 已发 FIN */
     u32 host_eof;        /* 宿主已读到 EOF */
@@ -148,6 +155,7 @@ struct NetState {
     struct NetPing p[NET_MAX_PING];
     u8 sbuf[NET_MAX_CONN * NET_SBUF_SIZE];
     u8 wbuf[NET_MAX_CONN * NET_WBUF_SIZE];
+    u8 hsbuf[NET_MAX_CONN * 512];
     u8 seg[NET_SEG_MAX];
     u8 ip[NET_IP_MAX];
     u8 udp[NET_UDP_MAX];
@@ -158,6 +166,7 @@ struct NetState {
     u32 slip_bad;
     u32 dns[3];
     u32 dns_n;
+    u32 dns_port;        /* --dns 覆盖时可能是非 53 端口（如 hiddify 的 6450） */
     u32 ip_id;
     u32 isn;
     u32 inited;
@@ -264,6 +273,308 @@ static void n_sa(struct net_sa *sa, u32 ip, u32 port)
     sa->sa_addr = n_bswap32(ip);
     sa->sa_zero[0] = 0;
     sa->sa_zero[1] = 0;
+}
+
+/* ---------------- 上游代理（--proxy） ----------------
+ *
+ * NAT 在连宿主之前先连上游代理，并做一次握手：
+ *   http://    CONNECT ip:port HTTP/1.1（可选 Basic 认证）
+ *   socks5://  问候 +（可选）用户名密码 + CONNECT 请求
+ *   socks4://  SOCKS4a（IP 形式）
+ *   不带 scheme 的 host:port → 自动识别：先发 SOCKS5 问候，看首个回包
+ *   字节（0x05 → socks5、0x04 → socks4、'H' → http）；只探测一次，结果缓存。
+ *
+ * 地址语法：[scheme://][user[:pass]@]host[:port]
+ * 只支持 IPv4 与 localhost（NAT 侧没有 getaddrinfo）。省略端口时按协议
+ * 默认：http 8080、https 443、socks 1080。
+ */
+#define PX_NONE   0u
+#define PX_HTTP   1u
+#define PX_SOCKS4 2u
+#define PX_SOCKS5 3u
+#define PX_AUTO   4u
+
+struct NetProxyCfg {
+    u32 type;
+    u32 host;
+    u32 port;
+    u32 dns_ip;
+    u32 dns_port;
+    u32 detected;
+    char user[64];
+    char pass[64];
+};
+
+static struct NetProxyCfg g_px;
+static u32 g_px_on = 0;
+static u32 parse_ip4(const u8 *s, u32 *out_i);
+
+static u32 px_len(const char *s)
+{
+    u32 n = 0;
+    while (s[n] != 0) n++;
+    return n;
+}
+
+static char px_low(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+static int px_same(const char *a, const char *b)
+{
+    u32 i = 0;
+    while (a[i] != 0 && b[i] != 0) {
+        if (px_low(a[i]) != px_low(b[i])) return 0;
+        i++;
+    }
+    return (a[i] == 0 && b[i] == 0) ? 1 : 0;
+}
+
+static int px_has(const char *s, const char *p)
+{
+    u32 i = 0;
+    while (p[i] != 0) {
+        if (s[i] == 0 || px_low(s[i]) != px_low(p[i])) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static int px_cap(char *dst, u32 cap, const char *s, u32 n)
+{
+    u32 i = 0;
+    if (n >= cap) return 0;
+    while (i < n) {
+        dst[i] = s[i];
+        i++;
+    }
+    dst[n] = 0;
+    return 1;
+}
+
+static void px_ipstr(char *b, u32 ip)
+{
+    u32 p[4] = {0};
+    u32 i = 0;
+    u32 o = 0;
+    p[0] = (ip >> 24) & 0xffu;
+    p[1] = (ip >> 16) & 0xffu;
+    p[2] = (ip >> 8) & 0xffu;
+    p[3] = ip & 0xffu;
+    for (i = 0; i < 4; i++) {
+        u32 v = p[i];
+        if (v >= 100) {
+            b[o++] = (char)('0' + v / 100);
+            v = v % 100;
+            b[o++] = (char)('0' + v / 10);
+            b[o++] = (char)('0' + v % 10);
+        } else if (v >= 10) {
+            b[o++] = (char)('0' + v / 10);
+            b[o++] = (char)('0' + v % 10);
+        } else {
+            b[o++] = (char)('0' + v);
+        }
+        if (i < 3) b[o++] = '.';
+    }
+    b[o] = 0;
+}
+
+static const char *px_type_name(u32 t)
+{
+    if (t == PX_HTTP) return "http";
+    if (t == PX_SOCKS4) return "socks4";
+    if (t == PX_SOCKS5) return "socks5";
+    if (t == PX_AUTO) return "auto";
+    return "direct";
+}
+
+/* "192.168.68.103:2334" / "localhost:2334"，省略端口用 defport */
+static int px_ep(const char *s, u32 *ip, u32 *port, u32 defport)
+{
+    u32 i = 0;
+    u32 v = 0;
+    u32 nd = 0;
+    if (px_has(s, "localhost")) {
+        char c = s[9];
+        if (!(c == 0 || c == ':')) return 0;
+        *ip = 0x7f000001u;
+        i = 9;
+    } else {
+        u32 a = parse_ip4((const u8 *)s, &i);
+        if (a == 0) return 0;
+        *ip = a;
+    }
+    if (s[i] == ':') {
+        i++;
+        while (s[i] >= '0' && s[i] <= '9') {
+            v = v * 10 + (u32)(s[i] - '0');
+            i++;
+            nd++;
+            if (nd > 5 || v > 65535u) return 0;
+        }
+        if (nd == 0 || v == 0) return 0;
+        *port = v;
+    } else {
+        *port = defport;
+    }
+    return (s[i] == 0) ? 1 : 0;
+}
+
+/* --proxy 的入口：成功返回 1。空串 / none / direct 表示关掉代理。 */
+int net_set_proxy(const char *url)
+{
+    const char *p = url;
+    u32 i = 0;
+    u32 j = 0;
+    u32 type = PX_AUTO;
+    u32 defport = 1080;
+    u32 host = 0;
+    u32 port = 0;
+    u32 ulen = 0;
+    char sch[12] = {0};
+    char ipbuf[20] = {0};
+    if (url == 0) return 0;
+    if (url[0] == 0 || px_same(url, "none") || px_same(url, "direct")) {
+        g_px_on = 0;
+        g_px.type = PX_NONE;
+        return 1;
+    }
+    /* scheme:// */
+    while (url[i] != 0 && !(url[i] == ':' && url[i + 1] == '/' && url[i + 2] == '/'))
+        i++;
+    if (url[i] != 0) {
+        if (i >= (u32)sizeof(sch)) return 0;
+        for (j = 0; j < i; j++) sch[j] = url[j];
+        sch[i] = 0;
+        if (px_same(sch, "http")) {
+            type = PX_HTTP;
+            defport = 8080;
+        } else if (px_same(sch, "https")) {
+            type = PX_HTTP;
+            defport = 443;
+        } else if (px_same(sch, "socks5") || px_same(sch, "socks5h") ||
+                   px_same(sch, "socks")) {
+            type = PX_SOCKS5;
+            defport = 1080;
+        } else if (px_same(sch, "socks4") || px_same(sch, "socks4a")) {
+            type = PX_SOCKS4;
+            defport = 1080;
+        } else if (px_same(sch, "auto")) {
+            type = PX_AUTO;
+            defport = 1080;
+        } else {
+            return 0;
+        }
+        p = url + i + 3;
+    }
+    /* user[:pass]@ */
+    while (p[ulen] != 0 && p[ulen] != '@') ulen++;
+    if (p[ulen] == '@') {
+        u32 cut = ulen;
+        u32 colon = 0;
+        for (j = 0; j < ulen; j++) {
+            if (p[j] == ':') {
+                colon = 1;
+                cut = j;
+                break;
+            }
+        }
+        if (!px_cap(g_px.user, 64, p, cut)) return 0;
+        if (colon) {
+            if (!px_cap(g_px.pass, 64, p + cut + 1, ulen - cut - 1)) return 0;
+        } else {
+            g_px.pass[0] = 0;
+        }
+        p = p + ulen + 1;
+    } else {
+        g_px.user[0] = 0;
+        g_px.pass[0] = 0;
+    }
+    if (p[0] == 0) return 0;
+    /* 没写协议又没写端口 → 不知道用哪个默认端口，直接报错 */
+    if (url[i] == 0) {
+        u32 k = 0;
+        u32 has_port = 0;
+        while (p[k] != 0) {
+            if (p[k] == ':') has_port = 1;
+            k++;
+        }
+        if (!has_port) return 0;
+    }
+    if (!px_ep(p, &host, &port, defport)) return 0;
+    g_px.host = host;
+    g_px.port = port;
+    g_px.type = type;
+    g_px.detected = (type == PX_AUTO) ? 0u : 1u;
+    px_ipstr(ipbuf, host);
+    fprintf(stderr, "[c6sim] 上游代理 %s://%s:%u%s%s\n", px_type_name(type),
+            ipbuf, (unsigned)port, g_px.user[0] ? "（带认证）" : "",
+            (type == PX_AUTO) ? "，首次连接时自动识别协议" : "");
+    g_px_on = 1;
+    return 1;
+}
+
+/* --dns=ip[:port]：覆盖 /etc/resolv.conf 里的解析器（端口可非 53） */
+int net_set_dns(const char *spec)
+{
+    u32 ip = 0;
+    u32 port = 0;
+    char ipbuf[20] = {0};
+    if (spec == 0 || spec[0] == 0) {
+        g_px.dns_ip = 0;
+        g_px.dns_port = 0;
+        return 1;
+    }
+    if (!px_ep(spec, &ip, &port, 53)) return 0;
+    g_px.dns_ip = ip;
+    g_px.dns_port = port;
+    px_ipstr(ipbuf, ip);
+    fprintf(stderr, "[c6sim] DNS 覆盖 %s:%u\n", ipbuf, (unsigned)port);
+    return 1;
+}
+
+/* 自动识别协议：发一次 SOCKS5 问候，用首个回包字节区分。 */
+static u32 px_detect(void)
+{
+    struct net_sa sa = {0};
+    struct net_pollfd p = {0};
+    u8 b[8] = {0};
+    u8 g[3] = {0};
+    int fd = 0;
+    int err = 0;
+    unsigned int elen = 4;
+    u32 t = PX_HTTP;
+    fd = socket(NET_AF_INET, NET_SOCK_STREAM, 0);
+    if (fd < 0) return PX_HTTP;
+    fcntl(fd, NET_F_SETFL, NET_O_NONBLOCK);
+    n_sa(&sa, g_px.host, g_px.port);
+    connect(fd, &sa, (unsigned int)sizeof(sa));
+    p.fd = fd;
+    p.events = NET_POLLOUT;
+    p.revents = 0;
+    if (poll(&p, 1, 800) <= 0 ||
+        getsockopt(fd, NET_SOL_SOCKET, NET_SO_ERROR, &err, &elen) != 0 ||
+        err != 0) {
+        close(fd);
+        return PX_HTTP;
+    }
+    g[0] = 0x05;
+    g[1] = 0x01;
+    g[2] = 0x00;
+    send(fd, g, 3, NET_MSG_DONTWAIT);
+    p.events = 1;   /* POLLIN */
+    p.revents = 0;
+    if (poll(&p, 1, 500) > 0 && (p.revents & 1)) {
+        long n = recv(fd, b, 8, NET_MSG_DONTWAIT);
+        if (n >= 1) {
+            if (b[0] == 0x05) t = PX_SOCKS5;
+            else if (b[0] == 0x04) t = PX_SOCKS4;
+            else t = PX_HTTP;
+        }
+    }
+    close(fd);
+    return t;
 }
 
 /* ---------------- 校验和 ---------------- */
@@ -500,6 +811,11 @@ static u8 *conn_wbuf(struct NetConn *c)
     return g_ns.wbuf + (u32)(c - &g_ns.c[0]) * NET_WBUF_SIZE;
 }
 
+static u8 *conn_hsbuf(struct NetConn *c)
+{
+    return g_ns.hsbuf + (u32)(c - &g_ns.c[0]) * 512u;
+}
+
 static void conn_slide(struct NetConn *c, u32 acked)
 {
     u8 *b = conn_sbuf(c);
@@ -560,13 +876,328 @@ static void conn_pump(struct NetConn *c)
     }
 }
 
+/* ---------------- 上游代理握手 ---------------- */
+
+static char px_b64c(u32 v)
+{
+    if (v < 26) return (char)('A' + v);
+    if (v < 52) return (char)('a' + (v - 26));
+    if (v < 62) return (char)('0' + (v - 52));
+    return (v == 62) ? '+' : '/';
+}
+
+static u32 px_b64(u8 *out, const u8 *in, u32 n)
+{
+    u32 i = 0;
+    u32 o = 0;
+    u32 v = 0;
+    u32 k = 0;
+    while (i < n) {
+        v = (v << 8) | (u32)in[i];
+        i++;
+        k++;
+        if (k == 3) {
+            out[o++] = (u8)px_b64c((v >> 18) & 63u);
+            out[o++] = (u8)px_b64c((v >> 12) & 63u);
+            out[o++] = (u8)px_b64c((v >> 6) & 63u);
+            out[o++] = (u8)px_b64c(v & 63u);
+            v = 0;
+            k = 0;
+        }
+    }
+    if (k == 1) {
+        v = v << 16;
+        out[o++] = (u8)px_b64c((v >> 18) & 63u);
+        out[o++] = (u8)px_b64c((v >> 12) & 63u);
+        out[o++] = '=';
+        out[o++] = '=';
+    } else if (k == 2) {
+        v = v << 8;
+        out[o++] = (u8)px_b64c((v >> 18) & 63u);
+        out[o++] = (u8)px_b64c((v >> 12) & 63u);
+        out[o++] = (u8)px_b64c((v >> 6) & 63u);
+        out[o++] = '=';
+    }
+    return o;
+}
+
+/* 非阻塞 fd 上尽力写完一小段（connect 已完成、量很小） */
+static long px_send(int fd, const u8 *b, u32 n)
+{
+    u32 off = 0;
+    while (off < n) {
+        long r = send(fd, b + off, (unsigned long)(n - off), NET_MSG_DONTWAIT);
+        if (r > 0) {
+            off += (u32)r;
+            continue;
+        }
+        return -1;
+    }
+    return (long)n;
+}
+
+static u32 px_put(u8 *b, u32 o, const char *s)
+{
+    u32 i = 0;
+    while (s[i] != 0) {
+        b[o++] = (u8)s[i];
+        i++;
+    }
+    return o;
+}
+
+static u32 px_put_ip(u8 *b, u32 o, u32 ip)
+{
+    char t[20] = {0};
+    u32 i = 0;
+    px_ipstr(t, ip);
+    while (t[i] != 0) {
+        b[o++] = (u8)t[i];
+        i++;
+    }
+    return o;
+}
+
+static u32 px_put_dec(u8 *b, u32 o, u32 v)
+{
+    char t[12] = {0};
+    u32 n = 0;
+    if (v == 0) {
+        b[o++] = '0';
+        return o;
+    }
+    while (v > 0 && n < 12) {
+        t[n] = (char)('0' + (v % 10));
+        v = v / 10;
+        n++;
+    }
+    while (n > 0) {
+        n--;
+        b[o++] = (u8)t[n];
+    }
+    return o;
+}
+
+static u32 px_put_be16(u8 *b, u32 o, u32 v)
+{
+    b[o++] = (u8)((v >> 8) & 0xffu);
+    b[o++] = (u8)(v & 0xffu);
+    return o;
+}
+
+static u32 px_put_ip4be(u8 *b, u32 o, u32 ip)
+{
+    b[o++] = (u8)((ip >> 24) & 0xffu);
+    b[o++] = (u8)((ip >> 16) & 0xffu);
+    b[o++] = (u8)((ip >> 8) & 0xffu);
+    b[o++] = (u8)(ip & 0xffu);
+    return o;
+}
+
+static int conn_hs_socks5_auth(struct NetConn *c)
+{
+    u8 req[200] = {0};
+    u32 n = 0;
+    u32 i = 0;
+    u32 ul = px_len(g_px.user);
+    u32 pl = px_len(g_px.pass);
+    if (ul > 255 || pl > 255) return -1;
+    req[n++] = 0x01;
+    req[n++] = (u8)ul;
+    for (i = 0; i < ul; i++) req[n++] = (u8)g_px.user[i];
+    req[n++] = (u8)pl;
+    for (i = 0; i < pl; i++) req[n++] = (u8)g_px.pass[i];
+    if (px_send((int)c->fd, req, n) < 0) return -1;
+    c->hs_stage = 21;
+    c->hs_len = 0;
+    return 0;
+}
+
+static int conn_hs_socks5_connect(struct NetConn *c)
+{
+    u8 req[16] = {0};
+    u32 n = 0;
+    u32 dst = n_host_ip(c->rip);
+    req[n++] = 0x05;
+    req[n++] = 0x01;   /* CONNECT */
+    req[n++] = 0x00;
+    req[n++] = 0x01;   /* IPv4 */
+    n = px_put_ip4be(req, n, dst);
+    n = px_put_be16(req, n, c->rport);
+    if (px_send((int)c->fd, req, n) < 0) return -1;
+    c->hs_stage = 22;
+    c->hs_len = 0;
+    return 0;
+}
+
+/* 握手第一包：按 g_px.type 发 CONNECT / 问候 / SOCKS4 请求 */
+static int conn_hs_send(struct NetConn *c)
+{
+    u8 req[512] = {0};
+    u32 n = 0;
+    u32 i = 0;
+    if (g_px.type == PX_HTTP) {
+        u32 dst = n_host_ip(c->rip);
+        n = px_put(req, n, "CONNECT ");
+        n = px_put_ip(req, n, dst);
+        req[n++] = ':';
+        n = px_put_dec(req, n, c->rport);
+        n = px_put(req, n, " HTTP/1.1\r\nHost: ");
+        n = px_put_ip(req, n, dst);
+        req[n++] = ':';
+        n = px_put_dec(req, n, c->rport);
+        n = px_put(req, n, "\r\nProxy-Connection: Keep-Alive\r\n");
+        if (g_px.user[0] != 0) {
+            u8 cred[136] = {0};
+            u8 b64[200] = {0};
+            u32 cl = 0;
+            u32 bl = 0;
+            i = 0;
+            while (g_px.user[i] != 0) {
+                cred[cl++] = (u8)g_px.user[i];
+                i++;
+            }
+            cred[cl++] = ':';
+            i = 0;
+            while (g_px.pass[i] != 0) {
+                cred[cl++] = (u8)g_px.pass[i];
+                i++;
+            }
+            bl = px_b64(b64, cred, cl);
+            n = px_put(req, n, "Proxy-Authorization: Basic ");
+            for (i = 0; i < bl; i++) req[n++] = b64[i];
+            n = px_put(req, n, "\r\n");
+        }
+        n = px_put(req, n, "\r\n");
+        c->hs_stage = 10;
+    } else if (g_px.type == PX_SOCKS4) {
+        u32 dst = n_host_ip(c->rip);
+        req[n++] = 0x04;
+        req[n++] = 0x01;
+        n = px_put_be16(req, n, c->rport);
+        n = px_put_ip4be(req, n, dst);
+        i = 0;
+        while (g_px.user[i] != 0 && n < 500) {
+            req[n++] = (u8)g_px.user[i];
+            i++;
+        }
+        req[n++] = 0;
+        c->hs_stage = 30;
+    } else {
+        /* SOCKS5 问候：无认证 +（有用户名时）用户名密码 */
+        req[n++] = 0x05;
+        if (g_px.user[0] != 0) {
+            req[n++] = 0x02;
+            req[n++] = 0x00;
+            req[n++] = 0x02;
+        } else {
+            req[n++] = 0x01;
+            req[n++] = 0x00;
+        }
+        c->hs_stage = 20;
+    }
+    if (px_send((int)c->fd, req, n) < 0) return -1;
+    c->hs_len = 0;
+    c->hs_used = 0;
+    return 0;
+}
+
+/* 返回 1 完成、0 还要更多字节、-1 失败 */
+static int conn_hs_parse(struct NetConn *c)
+{
+    u8 *b = conn_hsbuf(c);
+    u32 n = c->hs_len;
+    if (c->hs_stage == 10) {          /* HTTP 响应头 */
+        u32 i = 0;
+        u32 end = 0;
+        for (i = 0; i + 3 < n; i++) {
+            if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' &&
+                b[i + 3] == '\n') {
+                end = i + 4;
+                break;
+            }
+        }
+        if (end == 0) return (n >= 480) ? -1 : 0;
+        if (n < 12) return -1;
+        if (!(b[0] == 'H' && b[1] == 'T' && b[2] == 'T' && b[3] == 'P')) return -1;
+        if (!(b[9] == '2' && b[10] == '0' && b[11] == '0')) return -1;
+        c->hs_used = end;
+        return 1;
+    }
+    if (c->hs_stage == 20) {          /* SOCKS5 方法选择 */
+        if (n < 2) return 0;
+        if (b[0] != 0x05) return -1;
+        if (b[1] == 0x00) return (conn_hs_socks5_connect(c) < 0) ? -1 : 0;
+        if (b[1] == 0x02) return (conn_hs_socks5_auth(c) < 0) ? -1 : 0;
+        return -1;
+    }
+    if (c->hs_stage == 21) {          /* SOCKS5 用户名密码应答 */
+        if (n < 2) return 0;
+        if (b[0] != 0x01 || b[1] != 0x00) return -1;
+        return (conn_hs_socks5_connect(c) < 0) ? -1 : 0;
+    }
+    if (c->hs_stage == 22) {          /* SOCKS5 CONNECT 应答 */
+        u32 need = 0;
+        if (n < 5) return 0;
+        if (b[0] != 0x05 || b[1] != 0x00) return -1;
+        if (b[3] == 0x01) need = 4 + 4 + 2;
+        else if (b[3] == 0x03) need = 4 + 1 + (u32)b[4] + 2;
+        else if (b[3] == 0x04) need = 4 + 16 + 2;
+        else return -1;
+        if (n < need) return 0;
+        c->hs_used = need;
+        return 1;
+    }
+    if (c->hs_stage == 30) {          /* SOCKS4 应答 8 字节 */
+        if (n < 8) return 0;
+        if (b[1] != 0x5a) return -1;
+        c->hs_used = 8;
+        return 1;
+    }
+    return -1;
+}
+
+static void conn_hs_fail(struct NetConn *c)
+{
+    c->state = NET_CS_CLOSE;
+    conn_rst(c);
+}
+
+/* 拨号：有 --proxy 就连代理（auto 时先探测协议），否则直连 */
+static void conn_start_dial(struct NetConn *c)
+{
+    struct net_sa sa = {0};
+    if (c->fd == 0) return;
+    if (g_px_on) {
+        if (g_px.type == PX_AUTO) {
+            u32 t = px_detect();
+            char ipbuf[20] = {0};
+            px_ipstr(ipbuf, g_px.host);
+            fprintf(stderr, "[c6sim] 代理协议自动识别：%s（%s:%u）\n",
+                    px_type_name(t), ipbuf, (unsigned)g_px.port);
+            g_px.type = t;
+            g_px.detected = 1;
+        }
+        n_sa(&sa, g_px.host, g_px.port);
+    } else {
+        n_sa(&sa, n_host_ip(c->rip), c->rport);
+    }
+    connect((int)c->fd, &sa, (unsigned int)sizeof(sa));
+    c->connect_started = 1;
+    c->hs_state = 1;
+    c->hs_stage = 0;
+    c->hs_len = 0;
+    c->hs_used = 0;
+    c->hs_deadline = n_now_ms() + 12000u;
+    c->last_rx_ms = n_now_ms();
+}
+
 /* ---------------- 连接建立 ---------------- */
 
 static void conn_open(u32 rip, u32 rport, u32 gip, u32 gport,
                       u32 guest_seq, u32 mss)
 {
     struct NetConn *c = conn_alloc();
-    struct net_sa sa = {0};
     int fd = 0;
     if (c == 0) return;
     c->rip = rip;
@@ -589,24 +1220,24 @@ static void conn_open(u32 rip, u32 rport, u32 gip, u32 gport,
     c->fd = (u32)fd;
 #if !defined(C6_WASM)
     if (g_net_shim) {
-        /* WebSocket 代理模式：等 guest 的第一个数据段再连宿主。guest 的
+        /* WebSocket 代理模式：等 guest 的第一个数据段再连宿主/代理。guest 的
          * TLS/CRNG 首次可能慢到 30s+，先连会被服务器的握手超时踢掉；
          * HTTP/HTTPS 都是客户端先说话，这个延迟没有副作用。 */
         c->connect_started = 0;
     } else
 #endif
     {
-        n_sa(&sa, n_host_ip(rip), rport);
-        connect(fd, &sa, (unsigned int)sizeof(sa));
-        c->connect_started = 1;
+        conn_start_dial(c);
     }
     tcp_synack(c);
 }
 
 static void conn_check_host(struct NetConn *c)
 {
-    if (c->host_ok || c->fd == 0 || !c->connect_started) return;
-    {
+    u32 now = 0;
+    if (c->fd == 0 || !c->connect_started || c->host_ok) return;
+    now = n_now_ms();
+    if (c->hs_state == 1) {
         struct net_pollfd p = {0};
         int rc = 0;
         int err = 0;
@@ -615,20 +1246,79 @@ static void conn_check_host(struct NetConn *c)
         p.events = NET_POLLOUT;
         p.revents = 0;
         rc = poll(&p, 1, 0);
-        if (rc > 0 && (p.revents & NET_POLLOUT)) {
-            if (getsockopt((int)c->fd, NET_SOL_SOCKET, NET_SO_ERROR,
-                           &err, &elen) == 0 && err == 0) {
-                c->host_ok = 1;
-                c->last_ack_ms = n_now_ms();
-            } else {
-                if (NT_ON) {
-                    g_nt_n = g_nt_n + 1;
-                    printf("[NT] hostfail rc=%d ev=%x err=%d\n",
-                           rc, (unsigned)p.revents, err);
-                }
-                c->state = NET_CS_CLOSE;
-                conn_rst(c);
+        if (rc <= 0 || !(p.revents & (NET_POLLOUT | NET_POLLERR))) return;
+        if (!(getsockopt((int)c->fd, NET_SOL_SOCKET, NET_SO_ERROR, &err,
+                         &elen) == 0 &&
+              err == 0)) {
+            if (NT_ON) {
+                g_nt_n = g_nt_n + 1;
+                printf("[NT] hostfail rc=%d ev=%x err=%d\n", rc,
+                       (unsigned)p.revents, err);
             }
+            conn_hs_fail(c);
+            return;
+        }
+        if (!g_px_on) {
+            c->host_ok = 1;
+            c->hs_state = 3;
+            c->last_ack_ms = now;
+            return;
+        }
+        c->hs_state = 2;
+        c->hs_stage = 0;
+        c->hs_len = 0;
+        c->hs_used = 0;
+    }
+    if (c->hs_state == 2) {
+        u8 *hb = conn_hsbuf(c);
+        for (;;) {
+            int r = 0;
+            long m = 0;
+            if (c->hs_stage == 0) {
+                if (conn_hs_send(c) < 0) {
+                    conn_hs_fail(c);
+                    return;
+                }
+            }
+            r = conn_hs_parse(c);
+            if (r < 0) {
+                fprintf(stderr, "[c6sim] 上游代理握手失败（%s）\n",
+                        px_type_name(g_px.type));
+                conn_hs_fail(c);
+                return;
+            }
+            if (r > 0) {
+                /* 握手成功；多读到的字节属于隧道数据，转给 guest */
+                u32 left = c->hs_len - c->hs_used;
+                if (left > 0) {
+                    u32 room = NET_SBUF_SIZE - c->sbuf_len;
+                    if (left > room) left = room;
+                    n_copy(conn_sbuf(c) + c->sbuf_len, hb + c->hs_used, left);
+                    c->sbuf_len += left;
+                }
+                c->hs_len = 0;
+                c->host_ok = 1;
+                c->hs_state = 3;
+                c->last_ack_ms = now;
+                return;
+            }
+            if (c->hs_len >= 480) {
+                conn_hs_fail(c);
+                return;
+            }
+            m = recv((int)c->fd, hb + c->hs_len,
+                     (unsigned long)(480 - c->hs_len), NET_MSG_DONTWAIT);
+            if (m > 0) {
+                c->hs_len += (u32)m;
+                continue;
+            }
+            if (m == 0) {
+                fprintf(stderr, "[c6sim] 上游代理握手中被关闭（%s）\n",
+                        px_type_name(g_px.type));
+                conn_hs_fail(c);
+                return;
+            }
+            return;
         }
     }
 }
@@ -751,11 +1441,8 @@ static void tcp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
     }
 #if !defined(C6_WASM)
     if (g_net_shim && dlen > 0 && !c->connect_started && c->fd != 0) {
-        struct net_sa sa = {0};
-        n_sa(&sa, n_host_ip(c->rip), c->rport);
-        connect((int)c->fd, &sa, (unsigned int)sizeof(sa));
-        c->connect_started = 1;
-        c->last_rx_ms = n_now_ms();
+        conn_start_dial(c);
+        if (!c->used) return;
     }
 #endif
     if (dlen > 0) {
@@ -877,7 +1564,7 @@ static void udp_input(u32 src, u32 dst, const u8 *p, u32 off, u32 plen)
     if (dst == NET_DNS_IP && dport == 53) {
         if (g_ns.dns_n == 0) return;
         fwd_ip = g_ns.dns[0];
-        fwd_port = 53;
+        fwd_port = (g_ns.dns_port != 0) ? g_ns.dns_port : 53u;
     }
     if (NT_ON) {
         g_nt_n = g_nt_n + 1;
@@ -1133,6 +1820,14 @@ static void net_load_dns(void)
     long n = 0;
     u32 i = 0;
     g_ns.dns_n = 0;
+    g_ns.dns_port = 53;
+    if (g_px.dns_ip != 0) {
+        /* --dns 覆盖（例如 hiddify 的 127.0.0.1:6450）：不再读 resolv.conf */
+        g_ns.dns[0] = g_px.dns_ip;
+        g_ns.dns_n = 1;
+        g_ns.dns_port = (g_px.dns_port != 0) ? g_px.dns_port : 53u;
+        return;
+    }
     fd = open("/etc/resolv.conf", 0, 0);
     if (fd >= 0) {
         n = read(fd, buf, 1023);
@@ -1185,6 +1880,8 @@ static void net_poll_conns(void)
         if (!c->host_ok && c->state != NET_CS_SYN) {
             /* 连接还在建立中；代理模式在 guest 首包之前不设超时 */
             if (c->connect_started && (u32)(now - c->last_rx_ms) > 20000u)
+                conn_rst(c);
+            else if (c->hs_state == 2 && (u32)(now - c->hs_deadline) < 0x80000000u)
                 conn_rst(c);
             continue;
         }
