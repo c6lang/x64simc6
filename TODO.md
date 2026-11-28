@@ -237,6 +237,8 @@
       （DESIGN §97）
 - [x] wasm 空闲快进按墙钟节流：`sim_set_host_ms` + `pace_ahead` 对 wasm
       生效，修 `ping bing.com` 的 `bad address`、ping 回复一阵一阵（DESIGN §102）
+- [x] 交互/wasm 按实测指令速率校准 TSC 分频（`pace_calibrate`），guest
+      时间≈墙钟；修 `top` 刷新间隔被拉长（默认 5s 间隔、`-d 1` 约 1s，DESIGN §102）
 - [x] `10.0.2.2` 映射到宿主 `127.0.0.1`：guest 可访问宿主上的 HTTP 代理
       （`export http_proxy=http://10.0.2.2:3128`，`wget http://…` 实测通过；
       HTTPS 需代理支持 busybox 的 `GET https://…` 形式）

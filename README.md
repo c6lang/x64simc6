@@ -62,7 +62,9 @@ guest。`tests/browser_tty_login.js` 会从页面点「加载固件」「启动�
 
 wasm 的空闲快进也按墙钟节流（页面每帧把宿主毫秒传给 `sim_set_host_ms`）；
 否则 guest 钟在等待网络时会跑快，`ping bing.com` 的解析器超时提前到、
-报 `bad address`，ping 的回复也会一阵一阵地出（DESIGN §102）。
+报 `bad address`，ping 的回复也会一阵一阵地出（DESIGN §102）。交互/wasm
+模式还会按实测指令速率校准 TSC 分频，让 guest 时间≈墙钟——`top` 默认
+5s 的刷新间隔不会被拉长成“看起来不刷新”。
 
 要注意的两点（也是“点了没反应”的常见原因）：
 

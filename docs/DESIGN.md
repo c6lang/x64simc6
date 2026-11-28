@@ -2114,6 +2114,15 @@ int   sim_hostfs_get(const char *name, u8 *dst, u32 cap);
      浏览器 e2e/页面登录不受影响。改动：`src/machine.c6`、`src/wasm.c6`、
      `web/app.js`、`tools/wasm_tty.js`。
 
+     **补充：top 看起来“不刷新”**。固定 1/17 是按 ~20M 条/秒调的；
+     pty/终端模拟实测只有 ~10M 条/秒，guest 钟只有墙钟的一半，busybox
+     top 默认 5s 的刷新间隔被拉成 ~8s。修法：交互/wasm 模式下
+     `pace_calibrate()` 用前 150ms 实测指令速率，把 `g_tsc_div` 校准成
+     `rate/1.19M`（限 4~64）；空闲快进在 paced 模式下也按
+     `step/g_tsc_div` 推进 TSC（原来 1:1）。批处理/对拍
+     （`g_pace_idle=0`）保持 1/17 + 1:1 快进，吞吐和结果不变。
+     验证：默认 `top` 25s 5 帧（5s 间隔），`top -d 1` 12s 10 帧。
+
 103. **启动日志清零：PCI 配置空间读回与 inittab 的 openrc 三连**。标准固件的
      串口日志一直是下面 4 行（后面才是 `login:`），看起来像启动失败：
 

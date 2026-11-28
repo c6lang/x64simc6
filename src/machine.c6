@@ -28,6 +28,10 @@ static u64 pace_wall_ns(void)
 #endif
 
 static u32 g_tsc_acc = 0;      /* TSC 分频累加器 */
+static u32 g_tsc_div = 17;     /* 每多少条指令走 1 个 TSC；交互模式按实测速率校准 */
+static u32 g_calib = 0;
+static u64 g_calib_w = 0;
+static u64 g_calib_i = 0;
 static u64 g_pace_w0 = 0;      /* 墙钟基准（ns） */
 static u64 g_pace_t0 = 0;      /* 对应时刻的 TSC */
 
@@ -151,6 +155,11 @@ void machine_init(void)
 #else
     g_pace_idle = 1;           /* 宿主毫秒由 sim_set_host_ms() 提供 */
 #endif
+    if (g_pace_idle) {
+        g_calib = 1;
+        g_calib_w = pace_wall_ns();
+        g_calib_i = g_m.instructions;
+    }
     machine_reset();
 }
 
@@ -222,7 +231,13 @@ static int machine_step_loop(u64 count)
                     if (want > step) step = want;
                 }
                 if (step > 0) {
-                    g_m.tsc += step;
+                    if (g_pace_idle) {
+                        g_tsc_acc = g_tsc_acc + (u32)step;
+                        g_m.tsc += (u64)(g_tsc_acc / g_tsc_div);
+                        g_tsc_acc = g_tsc_acc % g_tsc_div;
+                    } else {
+                        g_m.tsc += step;
+                    }
                     g_m.instructions += step;
                 }
             }
@@ -283,7 +298,7 @@ static int machine_step_loop(u64 count)
          * 17:1 之后忙时 guest 时间和墙钟一致，配和上面的空闲节流，
          * 空闲时也不跑快。 */
         g_tsc_acc++;
-        if (g_tsc_acc >= 17) {
+        if (g_tsc_acc >= g_tsc_div) {
             g_tsc_acc = 0;
             g_m.tsc++;
         }
@@ -500,7 +515,41 @@ static int machine_step_loop(u64 count)
     return g_m.halted ? 0 : 1;
 }
 
+/* 交互/wasm 下按实测指令速率校准 TSC 分频：guest 时间 ≈ 墙钟。
+ * 固定 1/17 是按 ~20M 条/秒调的；pty/终端模拟只有 ~10M 条/秒，
+ * guest 钟会慢一半，top 的刷新间隔被拉长到“看起来不刷新”。 */
+static void pace_calibrate(void)
+{
+    u64 w = 0;
+    u64 dt = 0;
+    u64 di = 0;
+    u64 div = 0;
+    if (!g_calib)
+        return;
+    w = pace_wall_ns();
+    if (w == 0)
+        return;
+    if (g_calib_w == 0) {
+        g_calib_w = w;
+        g_calib_i = g_m.instructions;
+        return;
+    }
+    dt = w - g_calib_w;
+    if (dt < 150000000ull)
+        return;
+    di = g_m.instructions - g_calib_i;
+    g_calib = 0;
+    if (di == 0)
+        return;
+    div = di * 1000000000ull / dt / 1190000ull;
+    if (div < 4ull) div = 4ull;
+    if (div > 64ull) div = 64ull;
+    g_tsc_div = (u32)div;
+}
+
 int machine_run(u64 count)
 {
-    return machine_step_loop(count);
+    int rc = machine_step_loop(count);
+    pace_calibrate();
+    return rc;
 }
